@@ -1,0 +1,557 @@
+// SEO OS — P0 data model
+// Phase: P0 (Foundation + Intelligent Onboarding). See docs/P0_SPEC.md.
+//
+// Invariants encoded here:
+//   Organization -> Workspace -> Website. Every tenant-owned row resolves to an Organization.
+//   Unknown business facts stay NULL. No defaults that would fabricate a fact.
+//   Approved BusinessContextVersion rows are immutable (trigger applied in the migration).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  OWNER
+  ADMIN
+  SEO_LEAD
+  MEMBER
+  VIEWER
+}
+
+enum MembershipStatus {
+  INVITED
+  ACTIVE
+  SUSPENDED
+  REVOKED
+}
+
+enum TenantStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum WebsiteType {
+  MARKETING_SITE
+  ECOMMERCE
+  SAAS_PRODUCT
+  PUBLISHER
+  MARKETPLACE
+  LOCAL_BUSINESS
+  OTHER
+  UNKNOWN
+}
+
+enum CmsType {
+  WORDPRESS
+  HUBSPOT_CMS
+  WEBFLOW
+  SHOPIFY
+  DRUPAL
+  CUSTOM
+  OTHER
+  UNKNOWN
+}
+
+enum VerificationStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  FAILED
+}
+
+enum OnboardingStatus {
+  IN_PROGRESS
+  REVIEW
+  COMPLETED
+  ABANDONED
+}
+
+enum ContextStatus {
+  DRAFT
+  IN_REVIEW
+  APPROVED
+  ARCHIVED
+}
+
+enum GoalStatus {
+  DRAFT
+  ACTIVE
+  MET
+  MISSED
+  RETIRED
+}
+
+enum ApprovalStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+  ARCHIVED
+}
+
+enum CompetitorType {
+  DIRECT
+  ADJACENT
+  SEARCH
+  PUBLISHER
+  AGGREGATOR
+  UNKNOWN
+}
+
+enum SeoRuleSeverity {
+  INFO
+  WARNING
+  BLOCKING
+}
+
+/// Provenance vocabulary (CLAUDE.md). P0 only ever writes USER_PROVIDED or UNKNOWN;
+/// nothing in P0 infers a business fact. INFERRED never becomes canonical without
+/// human confirmation.
+enum Provenance {
+  USER_PROVIDED
+  SYSTEM_DERIVED
+  INFERRED
+  UNKNOWN
+}
+
+enum ConnectionProvider {
+  GOOGLE_SEARCH_CONSOLE
+  GOOGLE_ANALYTICS
+  HUBSPOT
+  SEMRUSH
+  SIMILARWEB
+  SCREAMING_FROG
+  WORDPRESS
+}
+
+enum ConnectionStatus {
+  NOT_CONNECTED
+  CONNECTING
+  CONNECTED
+  ERROR
+  REAUTH_REQUIRED
+  DISABLED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  ARCHIVE
+  APPROVE
+  REJECT
+  RETIRE
+  COMPLETE
+  SIGN_IN
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+/// Internal SEO OS user. Keyed to Supabase auth.users.id via authUserId.
+/// Deliberately NOT keyed on email: email is a mutable attribute, and matching
+/// on it (or on its domain) must never be a path to tenant access.
+model User {
+  id          String    @id @default(uuid()) @db.Uuid
+  authUserId  String    @unique @map("auth_user_id") @db.Uuid
+  email       String    @unique
+  displayName String?   @map("display_name")
+  avatarUrl   String?   @map("avatar_url")
+  lastLoginAt DateTime? @map("last_login_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  memberships        OrganizationMembership[] @relation("MembershipUser")
+  invitedMemberships OrganizationMembership[] @relation("MembershipInviter")
+  onboardingSessions OnboardingSession[]
+  ownedGoals         BusinessGoal[]
+  ownedFacts         BrandFact[]
+  ownedRules         SeoRule[]
+  ownedTechContexts  TechnicalContext[]
+  ownedContexts      BusinessContextVersion[] @relation("ContextOwner")
+  createdContexts    BusinessContextVersion[] @relation("ContextCreator")
+  approvedContexts   BusinessContextVersion[] @relation("ContextApprover")
+  auditEvents        AuditEvent[]
+
+  @@map("user")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy: Organization -> Workspace -> Website
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id         String       @id @default(uuid()) @db.Uuid
+  name       String
+  slug       String       @unique
+  status     TenantStatus @default(ACTIVE)
+  createdAt  DateTime     @default(now()) @map("created_at")
+  updatedAt  DateTime     @updatedAt @map("updated_at")
+  archivedAt DateTime?    @map("archived_at")
+
+  memberships        OrganizationMembership[]
+  workspaces         Workspace[]
+  onboardingSessions OnboardingSession[]
+  auditEvents        AuditEvent[]
+
+  @@map("organization")
+}
+
+/// The sole source of authorization. Google authentication proves identity;
+/// this row is what grants access to a tenant.
+model OrganizationMembership {
+  id              String           @id @default(uuid()) @db.Uuid
+  organizationId  String           @map("organization_id") @db.Uuid
+  userId          String           @map("user_id") @db.Uuid
+  role            Role
+  status          MembershipStatus @default(ACTIVE)
+  invitedByUserId String?          @map("invited_by_user_id") @db.Uuid
+  joinedAt        DateTime?        @map("joined_at")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation("MembershipUser", fields: [userId], references: [id], onDelete: Cascade)
+  invitedBy    User?        @relation("MembershipInviter", fields: [invitedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("organization_membership")
+}
+
+model Workspace {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  name           String
+  slug           String
+  status         TenantStatus @default(ACTIVE)
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+  archivedAt     DateTime?    @map("archived_at")
+
+  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  websites           Website[]
+  connections        Connection[]
+  onboardingSessions OnboardingSession[]
+  auditEvents        AuditEvent[]
+
+  @@unique([organizationId, slug])
+  @@map("workspace")
+}
+
+/// The primary SEO operating entity.
+/// normalizedDomain is unique per workspace. Declared as a plain @@unique so Prisma
+/// owns it: a partial index (WHERE archived_at IS NULL) cannot be expressed in the
+/// schema, and Prisma's drift detection would try to drop it on the next migration.
+/// Known limitation: archiving a website reserves its domain within that workspace.
+/// P0 has no archive path in the UI, so this is not reachable in the prototype.
+model Website {
+  id                 String             @id @default(uuid()) @db.Uuid
+  workspaceId        String             @map("workspace_id") @db.Uuid
+  name               String?
+  domain             String
+  normalizedDomain   String             @map("normalized_domain")
+  canonicalUrl       String?            @map("canonical_url")
+  websiteType        WebsiteType?       @map("website_type")
+  cmsType            CmsType?           @map("cms_type")
+  primaryMarket      String?            @map("primary_market")
+  primaryLanguage    String?            @map("primary_language")
+  timezone           String?
+  verificationStatus VerificationStatus @default(UNVERIFIED) @map("verification_status")
+  status             TenantStatus       @default(ACTIVE)
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+  archivedAt         DateTime?          @map("archived_at")
+
+  workspace          Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  businessContext    BusinessContext?
+  goals              BusinessGoal[]
+  brandFacts         BrandFact[]
+  competitors        Competitor[]
+  seoRules           SeoRule[]
+  technicalContext   TechnicalContext?
+  connections        Connection[]
+  onboardingSessions OnboardingSession[]
+  auditEvents        AuditEvent[]
+
+  @@unique([workspaceId, normalizedDomain])
+  @@index([workspaceId])
+  @@map("website")
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding
+// ---------------------------------------------------------------------------
+
+/// websiteId is nullable by necessity: the session exists before step 1 creates
+/// the Website, and must be resumable in that window. Set once step 1 commits.
+model OnboardingSession {
+  id              String           @id @default(uuid()) @db.Uuid
+  organizationId  String           @map("organization_id") @db.Uuid
+  workspaceId     String           @map("workspace_id") @db.Uuid
+  websiteId       String?          @map("website_id") @db.Uuid
+  currentStep     String           @map("current_step")
+  status          OnboardingStatus @default(IN_PROGRESS)
+  answersJson     Json             @default("{}") @map("answers_json")
+  startedByUserId String           @map("started_by_user_id") @db.Uuid
+  startedAt       DateTime         @default(now()) @map("started_at")
+  completedAt     DateTime?        @map("completed_at")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspace     Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  website       Website?     @relation(fields: [websiteId], references: [id], onDelete: SetNull)
+  startedByUser User         @relation(fields: [startedByUserId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([workspaceId])
+  @@map("onboarding_session")
+}
+
+// ---------------------------------------------------------------------------
+// Business Context (immutable approved versions)
+// ---------------------------------------------------------------------------
+
+model BusinessContext {
+  id                       String   @id @default(uuid()) @db.Uuid
+  websiteId                String   @unique @map("website_id") @db.Uuid
+  currentApprovedVersionId String?  @unique @map("current_approved_version_id") @db.Uuid
+  createdAt                DateTime @default(now()) @map("created_at")
+  updatedAt                DateTime @updatedAt @map("updated_at")
+
+  website                Website                  @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  currentApprovedVersion BusinessContextVersion?  @relation("CurrentApproved", fields: [currentApprovedVersionId], references: [id], onDelete: SetNull)
+  versions               BusinessContextVersion[] @relation("ContextVersions")
+
+  @@map("business_context")
+}
+
+/// Immutable once status = APPROVED. Enforced at three layers:
+///   1. no service-layer update path for approved rows
+///   2. a BEFORE UPDATE OR DELETE trigger (see migration)
+///   3. integration tests
+/// Editing approved context creates a new DRAFT with version_number + 1.
+model BusinessContextVersion {
+  id                String        @id @default(uuid()) @db.Uuid
+  businessContextId String        @map("business_context_id") @db.Uuid
+  versionNumber     Int           @map("version_number")
+  status            ContextStatus @default(DRAFT)
+
+  companySummary       String?  @map("company_summary")
+  productService       String?  @map("product_service")
+  businessModel        String?  @map("business_model")
+  primaryCustomer      String?  @map("primary_customer")
+  buyerRoles           String[] @map("buyer_roles")
+  primaryMarket        String?  @map("primary_market")
+  languages            String[]
+  primaryConversion    String?  @map("primary_conversion")
+  secondaryConversions String[] @map("secondary_conversions")
+  businessPriorities   String[] @map("business_priorities")
+  seoPriorities        String[] @map("seo_priorities")
+  competitorSummary    String?  @map("competitor_summary")
+  differentiators      String[]
+  brandVoice           String?  @map("brand_voice")
+  priorityTopics       String[] @map("priority_topics")
+  avoidTopics          String[] @map("avoid_topics")
+  approvedClaims       String[] @map("approved_claims")
+  prohibitedClaims     String[] @map("prohibited_claims")
+
+  ownerUserId      String?   @map("owner_user_id") @db.Uuid
+  createdByUserId  String    @map("created_by_user_id") @db.Uuid
+  approvedByUserId String?   @map("approved_by_user_id") @db.Uuid
+  createdAt        DateTime  @default(now()) @map("created_at")
+  approvedAt       DateTime? @map("approved_at")
+
+  businessContext BusinessContext  @relation("ContextVersions", fields: [businessContextId], references: [id], onDelete: Cascade)
+  currentFor      BusinessContext? @relation("CurrentApproved")
+  owner           User?            @relation("ContextOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  createdBy       User             @relation("ContextCreator", fields: [createdByUserId], references: [id])
+  approvedBy      User?            @relation("ContextApprover", fields: [approvedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([businessContextId, versionNumber])
+  @@map("business_context_version")
+}
+
+// ---------------------------------------------------------------------------
+// Governance entities
+// ---------------------------------------------------------------------------
+
+/// baseline stays NULL when unknown — never zero, never a placeholder.
+model BusinessGoal {
+  id                String     @id @default(uuid()) @db.Uuid
+  websiteId         String     @map("website_id") @db.Uuid
+  title             String
+  description       String?
+  periodStart       DateTime?  @map("period_start") @db.Date
+  periodEnd         DateTime?  @map("period_end") @db.Date
+  businessObjective String?    @map("business_objective")
+  seoOutcome        String?    @map("seo_outcome")
+  primaryMetric     String?    @map("primary_metric")
+  leadingIndicator  String?    @map("leading_indicator")
+  baseline          Decimal?   @db.Decimal(18, 4)
+  baselineSource    String?    @map("baseline_source")
+  baselineDate      DateTime?  @map("baseline_date") @db.Date
+  ownerUserId       String?    @map("owner_user_id") @db.Uuid
+  status            GoalStatus @default(DRAFT)
+  createdAt         DateTime   @default(now()) @map("created_at")
+  updatedAt         DateTime   @updatedAt @map("updated_at")
+  archivedAt        DateTime?  @map("archived_at")
+
+  website Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  owner   User?   @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@index([websiteId])
+  @@map("business_goal")
+}
+
+/// Only APPROVED facts are canonical. sourceUrl is nullable and never fabricated.
+model BrandFact {
+  id             String         @id @default(uuid()) @db.Uuid
+  websiteId      String         @map("website_id") @db.Uuid
+  category       String
+  factKey        String         @map("fact_key")
+  value          String
+  source         Provenance     @default(USER_PROVIDED)
+  sourceUrl      String?        @map("source_url")
+  approvalStatus ApprovalStatus @default(PROPOSED) @map("approval_status")
+  ownerUserId    String?        @map("owner_user_id") @db.Uuid
+  verifiedAt     DateTime?      @map("verified_at")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+  archivedAt     DateTime?      @map("archived_at")
+
+  website Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  owner   User?   @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@index([websiteId])
+  @@map("brand_fact")
+}
+
+/// P0 does not scrape or auto-classify competitors. type defaults to UNKNOWN.
+model Competitor {
+  id               String         @id @default(uuid()) @db.Uuid
+  websiteId        String         @map("website_id") @db.Uuid
+  name             String
+  domain           String?
+  normalizedDomain String?        @map("normalized_domain")
+  type             CompetitorType @default(UNKNOWN)
+  providedByUser   Boolean        @default(true) @map("provided_by_user")
+  source           Provenance     @default(USER_PROVIDED)
+  notes            String?
+  status           TenantStatus   @default(ACTIVE)
+  createdAt        DateTime       @default(now()) @map("created_at")
+  updatedAt        DateTime       @updatedAt @map("updated_at")
+  archivedAt       DateTime?      @map("archived_at")
+
+  website Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@index([websiteId])
+  @@map("competitor")
+}
+
+model SeoRule {
+  id            String          @id @default(uuid()) @db.Uuid
+  websiteId     String          @map("website_id") @db.Uuid
+  category      String
+  rule          String
+  severity      SeoRuleSeverity @default(INFO)
+  appliesTo     String?         @map("applies_to")
+  ownerUserId   String?         @map("owner_user_id") @db.Uuid
+  effectiveFrom DateTime?       @map("effective_from") @db.Date
+  active        Boolean         @default(true)
+  createdAt     DateTime        @default(now()) @map("created_at")
+  updatedAt     DateTime        @updatedAt @map("updated_at")
+  archivedAt    DateTime?       @map("archived_at")
+
+  website Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  owner   User?   @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@index([websiteId])
+  @@map("seo_rule")
+}
+
+/// Shell only. P0 must not infer crawl, indexation, or technical health.
+model TechnicalContext {
+  id                 String   @id @default(uuid()) @db.Uuid
+  websiteId          String   @unique @map("website_id") @db.Uuid
+  cms                CmsType?
+  hostingNotes       String?  @map("hosting_notes")
+  knownMigrations    String?  @map("known_migrations")
+  knownConstraints   String?  @map("known_constraints")
+  stagingAvailable   Boolean? @map("staging_available")
+  developerContact   String?  @map("developer_contact")
+  publicationProcess String?  @map("publication_process")
+  technicalNotes     String?  @map("technical_notes")
+  ownerUserId        String?  @map("owner_user_id") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  website Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  owner   User?   @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@map("technical_context")
+}
+
+// ---------------------------------------------------------------------------
+// Connections
+// ---------------------------------------------------------------------------
+
+/// credentialReference is a pointer into a secret manager — never a credential.
+/// No column on this model may ever hold a token, key, or password.
+model Connection {
+  id                  String             @id @default(uuid()) @db.Uuid
+  workspaceId         String             @map("workspace_id") @db.Uuid
+  websiteId           String?            @map("website_id") @db.Uuid
+  provider            ConnectionProvider
+  status              ConnectionStatus   @default(NOT_CONNECTED)
+  credentialReference String?            @map("credential_reference")
+  lastError           String?            @map("last_error")
+  connectedAt         DateTime?          @map("connected_at")
+  createdAt           DateTime           @default(now()) @map("created_at")
+  updatedAt           DateTime           @updatedAt @map("updated_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  website   Website?  @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@unique([websiteId, provider])
+  @@index([workspaceId])
+  @@map("connection")
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+/// Snapshots pass through a redaction denylist before being written.
+/// Tokens, keys, passwords, and credential references must never appear here.
+model AuditEvent {
+  id                 String      @id @default(uuid()) @db.Uuid
+  organizationId     String      @map("organization_id") @db.Uuid
+  workspaceId        String?     @map("workspace_id") @db.Uuid
+  websiteId          String?     @map("website_id") @db.Uuid
+  actorUserId        String?     @map("actor_user_id") @db.Uuid
+  entityType         String      @map("entity_type")
+  entityId           String      @map("entity_id")
+  action             AuditAction
+  beforeSnapshotJson Json?       @map("before_snapshot_json")
+  afterSnapshotJson  Json?       @map("after_snapshot_json")
+  createdAt          DateTime    @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspace    Workspace?   @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  website      Website?     @relation(fields: [websiteId], references: [id], onDelete: SetNull)
+  actor        User?        @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([websiteId, createdAt])
+  @@map("audit_event")
+}
