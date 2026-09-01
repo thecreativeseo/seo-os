@@ -37,6 +37,28 @@ export default async function WebsiteLayout({
         </Link>
         <WebsiteNav websiteId={websiteId} />
 
+        <nav aria-label="Workspace" className="mt-5">
+          <p className="text-muted-foreground mb-2 text-xs font-medium tracking-wide uppercase">
+            Workspace
+          </p>
+          <ul className="space-y-0.5">
+            {[
+              { slug: "team", label: "Team" },
+              { slug: "audit", label: "Audit History" },
+              { slug: "settings", label: "Settings" },
+            ].map((section) => (
+              <li key={section.slug}>
+                <Link
+                  href={`/workspaces/${context.workspace.id}/${section.slug}`}
+                  className="text-muted-foreground hover:bg-accent/60 block rounded-md px-2 py-1.5 text-sm transition-colors"
+                >
+                  {section.label}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </nav>
+
         <div className="border-border mt-8 space-y-2 border-t pt-4">
           <p className="text-muted-foreground truncate text-xs" title={context.user.email}>
             {context.user.email}

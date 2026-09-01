@@ -1,5 +1,5 @@
 import { redact } from "@/lib/redact";
-import type { TenantContext } from "@/server/auth/guards";
+import type { TenantContext, WorkspaceContext } from "@/server/auth/guards";
 import type { AuditAction, Prisma } from "@/generated/prisma/client";
 
 /**
@@ -34,6 +34,31 @@ export async function recordAudit(
       organizationId: context.organization.id,
       workspaceId: context.workspace.id,
       websiteId: context.website.id,
+      actorUserId: context.user.id,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      action: input.action,
+      beforeSnapshotJson:
+        input.before === undefined ? undefined : (redact(input.before) as Prisma.InputJsonValue),
+      afterSnapshotJson:
+        input.after === undefined ? undefined : (redact(input.after) as Prisma.InputJsonValue),
+    },
+  });
+}
+
+/**
+ * Workspace-level events, which have no website — renaming a workspace, changing
+ * membership. Same redaction, same transaction rule.
+ */
+export async function recordWorkspaceAudit(
+  tx: TxClient,
+  context: WorkspaceContext,
+  input: AuditInput,
+): Promise<void> {
+  await tx.auditEvent.create({
+    data: {
+      organizationId: context.organization.id,
+      workspaceId: context.workspace.id,
       actorUserId: context.user.id,
       entityType: input.entityType,
       entityId: input.entityId,
