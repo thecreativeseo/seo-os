@@ -6,7 +6,7 @@ export function GET() {
   return NextResponse.json({
     status: "ok",
     phase: "P0",
-    milestone: "M3",
+    milestone: "M6",
     checkedAt: new Date().toISOString(),
   });
 }

@@ -4,6 +4,10 @@ import Link from "next/link";
 import { useActionState, useRef, useState } from "react";
 
 import { saveStepAction, type StepFormState } from "@/server/actions/onboarding";
+import {
+  approveFromOnboardingAction,
+  saveDraftContextAction,
+} from "@/server/actions/business-context";
 import { useAutosave } from "@/components/onboarding/use-autosave";
 import { normalizeDomain } from "@/lib/domain/normalize-domain";
 import {
@@ -31,6 +35,7 @@ export function StepForm({
   website,
   competitors,
   goals,
+  canApprove,
 }: {
   step: OnboardingStepSlug;
   title: string;
@@ -40,6 +45,7 @@ export function StepForm({
   website: { domain: string; normalizedDomain: string } | null;
   competitors: Row[];
   goals: GoalRow[];
+  canApprove: boolean;
 }) {
   const [state, formAction, pending] = useActionState(saveStepAction, initialState);
   const formRef = useRef<HTMLFormElement>(null);
@@ -89,7 +95,7 @@ export function StepForm({
         {step === "review" ? <ReviewStep answers={answers} website={website} /> : null}
       </div>
 
-      <div className="border-border flex items-center gap-3 border-t pt-5">
+      <div className="border-border flex flex-wrap items-center gap-3 border-t pt-5">
         {back ? (
           <Link
             href={`/onboarding/${sessionId}/${back}` as never}
@@ -98,13 +104,40 @@ export function StepForm({
             Back
           </Link>
         ) : null}
-        <button
-          type="submit"
-          disabled={pending}
-          className="bg-foreground text-background inline-flex h-9 items-center rounded-md px-4 text-sm font-medium disabled:opacity-60"
-        >
-          {pending ? "Saving…" : step === "review" ? "Save draft" : "Save & continue"}
-        </button>
+        {step === "review" ? (
+          <>
+            <button
+              type="submit"
+              formAction={saveDraftContextAction as never}
+              disabled={pending}
+              className="border-border hover:bg-accent inline-flex h-9 items-center rounded-md border px-4 text-sm disabled:opacity-60"
+            >
+              Save draft
+            </button>
+            {canApprove ? (
+              <button
+                type="submit"
+                formAction={approveFromOnboardingAction as never}
+                disabled={pending}
+                className="bg-foreground text-background inline-flex h-9 items-center rounded-md px-4 text-sm font-medium disabled:opacity-60"
+              >
+                Approve context
+              </button>
+            ) : (
+              <p className="text-muted-foreground text-sm">
+                An owner or admin must approve this context.
+              </p>
+            )}
+          </>
+        ) : (
+          <button
+            type="submit"
+            disabled={pending}
+            className="bg-foreground text-background inline-flex h-9 items-center rounded-md px-4 text-sm font-medium disabled:opacity-60"
+          >
+            {pending ? "Saving…" : "Save & continue"}
+          </button>
+        )}
       </div>
     </form>
   );

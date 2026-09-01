@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 
 import { prisma } from "@/server/db/prisma";
@@ -67,10 +68,17 @@ export default async function Home() {
               <dt className="text-muted-foreground">Name</dt>
               <dd>{workspace.name}</dd>
               <dt className="text-muted-foreground">Websites</dt>
-              <dd>
-                {workspace.websites.length === 0
-                  ? "None yet"
-                  : workspace.websites.map((site) => site.normalizedDomain).join(", ")}
+              <dd className="space-y-1">
+                {workspace.websites.map((site) => (
+                  <div key={site.id}>
+                    <Link
+                      href={`/websites/${site.id}/context` as never}
+                      className="font-mono text-xs hover:underline"
+                    >
+                      {site.normalizedDomain}
+                    </Link>
+                  </div>
+                ))}
               </dd>
             </dl>
           ) : (

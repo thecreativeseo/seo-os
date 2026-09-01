@@ -2,7 +2,7 @@ import { notFound, redirect } from "next/navigation";
 
 import { requireUser } from "@/server/auth/session";
 import { requireWorkspaceAccess } from "@/server/auth/guards";
-import { REQUIRED } from "@/server/auth/roles";
+import { REQUIRED, hasRole } from "@/server/auth/roles";
 import { prisma } from "@/server/db/prisma";
 import { answersOf, currentStepOf, draftOf } from "@/server/services/onboarding";
 import { canOpenStep, getStep, isStepSlug } from "@/lib/onboarding/steps";
@@ -34,7 +34,8 @@ export default async function OnboardingStepPage({
   }
 
   // Proves workspace access and the write role before rendering a form.
-  await requireWorkspaceAccess(session.workspaceId, REQUIRED.WRITE);
+  const access = await requireWorkspaceAccess(session.workspaceId, REQUIRED.WRITE);
+  const canApprove = hasRole(access.membership.role, REQUIRED.APPROVE);
 
   const current = currentStepOf(session);
 
@@ -68,6 +69,7 @@ export default async function OnboardingStepPage({
         sessionId={session.id}
         answers={answers}
         draft={draftOf(session, step)}
+        canApprove={canApprove}
         website={
           website
             ? { domain: website.domain, normalizedDomain: website.normalizedDomain }
