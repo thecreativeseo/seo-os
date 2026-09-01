@@ -92,7 +92,7 @@ export function StepForm({
       <div className="border-border flex items-center gap-3 border-t pt-5">
         {back ? (
           <Link
-            href={`../${back}` as never}
+            href={`/onboarding/${sessionId}/${back}` as never}
             className="border-border hover:bg-accent inline-flex h-9 items-center rounded-md border px-4 text-sm"
           >
             Back

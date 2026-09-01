@@ -61,7 +61,7 @@ export default async function OnboardingStepPage({
     : [];
 
   return (
-    <OnboardingShell current={current} active={step}>
+    <OnboardingShell sessionId={session.id} current={current} active={step}>
       <StepForm
         step={step}
         title={getStep(step).title}

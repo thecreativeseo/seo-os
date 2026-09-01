@@ -10,10 +10,12 @@ import { ONBOARDING_STEPS, stepIndex, type OnboardingStepSlug } from "@/lib/onbo
  * server rejects them anyway. UI state is a convenience, never the control.
  */
 export function OnboardingShell({
+  sessionId,
   current,
   active,
   children,
 }: {
+  sessionId: string;
   current: OnboardingStepSlug;
   active: OnboardingStepSlug;
   children: React.ReactNode;
@@ -37,7 +39,9 @@ export function OnboardingShell({
               <li key={step.slug}>
                 {reachable ? (
                   <Link
-                    href={`../${step.slug}` as never}
+                    // Absolute: a relative href would resolve against the parent
+                    // directory and drop the session id from the path.
+                    href={`/onboarding/${sessionId}/${step.slug}` as never}
                     aria-current={isActive ? "step" : undefined}
                     className={`flex items-baseline gap-3 rounded-md px-2 py-1.5 text-sm transition-colors ${
                       isActive
