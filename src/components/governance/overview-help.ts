@@ -46,3 +46,27 @@ export const WEBSITE_FIELD_HELP: Record<string, string> = {
   timezone:
     "Used to align reporting periods. Search data is reported in its own timezone, so a mismatch shifts day boundaries.",
 };
+
+/**
+ * Placeholders for the Technical context form.
+ *
+ * As with goals, these are one site's story told across every field rather than
+ * five unrelated samples — the hosting choice, the migration it went through, the
+ * constraint that follows from it, and the process that results. The relationships
+ * are the useful part: a migration date explains a traffic change, and a shared
+ * template explains why a fix is not simply available.
+ *
+ * Guidance only. Nothing here is ever submitted.
+ */
+export const TECHNICAL_PLACEHOLDERS = {
+  hostingNotes: "Webflow hosting behind Cloudflare; redirects managed in Cloudflare, not the CMS",
+  knownMigrations:
+    "WordPress to Webflow, March 2024. Blog URLs changed from /blog/YYYY/MM/slug to /blog/slug",
+  knownConstraints:
+    "Blog templates are shared with the marketing site and cannot be changed independently. Pricing copy needs legal sign-off",
+  developerContact: "Platform team — platform@example.com",
+  publicationProcess:
+    "Draft in Webflow, content lead reviews, legal reviews anything with a price, publish on Tuesdays",
+  technicalNotes:
+    "Search Console is verified on the www property only; the apex domain redirects to it",
+} as const;

@@ -78,6 +78,7 @@ export function Field({
   multiline,
   hint,
   help,
+  list,
 }: {
   name: string;
   label: string;
@@ -87,6 +88,8 @@ export function Field({
   multiline?: boolean;
   hint?: string;
   help?: string;
+  /** id of a <datalist> to offer suggestions from. */
+  list?: string;
 }) {
   const id = `gov-${name}`;
   const hintId = `${id}-hint`;
@@ -114,6 +117,7 @@ export function Field({
           required={required}
           placeholder={placeholder}
           defaultValue={defaultValue}
+          list={list}
           aria-describedby={hint ? hintId : undefined}
           className={`${base} h-9`}
         />

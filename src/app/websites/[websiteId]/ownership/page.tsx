@@ -13,13 +13,14 @@ import {
 } from "@/components/governance/primitives";
 import {
   TECHNICAL_HELP,
+  TECHNICAL_PLACEHOLDERS,
   VERIFICATION_HELP,
   WEBSITE_FIELD_HELP,
 } from "@/components/governance/overview-help";
 import { FieldHelp } from "@/components/ui/field-help";
 import type { VerificationStatus } from "@/generated/prisma/client";
 
-export const metadata = { title: "Website Ownership · SEO OS" };
+export const metadata = { title: "Ownership · SEO OS" };
 
 const STAGING = [
   { value: "yes", label: "Yes" },
@@ -64,7 +65,7 @@ const VERIFICATION_LABELS: Record<VerificationStatus, string> = {
   FAILED: "Verification failed",
 };
 
-export default async function WebsiteOwnershipPage({
+export default async function OwnershipPage({
   params,
 }: {
   params: Promise<{ websiteId: string }>;
@@ -81,7 +82,7 @@ export default async function WebsiteOwnershipPage({
   return (
     <main className="space-y-10">
       <PageHeader
-        title="Website Ownership"
+        title="Ownership"
         description="Which website SEO OS operates on, who controls it, and how work reaches it. Everything here was entered by your team; nothing is inferred."
       />
 
@@ -173,7 +174,7 @@ export default async function WebsiteOwnershipPage({
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-sm font-medium">Ownership</h2>
+        <h2 className="text-sm font-medium">Domain verification</h2>
         <dl className="divide-border border-border divide-y rounded-lg border">
           <div className="grid gap-1 px-4 py-3 text-sm sm:grid-cols-[12rem_1fr] sm:gap-4">
             <dt className="text-muted-foreground flex items-center gap-1.5">
@@ -191,7 +192,8 @@ export default async function WebsiteOwnershipPage({
         <h2 className="text-sm font-medium">Technical context</h2>
         <p className="text-muted-foreground text-sm">
           Operational facts your team knows. SEO OS makes no claim about crawl,
-          indexation, or technical health in this phase.
+          indexation, or technical health in this phase. The greyed-out text is one
+          site&rsquo;s example, shown end to end; nothing is filled in for you.
         </p>
         {canWrite ? (
           <ActionForm
@@ -205,12 +207,14 @@ export default async function WebsiteOwnershipPage({
               name="hostingNotes"
               label="Hosting"
               help={TECHNICAL_HELP.hostingNotes}
+              placeholder={TECHNICAL_PLACEHOLDERS.hostingNotes}
               defaultValue={technical?.hostingNotes ?? ""}
             />
             <Field
               name="knownMigrations"
               label="Known migrations"
               help={TECHNICAL_HELP.knownMigrations}
+              placeholder={TECHNICAL_PLACEHOLDERS.knownMigrations}
               multiline
               defaultValue={technical?.knownMigrations ?? ""}
             />
@@ -218,6 +222,7 @@ export default async function WebsiteOwnershipPage({
               name="knownConstraints"
               label="Known constraints"
               help={TECHNICAL_HELP.knownConstraints}
+              placeholder={TECHNICAL_PLACEHOLDERS.knownConstraints}
               multiline
               defaultValue={technical?.knownConstraints ?? ""}
             />
@@ -240,12 +245,14 @@ export default async function WebsiteOwnershipPage({
               name="developerContact"
               label="Developer contact"
               help={TECHNICAL_HELP.developerContact}
+              placeholder={TECHNICAL_PLACEHOLDERS.developerContact}
               defaultValue={technical?.developerContact ?? ""}
             />
             <Field
               name="publicationProcess"
               label="Publication process"
               help={TECHNICAL_HELP.publicationProcess}
+              placeholder={TECHNICAL_PLACEHOLDERS.publicationProcess}
               multiline
               defaultValue={technical?.publicationProcess ?? ""}
             />
@@ -253,6 +260,7 @@ export default async function WebsiteOwnershipPage({
               name="technicalNotes"
               label="Notes"
               help={TECHNICAL_HELP.technicalNotes}
+              placeholder={TECHNICAL_PLACEHOLDERS.technicalNotes}
               multiline
               defaultValue={technical?.technicalNotes ?? ""}
             />

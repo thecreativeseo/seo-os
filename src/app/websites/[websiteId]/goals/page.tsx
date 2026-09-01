@@ -13,6 +13,11 @@ import {
   Field,
   PageHeader,
 } from "@/components/governance/primitives";
+import {
+  GOAL_HELP,
+  GOAL_PLACEHOLDERS,
+  GOAL_TEMPLATES,
+} from "@/components/governance/goal-help";
 
 export const metadata = { title: "Business Goals · SEO OS" };
 
@@ -88,22 +93,60 @@ export default async function GoalsPage({
 
       {canWrite ? (
         <section className="border-border space-y-4 rounded-lg border p-5">
-          <h2 className="text-sm font-medium">Add a goal</h2>
+          <div className="space-y-1">
+            <h2 className="text-sm font-medium">Add a goal</h2>
+            <p className="text-muted-foreground text-sm">
+              The greyed-out text in each field is one worked example, shown end to end
+              so the parts line up. Nothing is filled in for you.
+            </p>
+          </div>
+
           <ActionForm
             action={createGoalAction}
             websiteId={websiteId}
             submitLabel="Add goal"
             pendingLabel="Adding…"
           >
-            <Field name="title" label="Goal" required placeholder="Generate qualified leads" />
-            <Field name="businessObjective" label="Business objective" />
-            <Field name="primaryMetric" label="Primary metric" placeholder="Demo requests" />
+            <Field
+              name="title"
+              label="Goal"
+              required
+              help={GOAL_HELP.title}
+              placeholder={GOAL_PLACEHOLDERS.title}
+              list="goal-templates"
+              hint="Start typing for common goals, or write your own."
+            />
+            <Field
+              name="businessObjective"
+              label="Business objective"
+              help={GOAL_HELP.businessObjective}
+              placeholder={GOAL_PLACEHOLDERS.businessObjective}
+            />
+            <Field
+              name="primaryMetric"
+              label="Primary metric"
+              help={GOAL_HELP.primaryMetric}
+              placeholder={GOAL_PLACEHOLDERS.primaryMetric}
+            />
             <Field
               name="baseline"
               label="Baseline"
+              help={GOAL_HELP.baseline}
+              placeholder={GOAL_PLACEHOLDERS.baseline}
               hint="Leave blank if unknown. SEO OS will not assume a starting number."
             />
-            <Field name="baselineSource" label="Baseline source" />
+            <Field
+              name="baselineSource"
+              label="Baseline source"
+              help={GOAL_HELP.baselineSource}
+              placeholder={GOAL_PLACEHOLDERS.baselineSource}
+            />
+
+            <datalist id="goal-templates">
+              {GOAL_TEMPLATES.map((template) => (
+                <option key={template} value={template} />
+              ))}
+            </datalist>
           </ActionForm>
         </section>
       ) : null}

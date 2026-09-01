@@ -31,10 +31,13 @@ export default async function WorkspaceLayout({
 
         {website ? (
           <Link
-            href={`/websites/${website.id}/overview`}
-            className="text-muted-foreground hover:text-foreground mt-4 block font-mono text-xs"
+            href={`/websites/${website.id}`}
+            // "Back" alone is ambiguous when a screen reader lists links out of
+            // context, so the accessible name names the destination.
+            aria-label={`Back to ${website.normalizedDomain}`}
+            className="text-muted-foreground hover:text-foreground mt-4 block text-sm"
           >
-            ← {website.normalizedDomain}
+            ← Back
           </Link>
         ) : null}
 
