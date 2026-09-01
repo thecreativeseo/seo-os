@@ -1,15 +1,16 @@
 import { redirect } from "next/navigation";
 
+import { prisma } from "@/server/db/prisma";
 import { getCurrentUser } from "@/server/auth/session";
 
 /**
- * Post-sign-in landing.
+ * Post-sign-in routing.
  *
- * M3 delivers identity only. A newly signed-in user has no OrganizationMembership,
- * so they are authenticated and authorized for nothing — which is correct, and this
- * page says so plainly rather than implying access that does not exist.
+ *   no membership  -> create an organization (the only self-serve path to access)
+ *   membership     -> the organization's workspace overview
  *
- * M4 replaces this with organization creation, and M10 with the Command Center.
+ * M5 will route onward into website onboarding; M10 replaces the destination with
+ * the Command Center.
  */
 export default async function Home() {
   const current = await getCurrentUser();
@@ -20,48 +21,54 @@ export default async function Home() {
 
   const { user, memberships } = current;
 
+  if (memberships.length === 0) {
+    redirect("/onboarding/organization");
+  }
+
+  const membership = memberships[0]!;
+
+  const organization = await prisma.organization.findFirst({
+    where: { id: membership.organizationId },
+    include: {
+      workspaces: {
+        where: { status: "ACTIVE" },
+        orderBy: { createdAt: "asc" },
+        include: { websites: { where: { status: "ACTIVE" } } },
+      },
+    },
+  });
+
+  const workspace = organization?.workspaces[0];
+
   return (
     <main className="flex flex-1 items-start justify-center px-6 py-16">
       <div className="w-full max-w-xl space-y-8">
         <header className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">SEO OS</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {organization?.name ?? "SEO OS"}
+          </h1>
           <p className="text-muted-foreground text-sm">
-            Build the context your SEO team operates from.
+            Signed in as {user.email} · {membership.role}
           </p>
         </header>
 
         <section className="border-border space-y-3 rounded-lg border p-5">
           <h2 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
-            Signed in
+            Workspace
           </h2>
-          <dl className="grid grid-cols-[7rem_1fr] gap-y-2 text-sm">
-            <dt className="text-muted-foreground">Name</dt>
-            <dd>{user.displayName ?? "Not provided"}</dd>
-            <dt className="text-muted-foreground">Email</dt>
-            <dd>{user.email}</dd>
-            <dt className="text-muted-foreground">Last sign-in</dt>
-            <dd>{user.lastLoginAt?.toLocaleString() ?? "Unknown"}</dd>
-          </dl>
-        </section>
-
-        <section className="border-border space-y-3 rounded-lg border p-5">
-          <h2 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
-            Organization access
-          </h2>
-          {memberships.length === 0 ? (
-            <p className="text-sm leading-relaxed">
-              No organization access yet. Signing in with Google proves who you are;
-              it does not grant access to a workspace. Access comes from an
-              organization membership, which arrives in the next milestone.
-            </p>
+          {workspace ? (
+            <dl className="grid grid-cols-[7rem_1fr] gap-y-2 text-sm">
+              <dt className="text-muted-foreground">Name</dt>
+              <dd>{workspace.name}</dd>
+              <dt className="text-muted-foreground">Websites</dt>
+              <dd>
+                {workspace.websites.length === 0
+                  ? "None yet"
+                  : workspace.websites.map((site) => site.normalizedDomain).join(", ")}
+              </dd>
+            </dl>
           ) : (
-            <ul className="space-y-1 text-sm">
-              {memberships.map((membership) => (
-                <li key={membership.id}>
-                  {membership.organizationId} — {membership.role}
-                </li>
-              ))}
-            </ul>
+            <p className="text-sm">No workspace found.</p>
           )}
         </section>
 
@@ -75,8 +82,8 @@ export default async function Home() {
         </form>
 
         <p className="text-muted-foreground border-border border-t pt-4 text-xs">
-          P0 · M3. Onboarding, business context, and the Command Center are not built
-          yet.
+          P0 · M4. Website onboarding, business context, and the Command Center are
+          not built yet.
         </p>
       </div>
     </main>
