@@ -38,7 +38,15 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
       className={`${googleSans.variable} ${googleSansCode.variable} h-full antialiased`}
     >
-      <body className="flex min-h-full flex-col">{children}</body>
+      <body className="flex min-h-full flex-col">
+        {/* First thing in the tab order, so keyboard users can pass the sidebar. */}
+        <a href="#main-content" className="skip-link">
+          Skip to content
+        </a>
+        <div id="main-content" className="flex min-h-full flex-1 flex-col">
+          {children}
+        </div>
+      </body>
     </html>
   );
 }
