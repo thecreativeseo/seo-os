@@ -35,7 +35,7 @@ export function WebsiteNav({ websiteId }: { websiteId: string }) {
           return (
             <li key={section.slug}>
               <Link
-                href={href as never}
+                href={href}
                 aria-current={active ? "page" : undefined}
                 className={`block rounded-md px-2 py-1.5 text-sm transition-colors ${
                   active ? "bg-accent font-medium" : "text-muted-foreground hover:bg-accent/60"

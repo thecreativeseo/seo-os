@@ -9,6 +9,21 @@ import {
   type OnboardingStepSlug,
 } from "@/lib/onboarding/steps";
 import { STEP_SCHEMAS, type StepAnswers } from "@/lib/onboarding/schemas";
+import type { z } from "zod";
+
+/**
+ * Per-step input types derived from the schemas.
+ *
+ * saveStep accepts unknown and validates against the step schema, so parsed.data is
+ * a union of all eleven step shapes. These narrow it at the point of use — a
+ * specific cast still checks shape compatibility against the commit function,
+ * where `as never` would disable checking entirely.
+ */
+type WebsiteStepData = z.infer<(typeof STEP_SCHEMAS)["website"]>;
+type CompetitorsStepData = z.infer<(typeof STEP_SCHEMAS)["competitors"]>;
+type GoalsStepData = z.infer<(typeof STEP_SCHEMAS)["goals"]>;
+type CmsStepData = z.infer<(typeof STEP_SCHEMAS)["cms"]>;
+import type { Prisma, WebsiteType } from "@/generated/prisma/client";
 import type { OrgContext, WorkspaceContext } from "@/server/auth/guards";
 import type { OnboardingSession } from "@/generated/prisma/client";
 
@@ -136,7 +151,7 @@ export async function saveDraft(
 
   await prisma.onboardingSession.update({
     where: { id: session.id, organizationId: context.organization.id },
-    data: { answersJson: { ...envelope, [DRAFTS_KEY]: drafts } as never },
+    data: { answersJson: { ...envelope, [DRAFTS_KEY]: drafts } as Prisma.InputJsonValue },
   });
 }
 
@@ -176,19 +191,19 @@ export async function saveStep(
   let websiteId = session.websiteId;
 
   if (step === "website") {
-    websiteId = await commitWebsite(context, session, parsed.data as never);
+    websiteId = await commitWebsite(context, session, parsed.data as WebsiteStepData);
   }
 
   if (step === "competitors" && websiteId) {
-    await commitCompetitors(websiteId, parsed.data as never);
+    await commitCompetitors(websiteId, parsed.data as CompetitorsStepData);
   }
 
   if (step === "goals" && websiteId) {
-    await commitGoals(websiteId, context.user.id, parsed.data as never);
+    await commitGoals(websiteId, context.user.id, parsed.data as GoalsStepData);
   }
 
   if (step === "cms" && websiteId) {
-    await commitCms(websiteId, context.user.id, parsed.data as never);
+    await commitCms(websiteId, context.user.id, parsed.data as CmsStepData);
   }
 
   const following = nextStep(step);
@@ -198,7 +213,7 @@ export async function saveStep(
   const updated = await prisma.onboardingSession.update({
     where: { id: session.id },
     data: {
-      answersJson: answers as never,
+      answersJson: answers as Prisma.InputJsonValue,
       websiteId,
       // Forward-only cursor.
       currentStep:
@@ -213,14 +228,7 @@ export async function saveStep(
 async function commitWebsite(
   context: WorkspaceContext,
   session: OnboardingSession,
-  input: {
-    domain: string;
-    name?: string;
-    websiteType?: string;
-    primaryLanguage?: string;
-    primaryMarket?: string;
-    timezone?: string;
-  },
+  input: WebsiteStepData,
 ): Promise<string> {
   const result = normalizeDomain(input.domain);
 
@@ -249,7 +257,7 @@ async function commitWebsite(
     name: input.name ?? null,
     domain: input.domain.trim(),
     normalizedDomain: normalized,
-    websiteType: (input.websiteType as never) ?? null,
+    websiteType: (input.websiteType as WebsiteType | undefined) ?? null,
     primaryLanguage: input.primaryLanguage ?? null,
     primaryMarket: input.primaryMarket ?? null,
     timezone: input.timezone ?? null,
@@ -289,7 +297,7 @@ async function commitWebsite(
  */
 async function commitCompetitors(
   websiteId: string,
-  input: { competitors: { name: string; domain?: string; notes?: string }[] },
+  input: CompetitorsStepData,
 ): Promise<void> {
   await prisma.$transaction(async (tx) => {
     await tx.competitor.deleteMany({ where: { websiteId } });
@@ -322,7 +330,7 @@ async function commitCompetitors(
 async function commitGoals(
   websiteId: string,
   userId: string,
-  input: { goals: { title: string; businessObjective?: string; primaryMetric?: string }[] },
+  input: GoalsStepData,
 ): Promise<void> {
   await prisma.$transaction(async (tx) => {
     await tx.businessGoal.deleteMany({ where: { websiteId, status: "DRAFT" } });
@@ -345,23 +353,23 @@ async function commitGoals(
 async function commitCms(
   websiteId: string,
   userId: string,
-  input: { cms: string; publicationProcess?: string; developerContact?: string },
+  input: CmsStepData,
 ): Promise<void> {
   await prisma.website.update({
     where: { id: websiteId },
-    data: { cmsType: input.cms as never },
+    data: { cmsType: input.cms },
   });
 
   await prisma.technicalContext.upsert({
     where: { websiteId },
     update: {
-      cms: input.cms as never,
+      cms: input.cms,
       publicationProcess: input.publicationProcess ?? null,
       developerContact: input.developerContact ?? null,
     },
     create: {
       websiteId,
-      cms: input.cms as never,
+      cms: input.cms,
       publicationProcess: input.publicationProcess ?? null,
       developerContact: input.developerContact ?? null,
       ownerUserId: userId,

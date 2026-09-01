@@ -4,10 +4,7 @@ import Link from "next/link";
 import { useActionState, useRef, useState } from "react";
 
 import { saveStepAction, type StepFormState } from "@/server/actions/onboarding";
-import {
-  approveFromOnboardingAction,
-  saveDraftContextAction,
-} from "@/server/actions/business-context";
+import { ReviewActions } from "@/components/onboarding/review-actions";
 import { useAutosave } from "@/components/onboarding/use-autosave";
 import { normalizeDomain } from "@/lib/domain/normalize-domain";
 import {
@@ -52,6 +49,33 @@ export function StepForm({
   const { status, schedule } = useAutosave(formRef);
   const back = previousStep(step);
 
+  // Review submits to the business-context actions, not to saveStepAction, and has
+  // no fields of its own. It is rendered outside the step form because nested forms
+  // are invalid HTML and each action needs its own useActionState binding.
+  if (step === "review") {
+    return (
+      <div className="space-y-8">
+        <header>
+          <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
+        </header>
+
+        <ReviewStep answers={answers} website={website} />
+
+        <div className="border-border flex flex-wrap items-center gap-3 border-t pt-5">
+          {back ? (
+            <Link
+              href={`/onboarding/${sessionId}/${back}`}
+              className="border-border hover:bg-accent inline-flex h-9 items-center rounded-md border px-4 text-sm"
+            >
+              Back
+            </Link>
+          ) : null}
+          <ReviewActions sessionId={sessionId} canApprove={canApprove} />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <form
       ref={formRef}
@@ -92,52 +116,24 @@ export function StepForm({
         {step === "seo-priorities" ? <SeoPrioritiesStep answers={answers} /> : null}
         {step === "cms" ? <CmsStep answers={answers} /> : null}
         {step === "connections" ? <ConnectionsStep /> : null}
-        {step === "review" ? <ReviewStep answers={answers} website={website} /> : null}
       </div>
 
       <div className="border-border flex flex-wrap items-center gap-3 border-t pt-5">
         {back ? (
           <Link
-            href={`/onboarding/${sessionId}/${back}` as never}
+            href={`/onboarding/${sessionId}/${back}`}
             className="border-border hover:bg-accent inline-flex h-9 items-center rounded-md border px-4 text-sm"
           >
             Back
           </Link>
         ) : null}
-        {step === "review" ? (
-          <>
-            <button
-              type="submit"
-              formAction={saveDraftContextAction as never}
-              disabled={pending}
-              className="border-border hover:bg-accent inline-flex h-9 items-center rounded-md border px-4 text-sm disabled:opacity-60"
-            >
-              Save draft
-            </button>
-            {canApprove ? (
-              <button
-                type="submit"
-                formAction={approveFromOnboardingAction as never}
-                disabled={pending}
-                className="bg-foreground text-background inline-flex h-9 items-center rounded-md px-4 text-sm font-medium disabled:opacity-60"
-              >
-                Approve context
-              </button>
-            ) : (
-              <p className="text-muted-foreground text-sm">
-                An owner or admin must approve this context.
-              </p>
-            )}
-          </>
-        ) : (
-          <button
-            type="submit"
-            disabled={pending}
-            className="bg-foreground text-background inline-flex h-9 items-center rounded-md px-4 text-sm font-medium disabled:opacity-60"
-          >
-            {pending ? "Saving…" : "Save & continue"}
-          </button>
-        )}
+        <button
+          type="submit"
+          disabled={pending}
+          className="bg-foreground text-background inline-flex h-9 items-center rounded-md px-4 text-sm font-medium disabled:opacity-60"
+        >
+          {pending ? "Saving…" : "Save & continue"}
+        </button>
       </div>
     </form>
   );

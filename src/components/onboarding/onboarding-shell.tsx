@@ -41,7 +41,7 @@ export function OnboardingShell({
                   <Link
                     // Absolute: a relative href would resolve against the parent
                     // directory and drop the session id from the path.
-                    href={`/onboarding/${sessionId}/${step.slug}` as never}
+                    href={`/onboarding/${sessionId}/${step.slug}`}
                     aria-current={isActive ? "step" : undefined}
                     className={`flex items-baseline gap-3 rounded-md px-2 py-1.5 text-sm transition-colors ${
                       isActive

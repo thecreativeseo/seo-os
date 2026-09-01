@@ -40,7 +40,7 @@ export default async function ContextVersionPage({
     <main className="mx-auto w-full max-w-3xl flex-1 space-y-8 px-6 py-12">
       <div>
         <Link
-          href={`/websites/${websiteId}/context` as never}
+          href={`/websites/${websiteId}/context`}
           className="text-muted-foreground text-sm hover:underline"
         >
           ← Business Context

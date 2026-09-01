@@ -72,7 +72,7 @@ export default async function Home() {
                 {workspace.websites.map((site) => (
                   <div key={site.id}>
                     <Link
-                      href={`/websites/${site.id}/context` as never}
+                      href={`/websites/${site.id}/context`}
                       className="font-mono text-xs hover:underline"
                     >
                       {site.normalizedDomain}
