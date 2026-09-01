@@ -6,9 +6,11 @@ import {
   approveDraft,
   contentFromOnboarding,
   createDraftFromApproved,
+  discardDraft,
   getCurrentApproved,
   getOpenDraft,
   listVersions,
+  updateDraft,
   upsertDraft,
 } from "@/server/services/business-context";
 import type { TenantContext } from "@/server/auth/guards";
@@ -288,6 +290,130 @@ describe("approved context is immutable", () => {
     await expect(createDraftFromApproved(context)).rejects.toBeInstanceOf(
       BusinessContextError,
     );
+  });
+});
+
+describe("editing a draft", () => {
+  it("saves changes to an open draft", async () => {
+    const context = await makeContext("edit");
+    const draft = await upsertDraft(context, { productService: "Before" });
+
+    const updated = await updateDraft(context, draft.id, {
+      productService: "After",
+      brandVoice: "Direct and specific",
+      buyerRoles: ["Head of Marketing", "SEO Manager"],
+    });
+
+    expect(updated.id).toBe(draft.id);
+    expect(updated.productService).toBe("After");
+    expect(updated.brandVoice).toBe("Direct and specific");
+    expect(updated.buyerRoles).toEqual(["Head of Marketing", "SEO Manager"]);
+    expect(updated.status).toBe("DRAFT");
+  });
+
+  it("clears a field back to unknown when emptied", async () => {
+    const context = await makeContext("editclear");
+    const draft = await upsertDraft(context, { brandVoice: "Something" });
+
+    const updated = await updateDraft(context, draft.id, { brandVoice: null });
+
+    expect(updated.brandVoice).toBeNull();
+  });
+
+  it("refuses to edit an approved version", async () => {
+    const context = await makeContext("editapproved");
+    const draft = await upsertDraft(context, { productService: "Final" });
+    const approved = await approveDraft(context, draft.id);
+
+    await expect(
+      updateDraft(context, approved.id, { productService: "Tampered" }),
+    ).rejects.toThrow(/cannot be edited/i);
+
+    const unchanged = await prisma.businessContextVersion.findUnique({
+      where: { id: approved.id },
+    });
+    expect(unchanged?.productService).toBe("Final");
+  });
+
+  it("does not edit another tenant's draft", async () => {
+    const a = await makeContext("edit-a");
+    const b = await makeContext("edit-b");
+    const draftB = await upsertDraft(b, { productService: "B only" });
+
+    await expect(
+      updateDraft(a, draftB.id, { productService: "hijacked" }),
+    ).rejects.toBeInstanceOf(BusinessContextError);
+
+    const unchanged = await prisma.businessContextVersion.findUnique({
+      where: { id: draftB.id },
+    });
+    expect(unchanged?.productService).toBe("B only");
+  });
+
+  it("records an audit event for the edit", async () => {
+    const context = await makeContext("editaudit");
+    const draft = await upsertDraft(context, { productService: "One" });
+    await updateDraft(context, draft.id, { productService: "Two" });
+
+    const events = await prisma.auditEvent.findMany({
+      where: { entityId: draft.id },
+      orderBy: { createdAt: "asc" },
+    });
+
+    expect(events.map((event) => event.action)).toEqual(["CREATE", "UPDATE"]);
+  });
+});
+
+describe("discarding a draft", () => {
+  it("deletes the draft and leaves the approved version canonical", async () => {
+    const context = await makeContext("discard");
+    const approved = await approveDraft(
+      context,
+      (await upsertDraft(context, { productService: "Approved copy" })).id,
+    );
+    const draft = await createDraftFromApproved(context);
+    await updateDraft(context, draft.id, { productService: "Abandoned edit" });
+
+    await discardDraft(context, draft.id);
+
+    expect(await getOpenDraft(context.website.id)).toBeNull();
+    const current = await getCurrentApproved(context.website.id);
+    expect(current?.id).toBe(approved.id);
+    expect(current?.productService).toBe("Approved copy");
+    expect(await listVersions(context.website.id)).toHaveLength(1);
+  });
+
+  it("refuses to discard the only context a website has", async () => {
+    const context = await makeContext("discardonly");
+    const draft = await upsertDraft(context, { productService: "The only one" });
+
+    await expect(discardDraft(context, draft.id)).rejects.toThrow(/only context/i);
+
+    // Still there — discarding must not be able to leave a website with nothing.
+    expect((await getOpenDraft(context.website.id))?.id).toBe(draft.id);
+  });
+
+  it("refuses to discard an approved version", async () => {
+    const context = await makeContext("discardapproved");
+    const approved = await approveDraft(
+      context,
+      (await upsertDraft(context, { productService: "Approved" })).id,
+    );
+
+    await expect(discardDraft(context, approved.id)).rejects.toThrow(
+      /cannot be discarded/i,
+    );
+    expect(await prisma.businessContextVersion.count({ where: { id: approved.id } })).toBe(1);
+  });
+
+  it("does not discard another tenant's draft", async () => {
+    const a = await makeContext("disc-a");
+    const b = await makeContext("disc-b");
+    await approveDraft(b, (await upsertDraft(b, { productService: "B v1" })).id);
+    const draftB = await createDraftFromApproved(b);
+
+    await expect(discardDraft(a, draftB.id)).rejects.toBeInstanceOf(BusinessContextError);
+    expect(await prisma.businessContextVersion.count({ where: { id: draftB.id } })).toBe(1);
   });
 });
 

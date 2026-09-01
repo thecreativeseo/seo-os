@@ -187,6 +187,117 @@ export async function upsertDraft(
 }
 
 /**
+ * Saves edits to an open draft.
+ *
+ * Refuses anything that is not DRAFT or IN_REVIEW. The database trigger would
+ * reject an approved row anyway, but failing here gives the user a sentence they
+ * can act on instead of a database error.
+ */
+export async function updateDraft(
+  context: TenantContext,
+  versionId: string,
+  content: ContextContent,
+): Promise<BusinessContextVersion> {
+  const businessContext = await getOrCreateContext(context.website.id);
+
+  const version = await prisma.businessContextVersion.findFirst({
+    where: { id: versionId, businessContextId: businessContext.id },
+  });
+
+  if (!version) {
+    throw new BusinessContextError("That version is not available.");
+  }
+
+  if (version.status === "APPROVED") {
+    throw new BusinessContextError(
+      "Approved context cannot be edited. Start a new draft instead.",
+    );
+  }
+
+  if (version.status === "ARCHIVED") {
+    throw new BusinessContextError("An archived version cannot be edited.");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.businessContextVersion.update({
+      where: { id: version.id },
+      data: content as Prisma.BusinessContextVersionUpdateInput,
+    });
+
+    await tx.auditEvent.create({
+      data: {
+        organizationId: context.organization.id,
+        workspaceId: context.workspace.id,
+        websiteId: context.website.id,
+        actorUserId: context.user.id,
+        entityType: "BusinessContextVersion",
+        entityId: updated.id,
+        action: "UPDATE",
+        afterSnapshotJson: redact({ versionNumber: updated.versionNumber }),
+      },
+    });
+
+    return updated;
+  });
+}
+
+/**
+ * Throws away an open draft.
+ *
+ * Only permitted when an approved version exists to fall back to — otherwise
+ * discarding would leave the website with no context at all and no way to rebuild
+ * it, since the onboarding session that produced it is already complete.
+ */
+export async function discardDraft(
+  context: TenantContext,
+  versionId: string,
+): Promise<void> {
+  const businessContext = await getOrCreateContext(context.website.id);
+
+  const version = await prisma.businessContextVersion.findFirst({
+    where: { id: versionId, businessContextId: businessContext.id },
+  });
+
+  if (!version) {
+    throw new BusinessContextError("That version is not available.");
+  }
+
+  if (version.status === "APPROVED") {
+    throw new BusinessContextError("An approved version cannot be discarded.");
+  }
+
+  const approved = await prisma.businessContextVersion.findFirst({
+    where: { businessContextId: businessContext.id, status: "APPROVED" },
+  });
+
+  if (!approved) {
+    throw new BusinessContextError(
+      "This is the only context for this website. Edit it rather than discarding it.",
+    );
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.auditEvent.create({
+      data: {
+        organizationId: context.organization.id,
+        workspaceId: context.workspace.id,
+        websiteId: context.website.id,
+        actorUserId: context.user.id,
+        entityType: "BusinessContextVersion",
+        entityId: version.id,
+        action: "ARCHIVE",
+        beforeSnapshotJson: redact({
+          versionNumber: version.versionNumber,
+          status: version.status,
+        }),
+      },
+    });
+
+    await tx.businessContextVersion.delete({ where: { id: version.id } });
+  });
+}
+
+/**
  * Approves a draft and makes it canonical.
  *
  * The status flip and the canonical pointer move together in one transaction: a

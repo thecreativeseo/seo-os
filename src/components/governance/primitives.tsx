@@ -2,6 +2,7 @@
 
 import { useActionState } from "react";
 
+import { LabelWithHelp } from "@/components/ui/field-help";
 import type { GovernanceState } from "@/server/actions/governance";
 
 const initial: GovernanceState = {};
@@ -76,6 +77,7 @@ export function Field({
   required,
   multiline,
   hint,
+  help,
 }: {
   name: string;
   label: string;
@@ -84,6 +86,7 @@ export function Field({
   required?: boolean;
   multiline?: boolean;
   hint?: string;
+  help?: string;
 }) {
   const id = `gov-${name}`;
   const hintId = `${id}-hint`;
@@ -92,10 +95,7 @@ export function Field({
 
   return (
     <div className="space-y-1.5">
-      <label htmlFor={id} className="block text-sm font-medium">
-        {label}
-        {required ? " *" : null}
-      </label>
+      <LabelWithHelp htmlFor={id} label={label} help={help} required={required} />
       {multiline ? (
         <textarea
           id={id}
@@ -133,19 +133,19 @@ export function Choice({
   options,
   defaultValue,
   includeBlank,
+  help,
 }: {
   name: string;
   label: string;
   options: readonly { value: string; label: string }[];
   defaultValue?: string;
   includeBlank?: string;
+  help?: string;
 }) {
   const id = `gov-${name}`;
   return (
     <div className="space-y-1.5">
-      <label htmlFor={id} className="block text-sm font-medium">
-        {label}
-      </label>
+      <LabelWithHelp htmlFor={id} label={label} help={help} />
       <select
         id={id}
         name={name}

@@ -36,9 +36,25 @@ export default async function WebsiteLayout({
           </p>
         </Link>
         <WebsiteNav websiteId={websiteId} />
-        <p className="text-muted-foreground mt-6 text-xs">
-          {context.membership.role}
-        </p>
+
+        <div className="border-border mt-8 space-y-2 border-t pt-4">
+          <p className="text-muted-foreground truncate text-xs" title={context.user.email}>
+            {context.user.email}
+          </p>
+          <p className="text-muted-foreground font-mono text-[10px] tracking-wide">
+            {context.membership.role}
+          </p>
+          {/* POST, not a link: a GET sign-out could be triggered by a prefetch or
+              a third-party page embedding the URL. */}
+          <form action="/auth/signout" method="post">
+            <button
+              type="submit"
+              className="text-muted-foreground hover:text-foreground focus-visible:ring-ring -ml-2 inline-flex h-8 items-center rounded-md px-2 text-sm focus-visible:ring-2 focus-visible:outline-none"
+            >
+              Sign out
+            </button>
+          </form>
+        </div>
       </aside>
 
       <div className="min-w-0 flex-1">{children}</div>

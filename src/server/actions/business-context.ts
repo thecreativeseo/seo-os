@@ -12,12 +12,14 @@ import {
   approveDraft,
   contentFromOnboarding,
   createDraftFromApproved,
+  discardDraft,
   getOpenDraft,
+  updateDraft,
   upsertDraft,
 } from "@/server/services/business-context";
 import { answersOf } from "@/server/services/onboarding";
 
-export type ContextActionState = { error?: string };
+export type ContextActionState = { error?: string; saved?: boolean };
 
 /**
  * Builds a draft Business Context from the onboarding answers and approves it.
@@ -93,6 +95,97 @@ export async function saveDraftContextAction(
   await upsertDraft(context, contentFromOnboarding(answersOf(session)));
 
   redirect(`/websites/${context.website.id}/context`);
+}
+
+/**
+ * Text fields arrive as-is; list fields arrive as one entry per line.
+ * Empty means unknown, so blanks become null rather than "".
+ */
+function readContent(formData: FormData) {
+  const text = (key: string) => {
+    const value = formData.get(key);
+    const trimmed = typeof value === "string" ? value.trim() : "";
+    return trimmed.length > 0 ? trimmed : null;
+  };
+  const list = (key: string) => {
+    const value = formData.get(key);
+    if (typeof value !== "string") return [];
+    return value
+      .split("\n")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  };
+
+  return {
+    companySummary: text("companySummary"),
+    productService: text("productService"),
+    businessModel: text("businessModel"),
+    primaryCustomer: text("primaryCustomer"),
+    primaryMarket: text("primaryMarket"),
+    primaryConversion: text("primaryConversion"),
+    competitorSummary: text("competitorSummary"),
+    brandVoice: text("brandVoice"),
+    buyerRoles: list("buyerRoles"),
+    languages: list("languages"),
+    secondaryConversions: list("secondaryConversions"),
+    businessPriorities: list("businessPriorities"),
+    seoPriorities: list("seoPriorities"),
+    differentiators: list("differentiators"),
+    priorityTopics: list("priorityTopics"),
+    avoidTopics: list("avoidTopics"),
+    approvedClaims: list("approvedClaims"),
+    prohibitedClaims: list("prohibitedClaims"),
+  };
+}
+
+/** Saves edits to the open draft. */
+export async function saveContextDraftAction(
+  _previous: ContextActionState,
+  formData: FormData,
+): Promise<ContextActionState> {
+  const websiteId = String(formData.get("__websiteId") ?? "");
+  const versionId = String(formData.get("__versionId") ?? "");
+
+  const context = await requireWebsiteAccess(websiteId, REQUIRED.WRITE, {
+    throwOnDenied: true,
+  });
+
+  try {
+    await updateDraft(context, versionId, readContent(formData));
+  } catch (error) {
+    if (error instanceof BusinessContextError) {
+      return { error: error.message };
+    }
+    throw error;
+  }
+
+  revalidatePath(`/websites/${websiteId}/context`);
+  return { saved: true };
+}
+
+/** Throws away the open draft, returning to the approved version. */
+export async function discardContextDraftAction(
+  _previous: ContextActionState,
+  formData: FormData,
+): Promise<ContextActionState> {
+  const websiteId = String(formData.get("__websiteId") ?? "");
+  const versionId = String(formData.get("__versionId") ?? "");
+
+  const context = await requireWebsiteAccess(websiteId, REQUIRED.WRITE, {
+    throwOnDenied: true,
+  });
+
+  try {
+    await discardDraft(context, versionId);
+  } catch (error) {
+    if (error instanceof BusinessContextError) {
+      return { error: error.message };
+    }
+    throw error;
+  }
+
+  revalidatePath(`/websites/${websiteId}/context`);
+  return {};
 }
 
 /** Approves an existing draft from the Business Context page. */

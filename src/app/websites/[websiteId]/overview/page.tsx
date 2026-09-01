@@ -8,6 +8,12 @@ import {
   Field,
   PageHeader,
 } from "@/components/governance/primitives";
+import {
+  TECHNICAL_HELP,
+  VERIFICATION_HELP,
+} from "@/components/governance/overview-help";
+import { FieldHelp } from "@/components/ui/field-help";
+import type { VerificationStatus } from "@/generated/prisma/client";
 
 export const metadata = { title: "Overview · SEO OS" };
 
@@ -15,6 +21,22 @@ const STAGING = [
   { value: "yes", label: "Yes" },
   { value: "no", label: "No" },
 ] as const;
+
+/**
+ * Verification means domain ownership — proof the website is yours, not just a
+ * domain someone typed in.
+ *
+ * Nothing in P0 verifies anything, so every website reads UNVERIFIED. Showing the
+ * raw enum makes a working prototype look broken, so the value is phrased as the
+ * roadmap item it is. It becomes real in P1: connecting Google Search Console
+ * proves ownership, because GSC only returns data for properties already verified.
+ */
+const VERIFICATION_LABELS: Record<VerificationStatus, string> = {
+  UNVERIFIED: "Not verified yet · P1",
+  PENDING: "Verification in progress",
+  VERIFIED: "Verified",
+  FAILED: "Verification failed",
+};
 
 export default async function OverviewPage({
   params,
@@ -35,8 +57,10 @@ export default async function OverviewPage({
     ["Primary market", website.primaryMarket],
     ["Primary language", website.primaryLanguage],
     ["Timezone", website.timezone],
-    ["Verification", website.verificationStatus],
   ];
+
+  const verificationLabel = VERIFICATION_LABELS[website.verificationStatus];
+  const awaitingVerification = website.verificationStatus === "UNVERIFIED";
 
   return (
     <main className="space-y-10">
@@ -56,6 +80,15 @@ export default async function OverviewPage({
               </dd>
             </div>
           ))}
+          <div className="grid gap-1 px-4 py-3 text-sm sm:grid-cols-[12rem_1fr] sm:gap-4">
+            <dt className="text-muted-foreground flex items-center gap-1.5">
+              Verification
+              <FieldHelp text={VERIFICATION_HELP} />
+            </dt>
+            <dd className={awaitingVerification ? "text-muted-foreground" : ""}>
+              {verificationLabel}
+            </dd>
+          </div>
         </dl>
       </section>
 
@@ -73,22 +106,30 @@ export default async function OverviewPage({
             pendingLabel="Saving…"
             className="border-border space-y-4 rounded-lg border p-5"
           >
-            <Field name="hostingNotes" label="Hosting" defaultValue={technical?.hostingNotes ?? ""} />
+            <Field
+              name="hostingNotes"
+              label="Hosting"
+              help={TECHNICAL_HELP.hostingNotes}
+              defaultValue={technical?.hostingNotes ?? ""}
+            />
             <Field
               name="knownMigrations"
               label="Known migrations"
+              help={TECHNICAL_HELP.knownMigrations}
               multiline
               defaultValue={technical?.knownMigrations ?? ""}
             />
             <Field
               name="knownConstraints"
               label="Known constraints"
+              help={TECHNICAL_HELP.knownConstraints}
               multiline
               defaultValue={technical?.knownConstraints ?? ""}
             />
             <Choice
               name="stagingAvailable"
               label="Staging environment"
+              help={TECHNICAL_HELP.stagingAvailable}
               options={STAGING}
               includeBlank="Not answered"
               defaultValue={
@@ -102,17 +143,20 @@ export default async function OverviewPage({
             <Field
               name="developerContact"
               label="Developer contact"
+              help={TECHNICAL_HELP.developerContact}
               defaultValue={technical?.developerContact ?? ""}
             />
             <Field
               name="publicationProcess"
               label="Publication process"
+              help={TECHNICAL_HELP.publicationProcess}
               multiline
               defaultValue={technical?.publicationProcess ?? ""}
             />
             <Field
               name="technicalNotes"
               label="Notes"
+              help={TECHNICAL_HELP.technicalNotes}
               multiline
               defaultValue={technical?.technicalNotes ?? ""}
             />
