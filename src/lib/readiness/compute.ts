@@ -80,7 +80,7 @@ export function computeReadiness(snapshot: ReadinessSnapshot): Readiness {
           ? "Complete"
           : "Website type not set"
         : "No domain",
-      path: "overview",
+      path: "ownership",
       action: "Finish the website details",
     },
     {

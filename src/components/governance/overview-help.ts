@@ -28,3 +28,21 @@ export const TECHNICAL_HELP: Record<string, string> = {
  */
 export const VERIFICATION_HELP =
   "Whether ownership of this domain has been proven — that the site is yours, not just a domain typed into a form. Nothing verifies it in this phase. It is confirmed in P1 by connecting Google Search Console, which only returns data for properties you already own.";
+
+/**
+ * The website's own facts, now editable, so they carry guidance like any other form.
+ */
+export const WEBSITE_FIELD_HELP: Record<string, string> = {
+  domain:
+    "The address SEO OS operates on. Scheme, www, port, path and trailing dots are stripped, so one site keeps one identity. Changing this changes which site everything below refers to.",
+  name: "A human label used in headings and reports. It has no effect on SEO work.",
+  websiteType:
+    "What kind of site this is. It shapes which conversions and page patterns matter in later phases.",
+  cmsType:
+    "What the site is built on. Determines which publishing integrations become possible later.",
+  primaryMarket:
+    "The country or region this website is trying to win. Later phases scope search data to it.",
+  primaryLanguage: "The language this website publishes in.",
+  timezone:
+    "Used to align reporting periods. Search data is reported in its own timezone, so a mismatch shifts day boundaries.",
+};

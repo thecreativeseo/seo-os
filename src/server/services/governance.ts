@@ -1,6 +1,9 @@
 import { prisma } from "@/server/db/prisma";
 import { recordAudit } from "@/server/audit/record";
-import { normalizeDomain } from "@/lib/domain/normalize-domain";
+import {
+  NORMALIZE_ERROR_MESSAGES,
+  normalizeDomain,
+} from "@/lib/domain/normalize-domain";
 import { requireTenantMember, websiteScope, type TenantContext } from "@/server/auth/guards";
 import type {
   BrandFact,
@@ -8,6 +11,7 @@ import type {
   Competitor,
   SeoRule,
   TechnicalContext,
+  Website,
 } from "@/generated/prisma/client";
 
 /**
@@ -554,5 +558,88 @@ export async function saveTechnicalContext(
     });
 
     return saved;
+  });
+}
+
+/* ----------------------------------------------------------------- website */
+
+export type WebsiteInput = {
+  domain: string;
+  name?: string | null;
+  websiteType?: string | null;
+  cmsType?: string | null;
+  primaryMarket?: string | null;
+  primaryLanguage?: string | null;
+  timezone?: string | null;
+};
+
+/**
+ * Updates the website's own facts.
+ *
+ * The domain is editable, but it is the website's identity, so it goes through the
+ * same normalization and the same per-workspace uniqueness check that onboarding
+ * uses. Changing it is audited with both values, because a later question about why
+ * a site's data changed shape usually starts here.
+ */
+export async function updateWebsite(
+  context: TenantContext,
+  input: WebsiteInput,
+): Promise<Website> {
+  const result = normalizeDomain(input.domain);
+
+  if (!result.ok) {
+    throw new GovernanceError(NORMALIZE_ERROR_MESSAGES[result.reason]);
+  }
+
+  const normalized = result.normalized;
+
+  const clash = await prisma.website.findFirst({
+    where: {
+      workspaceId: context.workspace.id,
+      normalizedDomain: normalized,
+      NOT: { id: context.website.id },
+    },
+  });
+
+  if (clash) {
+    throw new GovernanceError(`${normalized} is already set up in this workspace.`);
+  }
+
+  const before = {
+    domain: context.website.domain,
+    normalizedDomain: context.website.normalizedDomain,
+    name: context.website.name,
+    websiteType: context.website.websiteType,
+  };
+
+  return prisma.$transaction(async (tx) => {
+    const website = await tx.website.update({
+      where: { id: context.website.id },
+      data: {
+        domain: input.domain.trim(),
+        normalizedDomain: normalized,
+        name: input.name || null,
+        websiteType: (input.websiteType || null) as Website["websiteType"],
+        cmsType: (input.cmsType || null) as Website["cmsType"],
+        primaryMarket: input.primaryMarket || null,
+        primaryLanguage: input.primaryLanguage || null,
+        timezone: input.timezone || null,
+      },
+    });
+
+    await recordAudit(tx, context, {
+      entityType: "Website",
+      entityId: website.id,
+      action: "UPDATE",
+      before,
+      after: {
+        domain: website.domain,
+        normalizedDomain: website.normalizedDomain,
+        name: website.name,
+        websiteType: website.websiteType,
+      },
+    });
+
+    return website;
   });
 }

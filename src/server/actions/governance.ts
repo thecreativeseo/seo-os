@@ -18,6 +18,7 @@ import {
   saveTechnicalContext,
   setSeoRuleActive,
   updateGoal,
+  updateWebsite,
 } from "@/server/services/governance";
 
 export type GovernanceState = { error?: string };
@@ -292,6 +293,49 @@ export async function saveTechnicalContextAction(
       developerContact: text(formData, "developerContact") || null,
       publicationProcess: text(formData, "publicationProcess") || null,
       technicalNotes: text(formData, "technicalNotes") || null,
+    }),
+  );
+}
+
+/* ----------------------------------------------------------------- website */
+
+const websiteSchema = z.object({
+  domain: z.string().trim().min(1, "Enter a website domain").max(253),
+  name: z.string().trim().max(200).optional(),
+  websiteType: z.string().trim().max(40).optional(),
+  cmsType: z.string().trim().max(40).optional(),
+  primaryMarket: z.string().trim().max(120).optional(),
+  primaryLanguage: z.string().trim().max(60).optional(),
+  timezone: z.string().trim().max(80).optional(),
+});
+
+export async function saveWebsiteAction(
+  _previous: GovernanceState,
+  formData: FormData,
+): Promise<GovernanceState> {
+  const parsed = websiteSchema.safeParse({
+    domain: text(formData, "domain"),
+    name: text(formData, "name"),
+    websiteType: text(formData, "websiteType"),
+    cmsType: text(formData, "cmsType"),
+    primaryMarket: text(formData, "primaryMarket"),
+    primaryLanguage: text(formData, "primaryLanguage"),
+    timezone: text(formData, "timezone"),
+  });
+
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0]?.message ?? "Check the website details." };
+  }
+
+  return withWebsite(formData, REQUIRED.WRITE, (context) =>
+    updateWebsite(context, {
+      domain: parsed.data.domain,
+      name: parsed.data.name || null,
+      websiteType: parsed.data.websiteType || null,
+      cmsType: parsed.data.cmsType || null,
+      primaryMarket: parsed.data.primaryMarket || null,
+      primaryLanguage: parsed.data.primaryLanguage || null,
+      timezone: parsed.data.timezone || null,
     }),
   );
 }

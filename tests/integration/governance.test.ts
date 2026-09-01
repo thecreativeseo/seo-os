@@ -20,6 +20,7 @@ import {
   saveTechnicalContext,
   setSeoRuleActive,
   updateGoal,
+  updateWebsite,
 } from "@/server/services/governance";
 import type { TenantContext } from "@/server/auth/guards";
 import type { Role } from "@/generated/prisma/client";
@@ -427,5 +428,95 @@ describe("audit trail", () => {
     });
 
     expect(bEvents).toHaveLength(0);
+  });
+});
+
+describe("website details", () => {
+  it("updates editable fields", async () => {
+    const context = await makeContext("web");
+
+    const updated = await updateWebsite(context, {
+      domain: context.website.domain,
+      name: "Renamed Site",
+      websiteType: "SAAS_PRODUCT",
+      cmsType: "WEBFLOW",
+      primaryMarket: "United Kingdom",
+      primaryLanguage: "English",
+      timezone: "Europe/London",
+    });
+
+    expect(updated.name).toBe("Renamed Site");
+    expect(updated.websiteType).toBe("SAAS_PRODUCT");
+    expect(updated.cmsType).toBe("WEBFLOW");
+    expect(updated.timezone).toBe("Europe/London");
+  });
+
+  it("normalizes a changed domain", async () => {
+    const context = await makeContext("webdomain");
+
+    const updated = await updateWebsite(context, { domain: "https://www.Renamed.com/" });
+
+    expect(updated.normalizedDomain).toBe("renamed.com");
+    // The raw input is kept alongside the normalized form.
+    expect(updated.domain).toBe("https://www.Renamed.com/");
+  });
+
+  it("rejects an invalid domain with a usable message", async () => {
+    const context = await makeContext("webbad");
+
+    await expect(updateWebsite(context, { domain: "localhost" })).rejects.toThrow(
+      /full domain/i,
+    );
+  });
+
+  it("rejects a domain already used in the same workspace", async () => {
+    const context = await makeContext("webdupe");
+    await prisma.website.create({
+      data: {
+        workspaceId: context.workspace.id,
+        domain: "taken.example.com",
+        normalizedDomain: "taken.example.com",
+      },
+    });
+
+    await expect(
+      updateWebsite(context, { domain: "https://www.taken.example.com/" }),
+    ).rejects.toThrow(/already set up/i);
+  });
+
+  it("allows saving without changing the domain", async () => {
+    const context = await makeContext("websame");
+
+    const updated = await updateWebsite(context, {
+      domain: context.website.domain,
+      name: "Same domain",
+    });
+
+    expect(updated.normalizedDomain).toBe(context.website.normalizedDomain);
+  });
+
+  it("clears a field back to unknown when emptied", async () => {
+    const context = await makeContext("webclear");
+    await updateWebsite(context, { domain: context.website.domain, timezone: "UTC" });
+
+    const cleared = await updateWebsite(context, {
+      domain: context.website.domain,
+      timezone: null,
+    });
+
+    expect(cleared.timezone).toBeNull();
+  });
+
+  it("audits the change with both values", async () => {
+    const context = await makeContext("webaudit");
+    await updateWebsite(context, { domain: context.website.domain, name: "After" });
+
+    const events = await prisma.auditEvent.findMany({
+      where: { entityId: context.website.id, entityType: "Website", action: "UPDATE" },
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.beforeSnapshotJson).toMatchObject({ name: null });
+    expect(events[0]?.afterSnapshotJson).toMatchObject({ name: "After" });
   });
 });
