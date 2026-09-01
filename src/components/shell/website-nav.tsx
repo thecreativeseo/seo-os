@@ -12,6 +12,10 @@ import { usePathname } from "next/navigation";
  */
 const GROUPS = [
   {
+    heading: "Command Center",
+    sections: [{ slug: "", label: "Command Center" }],
+  },
+  {
     heading: "Website",
     sections: [
       { slug: "overview", label: "Overview" },
@@ -40,8 +44,14 @@ export function WebsiteNav({ websiteId }: { websiteId: string }) {
           </p>
           <ul className="space-y-0.5">
             {group.sections.map((section) => {
-              const href = `/websites/${websiteId}/${section.slug}`;
-              const active = pathname === href || pathname.startsWith(`${href}/`);
+              const href = section.slug
+                ? `/websites/${websiteId}/${section.slug}`
+                : `/websites/${websiteId}`;
+              // The Command Center is the index route, so it must match exactly —
+              // a prefix match would light it up on every child page.
+              const active = section.slug
+                ? pathname === href || pathname.startsWith(`${href}/`)
+                : pathname === href;
 
               return (
                 <li key={section.slug}>
