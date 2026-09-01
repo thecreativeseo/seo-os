@@ -40,6 +40,12 @@ export default async function Home() {
 
   const workspace = organization?.workspaces[0];
 
+  // No website yet: the workspace exists but has nothing to operate on, so continue
+  // (or resume) onboarding rather than showing an empty shell.
+  if (workspace && workspace.websites.length === 0) {
+    redirect("/onboarding");
+  }
+
   return (
     <main className="flex flex-1 items-start justify-center px-6 py-16">
       <div className="w-full max-w-xl space-y-8">

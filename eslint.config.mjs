@@ -15,6 +15,21 @@ const eslintConfig = defineConfig([
     // Prisma-generated client is build output, not source.
     "src/generated/**",
   ]),
+  {
+    rules: {
+      // Underscore marks a deliberately unused binding, e.g. omitting a key by
+      // destructuring: const { __drafts: _drafts, ...answers } = envelope
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        {
+          varsIgnorePattern: "^_",
+          argsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+          ignoreRestSiblings: true,
+        },
+      ],
+    },
+  },
 ]);
 
 export default eslintConfig;
