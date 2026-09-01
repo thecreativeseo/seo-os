@@ -1,7 +1,11 @@
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { hasRole } from "@/server/auth/roles";
 import { listSeoRules } from "@/server/services/governance";
-import { createSeoRuleAction, toggleSeoRuleAction } from "@/server/actions/governance";
+import {
+  createSeoRuleAction,
+  editSeoRuleAction,
+  toggleSeoRuleAction,
+} from "@/server/actions/governance";
 import {
   ActionForm,
   Badge,
@@ -10,6 +14,7 @@ import {
   Field,
   PageHeader,
 } from "@/components/governance/primitives";
+import { EditDisclosure } from "@/components/governance/edit-disclosure";
 
 export const metadata = { title: "SEO Rules · SEO OS" };
 
@@ -66,14 +71,52 @@ export default async function SeoRulesPage({
                 </div>
               </div>
               {canWrite ? (
-                <ActionForm
-                  action={toggleSeoRuleAction}
-                  websiteId={websiteId}
-                  hidden={{ __ruleId: rule.id, __active: rule.active ? "false" : "true" }}
-                  submitLabel={rule.active ? "Deactivate" : "Reactivate"}
-                  variant="quiet"
-                  className=""
-                />
+                <div className="space-y-3">
+                  <ActionForm
+                    action={toggleSeoRuleAction}
+                    websiteId={websiteId}
+                    hidden={{ __ruleId: rule.id, __active: rule.active ? "false" : "true" }}
+                    submitLabel={rule.active ? "Deactivate" : "Reactivate"}
+                    variant="quiet"
+                    className=""
+                  />
+
+                  <EditDisclosure>
+                    <ActionForm
+                      action={editSeoRuleAction}
+                      websiteId={websiteId}
+                      hidden={{ __ruleId: rule.id }}
+                      submitLabel="Save rule"
+                      pendingLabel="Saving…"
+                      variant="secondary"
+                    >
+                      <Choice
+                        name="category"
+                        label="Category"
+                        options={CATEGORIES}
+                        defaultValue={rule.category}
+                      />
+                      <Field
+                        name="rule"
+                        label="Rule"
+                        required
+                        multiline
+                        defaultValue={rule.rule}
+                      />
+                      <Choice
+                        name="severity"
+                        label="Severity"
+                        options={SEVERITIES}
+                        defaultValue={rule.severity}
+                      />
+                      <Field
+                        name="appliesTo"
+                        label="Applies to"
+                        defaultValue={rule.appliesTo ?? ""}
+                      />
+                    </ActionForm>
+                  </EditDisclosure>
+                </div>
               ) : null}
             </li>
           ))}

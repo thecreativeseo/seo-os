@@ -17,7 +17,9 @@ import {
   retireGoal,
   saveTechnicalContext,
   setSeoRuleActive,
+  updateCompetitor,
   updateGoal,
+  updateSeoRule,
   updateWebsite,
 } from "@/server/services/governance";
 
@@ -336,6 +338,96 @@ export async function saveWebsiteAction(
       primaryMarket: parsed.data.primaryMarket || null,
       primaryLanguage: parsed.data.primaryLanguage || null,
       timezone: parsed.data.timezone || null,
+    }),
+  );
+}
+
+/* ------------------------------------------------------------------ edits */
+
+/**
+ * Editing an existing record, as distinct from the lifecycle actions above.
+ * Correcting wording is not a governance decision; activating or archiving is.
+ */
+
+export async function editGoalAction(
+  _previous: GovernanceState,
+  formData: FormData,
+): Promise<GovernanceState> {
+  const goalId = text(formData, "__goalId");
+
+  const parsed = goalSchema.safeParse({
+    title: text(formData, "title"),
+    businessObjective: text(formData, "businessObjective"),
+    primaryMetric: text(formData, "primaryMetric"),
+    baseline: text(formData, "baseline"),
+    baselineSource: text(formData, "baselineSource"),
+  });
+
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0]?.message ?? "Check the goal details." };
+  }
+
+  return withWebsite(formData, REQUIRED.WRITE, (context) =>
+    updateGoal(context, goalId, {
+      title: parsed.data.title,
+      businessObjective: parsed.data.businessObjective || null,
+      primaryMetric: parsed.data.primaryMetric || null,
+      baseline: parsed.data.baseline || null,
+      baselineSource: parsed.data.baselineSource || null,
+    }),
+  );
+}
+
+export async function editCompetitorAction(
+  _previous: GovernanceState,
+  formData: FormData,
+): Promise<GovernanceState> {
+  const competitorId = text(formData, "__competitorId");
+
+  const parsed = competitorSchema.safeParse({
+    name: text(formData, "name"),
+    domain: text(formData, "domain"),
+    notes: text(formData, "notes"),
+    type: text(formData, "type") || undefined,
+  });
+
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0]?.message ?? "Check the competitor details." };
+  }
+
+  return withWebsite(formData, REQUIRED.WRITE, (context) =>
+    updateCompetitor(context, competitorId, {
+      name: parsed.data.name,
+      domain: parsed.data.domain || null,
+      notes: parsed.data.notes || null,
+      type: parsed.data.type,
+    }),
+  );
+}
+
+export async function editSeoRuleAction(
+  _previous: GovernanceState,
+  formData: FormData,
+): Promise<GovernanceState> {
+  const ruleId = text(formData, "__ruleId");
+
+  const parsed = ruleSchema.safeParse({
+    category: text(formData, "category"),
+    rule: text(formData, "rule"),
+    severity: text(formData, "severity") || "INFO",
+    appliesTo: text(formData, "appliesTo"),
+  });
+
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0]?.message ?? "Check the rule details." };
+  }
+
+  return withWebsite(formData, REQUIRED.WRITE, (context) =>
+    updateSeoRule(context, ruleId, {
+      category: parsed.data.category,
+      rule: parsed.data.rule,
+      severity: parsed.data.severity,
+      appliesTo: parsed.data.appliesTo || null,
     }),
   );
 }

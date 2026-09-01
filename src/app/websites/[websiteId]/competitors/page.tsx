@@ -1,7 +1,11 @@
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { hasRole } from "@/server/auth/roles";
 import { listCompetitors } from "@/server/services/governance";
-import { addCompetitorAction, archiveCompetitorAction } from "@/server/actions/governance";
+import {
+  addCompetitorAction,
+  archiveCompetitorAction,
+  editCompetitorAction,
+} from "@/server/actions/governance";
 import {
   ActionForm,
   Badge,
@@ -10,6 +14,7 @@ import {
   Field,
   PageHeader,
 } from "@/components/governance/primitives";
+import { EditDisclosure } from "@/components/governance/edit-disclosure";
 
 export const metadata = { title: "Competitors · SEO OS" };
 
@@ -61,14 +66,56 @@ export default async function CompetitorsPage({
                 </div>
               </div>
               {canWrite ? (
-                <ActionForm
-                  action={archiveCompetitorAction}
-                  websiteId={websiteId}
-                  hidden={{ __competitorId: competitor.id }}
-                  submitLabel="Archive"
-                  variant="quiet"
-                  className=""
-                />
+                <div className="space-y-3">
+                  <ActionForm
+                    action={archiveCompetitorAction}
+                    websiteId={websiteId}
+                    hidden={{ __competitorId: competitor.id }}
+                    submitLabel="Archive"
+                    variant="quiet"
+                    className=""
+                  />
+
+                  <EditDisclosure>
+                    <ActionForm
+                      action={editCompetitorAction}
+                      websiteId={websiteId}
+                      hidden={{ __competitorId: competitor.id }}
+                      submitLabel="Save competitor"
+                      pendingLabel="Saving…"
+                      variant="secondary"
+                    >
+                      <Field
+                        name="name"
+                        label="Name"
+                        required
+                        defaultValue={competitor.name}
+                      />
+                      <Field
+                        name="domain"
+                        label="Domain"
+                        defaultValue={competitor.domain ?? ""}
+                        hint={
+                          competitor.normalizedDomain
+                            ? `Currently stored as ${competitor.normalizedDomain}`
+                            : "Leave blank if you do not know it."
+                        }
+                      />
+                      <Choice
+                        name="type"
+                        label="Type"
+                        options={TYPES}
+                        defaultValue={competitor.type}
+                      />
+                      <Field
+                        name="notes"
+                        label="Notes"
+                        multiline
+                        defaultValue={competitor.notes ?? ""}
+                      />
+                    </ActionForm>
+                  </EditDisclosure>
+                </div>
               ) : null}
             </li>
           ))}

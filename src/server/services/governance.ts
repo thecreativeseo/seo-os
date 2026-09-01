@@ -467,6 +467,48 @@ export async function createSeoRule(
   });
 }
 
+/**
+ * Edits a rule's text, category, severity or scope.
+ *
+ * Deactivating is a separate action: turning a rule off is a governance decision,
+ * while correcting its wording is not, and the audit trail should tell them apart.
+ */
+export async function updateSeoRule(
+  context: TenantContext,
+  ruleId: string,
+  input: SeoRuleInput,
+): Promise<SeoRule> {
+  const existing = await prisma.seoRule.findFirst({
+    where: { id: ruleId, ...websiteScope(context) },
+  });
+
+  if (!existing) {
+    throw new GovernanceError("That rule is not available.");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const rule = await tx.seoRule.update({
+      where: { id: existing.id },
+      data: {
+        category: input.category,
+        rule: input.rule,
+        severity: input.severity,
+        appliesTo: input.appliesTo || null,
+      },
+    });
+
+    await recordAudit(tx, context, {
+      entityType: "SeoRule",
+      entityId: rule.id,
+      action: "UPDATE",
+      before: { rule: existing.rule, severity: existing.severity },
+      after: { rule: rule.rule, severity: rule.severity },
+    });
+
+    return rule;
+  });
+}
+
 export async function setSeoRuleActive(
   context: TenantContext,
   ruleId: string,

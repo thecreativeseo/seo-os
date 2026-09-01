@@ -19,7 +19,9 @@ import {
   retireGoal,
   saveTechnicalContext,
   setSeoRuleActive,
+  updateCompetitor,
   updateGoal,
+  updateSeoRule,
   updateWebsite,
 } from "@/server/services/governance";
 import type { TenantContext } from "@/server/auth/guards";
@@ -518,5 +520,122 @@ describe("website details", () => {
     expect(events).toHaveLength(1);
     expect(events[0]?.beforeSnapshotJson).toMatchObject({ name: null });
     expect(events[0]?.afterSnapshotJson).toMatchObject({ name: "After" });
+  });
+});
+
+describe("editing existing records", () => {
+  it("edits a goal's fields without changing its status", async () => {
+    const context = await makeContext("editgoal");
+    const goal = await createGoal(context, { title: "Before" });
+    await updateGoal(context, goal.id, { status: "ACTIVE" });
+
+    const edited = await updateGoal(context, goal.id, {
+      title: "After",
+      primaryMetric: "Demo requests",
+    });
+
+    expect(edited.title).toBe("After");
+    expect(edited.primaryMetric).toBe("Demo requests");
+    // Editing wording is not a lifecycle change.
+    expect(edited.status).toBe("ACTIVE");
+  });
+
+  it("clears a goal's baseline back to unknown", async () => {
+    const context = await makeContext("editbaseline");
+    const goal = await createGoal(context, { title: "Has baseline", baseline: "42" });
+
+    const edited = await updateGoal(context, goal.id, { baseline: null });
+
+    expect(edited.baseline).toBeNull();
+  });
+
+  it("edits a competitor and re-normalizes its domain", async () => {
+    const context = await makeContext("editcomp");
+    const competitor = await addCompetitor(context, { name: "Old", domain: "old.com" });
+
+    const edited = await updateCompetitor(context, competitor.id, {
+      name: "New Name",
+      domain: "https://www.New.com/",
+      type: "DIRECT",
+      notes: "Repositioned",
+    });
+
+    expect(edited.name).toBe("New Name");
+    expect(edited.normalizedDomain).toBe("new.com");
+    expect(edited.type).toBe("DIRECT");
+    // Provenance survives an edit: this is still a user-provided competitor.
+    expect(edited.source).toBe("USER_PROVIDED");
+    expect(edited.providedByUser).toBe(true);
+  });
+
+  it("edits an SEO rule without changing whether it is active", async () => {
+    const context = await makeContext("editrule");
+    const rule = await createSeoRule(context, {
+      category: "Content",
+      rule: "Original wording",
+      severity: "INFO",
+    });
+    await setSeoRuleActive(context, rule.id, false);
+
+    const edited = await updateSeoRule(context, rule.id, {
+      category: "Legal",
+      rule: "Corrected wording",
+      severity: "BLOCKING",
+      appliesTo: "Pricing pages",
+    });
+
+    expect(edited.rule).toBe("Corrected wording");
+    expect(edited.severity).toBe("BLOCKING");
+    expect(edited.category).toBe("Legal");
+    // Deactivating is a governance decision; editing text is not.
+    expect(edited.active).toBe(false);
+  });
+
+  it("audits an edit separately from a lifecycle change", async () => {
+    const context = await makeContext("editaudit");
+    const rule = await createSeoRule(context, {
+      category: "Brand",
+      rule: "First",
+      severity: "INFO",
+    });
+
+    await updateSeoRule(context, rule.id, {
+      category: "Brand",
+      rule: "Second",
+      severity: "INFO",
+    });
+
+    const events = await prisma.auditEvent.findMany({
+      where: { entityId: rule.id },
+      orderBy: { createdAt: "asc" },
+    });
+
+    expect(events.map((event) => event.action)).toEqual(["CREATE", "UPDATE"]);
+    expect(events[1]?.beforeSnapshotJson).toMatchObject({ rule: "First" });
+    expect(events[1]?.afterSnapshotJson).toMatchObject({ rule: "Second" });
+  });
+
+  it("does not edit another tenant's competitor or rule", async () => {
+    const a = await makeContext("edit-iso-a");
+    const b = await makeContext("edit-iso-b");
+
+    const competitorB = await addCompetitor(b, { name: "B's rival" });
+    const ruleB = await createSeoRule(b, {
+      category: "Legal",
+      rule: "B only",
+      severity: "INFO",
+    });
+
+    await expect(
+      updateCompetitor(a, competitorB.id, { name: "hijacked" }),
+    ).rejects.toBeInstanceOf(GovernanceError);
+    await expect(
+      updateSeoRule(a, ruleB.id, { category: "Legal", rule: "hijacked", severity: "INFO" }),
+    ).rejects.toBeInstanceOf(GovernanceError);
+
+    expect((await prisma.competitor.findUnique({ where: { id: competitorB.id } }))?.name).toBe(
+      "B's rival",
+    );
+    expect((await prisma.seoRule.findUnique({ where: { id: ruleB.id } }))?.rule).toBe("B only");
   });
 });

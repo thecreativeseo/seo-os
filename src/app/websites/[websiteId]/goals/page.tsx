@@ -4,6 +4,7 @@ import { listGoals } from "@/server/services/governance";
 import {
   activateGoalAction,
   createGoalAction,
+  editGoalAction,
   retireGoalAction,
 } from "@/server/actions/governance";
 import {
@@ -18,6 +19,7 @@ import {
   GOAL_PLACEHOLDERS,
   GOAL_TEMPLATES,
 } from "@/components/governance/goal-help";
+import { EditDisclosure } from "@/components/governance/edit-disclosure";
 
 export const metadata = { title: "Business Goals · SEO OS" };
 
@@ -63,27 +65,73 @@ export default async function GoalsPage({
               </div>
 
               {canWrite ? (
-                <div className="flex gap-4">
-                  {goal.status === "DRAFT" ? (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-4">
+                    {goal.status === "DRAFT" ? (
+                      <ActionForm
+                        action={activateGoalAction}
+                        websiteId={websiteId}
+                        hidden={{ __goalId: goal.id }}
+                        submitLabel="Activate"
+                        variant="quiet"
+                        className=""
+                      />
+                    ) : null}
+                    {goal.status !== "RETIRED" ? (
+                      <ActionForm
+                        action={retireGoalAction}
+                        websiteId={websiteId}
+                        hidden={{ __goalId: goal.id }}
+                        submitLabel="Retire"
+                        variant="quiet"
+                        className=""
+                      />
+                    ) : null}
+                  </div>
+
+                  <EditDisclosure>
                     <ActionForm
-                      action={activateGoalAction}
+                      action={editGoalAction}
                       websiteId={websiteId}
                       hidden={{ __goalId: goal.id }}
-                      submitLabel="Activate"
-                      variant="quiet"
-                      className=""
-                    />
-                  ) : null}
-                  {goal.status !== "RETIRED" ? (
-                    <ActionForm
-                      action={retireGoalAction}
-                      websiteId={websiteId}
-                      hidden={{ __goalId: goal.id }}
-                      submitLabel="Retire"
-                      variant="quiet"
-                      className=""
-                    />
-                  ) : null}
+                      submitLabel="Save goal"
+                      pendingLabel="Saving…"
+                      variant="secondary"
+                    >
+                      <Field
+                        name="title"
+                        label="Goal"
+                        required
+                        help={GOAL_HELP.title}
+                        defaultValue={goal.title}
+                      />
+                      <Field
+                        name="businessObjective"
+                        label="Business objective"
+                        help={GOAL_HELP.businessObjective}
+                        defaultValue={goal.businessObjective ?? ""}
+                      />
+                      <Field
+                        name="primaryMetric"
+                        label="Primary metric"
+                        help={GOAL_HELP.primaryMetric}
+                        defaultValue={goal.primaryMetric ?? ""}
+                      />
+                      <Field
+                        name="baseline"
+                        label="Baseline"
+                        help={GOAL_HELP.baseline}
+                        defaultValue={goal.baseline === null ? "" : String(goal.baseline)}
+                        hint="Leave blank if unknown."
+                      />
+                      <Field
+                        name="baselineSource"
+                        label="Baseline source"
+                        help={GOAL_HELP.baselineSource}
+                        defaultValue={goal.baselineSource ?? ""}
+                      />
+                    </ActionForm>
+                  </EditDisclosure>
                 </div>
               ) : null}
             </li>
