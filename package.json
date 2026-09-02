@@ -19,7 +19,8 @@
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
     "db:validate": "prisma validate",
-    "db:seed:demo": "tsx prisma/seed-demo.ts"
+    "db:seed:demo": "tsx prisma/seed-demo.ts",
+    "db:seed:demo:p1": "tsx prisma/seed-demo-p1.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

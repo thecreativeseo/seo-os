@@ -266,6 +266,10 @@ model Website {
   primaryLanguage    String?            @map("primary_language")
   timezone           String?
   verificationStatus VerificationStatus @default(UNVERIFIED) @map("verification_status")
+  /// Synthetic demo data lives here. An explicit flag rather than a naming
+  /// convention: the DEMO DATA badge is a correctness guarantee, and inferring it
+  /// from a slug would fail silently the moment someone renames something.
+  isDemo             Boolean            @default(false) @map("is_demo")
   status             TenantStatus       @default(ACTIVE)
   createdAt          DateTime           @default(now()) @map("created_at")
   updatedAt          DateTime           @updatedAt @map("updated_at")
