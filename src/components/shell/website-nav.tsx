@@ -39,6 +39,7 @@ const GROUPS = [
     heading: "Connections",
     sections: [
       { slug: "connections", label: "Data Sources" },
+      { slug: "imports", label: "Imports" },
       { slug: "data-health", label: "Data Health" },
     ],
   },
