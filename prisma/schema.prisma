@@ -282,6 +282,16 @@ model Website {
   onboardingSessions OnboardingSession[]
   auditEvents        AuditEvent[]
 
+  // P1
+  pages           Page[]
+  queries         Query[]
+  gscMetrics      GscMetricDaily[]
+  ga4Metrics      Ga4LandingPageMetricDaily[]
+  sourceSnapshots SourceSnapshot[]
+  syncRuns        SyncRun[]
+  sitemaps        Sitemap[]
+  signals         Signal[]
+
   @@unique([workspaceId, normalizedDomain])
   @@index([workspaceId])
   @@map("website")
@@ -519,8 +529,24 @@ model Connection {
   createdAt           DateTime           @default(now()) @map("created_at")
   updatedAt           DateTime           @updatedAt @map("updated_at")
 
+  // P1: property selection is a deliberate second step. Authorising an account is
+  // not the same as choosing which property SEO OS reads, and a site with several
+  // properties must not have one guessed for it.
+  externalPropertyId   String?   @map("external_property_id")
+  externalPropertyName String?   @map("external_property_name")
+  propertySelectedAt   DateTime? @map("property_selected_at")
+  // Advanced only by a SUCCEEDED sync. A failed run must not look like fresh data.
+  lastSyncedAt         DateTime? @map("last_synced_at")
+  latestDataDate       DateTime? @map("latest_data_date") @db.Date
+
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   website   Website?  @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  credential      Credential?
+  sourceSnapshots SourceSnapshot[]
+  syncRuns        SyncRun[]
+  gscMetrics      GscMetricDaily[]
+  ga4Metrics      Ga4LandingPageMetricDaily[]
 
   @@unique([websiteId, provider])
   @@index([workspaceId])
@@ -554,4 +580,387 @@ model AuditEvent {
   @@index([organizationId, createdAt])
   @@index([websiteId, createdAt])
   @@map("audit_event")
+}
+
+// ===========================================================================
+// P1 — First-Party Search & Analytics Intelligence
+//
+// Invariants encoded here:
+//   Every metric row names the connection and snapshot it came from, so any
+//     number on screen can be traced to a specific API response.
+//   Unique keys enforce the documented grain, so a retried sync overwrites
+//     rather than duplicates.
+//   Unavailable values stay NULL. A GA4 property with no ecommerce reports 0
+//     revenue; storing that 0 would be indistinguishable from a measured zero.
+// ===========================================================================
+
+enum SyncStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+  CANCELLED
+}
+
+enum SyncType {
+  GSC_METRICS
+  GA4_METRICS
+  SITEMAP_FETCH
+}
+
+enum SearchType {
+  WEB
+  IMAGE
+  VIDEO
+  NEWS
+  DISCOVER
+}
+
+/// Where a Page was first observed. A page known only from a sitemap has been
+/// claimed by the site; a page known from Search Console has been seen by Google.
+enum PageSource {
+  GOOGLE_SEARCH_CONSOLE
+  GOOGLE_ANALYTICS
+  SITEMAP
+  MANUAL
+}
+
+enum PageType {
+  HOME
+  COMMERCIAL
+  BLOG_POST
+  CATEGORY
+  LANDING
+  DOCUMENTATION
+  OTHER
+  UNKNOWN
+}
+
+enum SitemapFetchStatus {
+  NEVER_FETCHED
+  FETCHING
+  SUCCEEDED
+  FAILED
+}
+
+enum SignalType {
+  TRAFFIC_DECLINE
+  TRAFFIC_GROWTH
+  IMPRESSION_GROWTH
+  CTR_OPPORTUNITY
+  STRIKING_DISTANCE
+  PAGE_WINNER
+  PAGE_LOSER
+  QUERY_WINNER
+  QUERY_LOSER
+  DATA_FRESHNESS_RISK
+}
+
+enum SignalStatus {
+  DETECTED
+  REVIEWED
+  DISMISSED
+  PROMOTED
+  RESOLVED
+}
+
+enum SignalSeverity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum EvidenceType {
+  METRIC_COMPARISON
+  THRESHOLD
+  SOURCE_FRESHNESS
+}
+
+/// Encrypted OAuth material for a Connection.
+///
+/// Never read by UI code and never returned by a service. Connection points at
+/// this row; the row holds ciphertext. keyVersion allows rotation without
+/// re-authorising every connection.
+model Credential {
+  id               String             @id @default(uuid()) @db.Uuid
+  connectionId     String             @unique @map("connection_id") @db.Uuid
+  provider         ConnectionProvider
+  encryptedPayload String             @map("encrypted_payload")
+  keyVersion       Int                @default(1) @map("key_version")
+  scopes           String[]
+  expiresAt        DateTime?          @map("expires_at")
+  rotatedAt        DateTime?          @map("rotated_at")
+  createdAt        DateTime           @default(now()) @map("created_at")
+  updatedAt        DateTime           @updatedAt @map("updated_at")
+
+  connection Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@map("credential")
+}
+
+/// A URL on the website.
+///
+/// sitemapPresent means the site claims the URL exists. It is never rendered as
+/// "indexed" — that would be a claim about Google a sitemap cannot support.
+model Page {
+  id              String       @id @default(uuid()) @db.Uuid
+  websiteId       String       @map("website_id") @db.Uuid
+  url             String
+  normalizedUrl   String       @map("normalized_url")
+  path            String
+  hostname        String
+  protocol        String
+  pageType        PageType     @default(UNKNOWN) @map("page_type")
+  contentType     String?      @map("content_type")
+  sourceFirstSeen PageSource   @map("source_first_seen")
+  firstSeenAt     DateTime     @default(now()) @map("first_seen_at")
+  lastSeenAt      DateTime     @default(now()) @map("last_seen_at")
+  sitemapPresent  Boolean      @default(false) @map("sitemap_present")
+  status          TenantStatus @default(ACTIVE)
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+  archivedAt      DateTime?    @map("archived_at")
+
+  website    Website                     @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  gscMetrics GscMetricDaily[]
+  ga4Metrics Ga4LandingPageMetricDaily[]
+  signals    Signal[]
+
+  @@unique([websiteId, normalizedUrl])
+  @@index([websiteId, lastSeenAt])
+  @@map("page")
+}
+
+model Query {
+  id              String   @id @default(uuid()) @db.Uuid
+  websiteId       String   @map("website_id") @db.Uuid
+  query           String
+  normalizedQuery String   @map("normalized_query")
+  firstSeenAt     DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt      DateTime @default(now()) @map("last_seen_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  website    Website          @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  gscMetrics GscMetricDaily[]
+  signals    Signal[]
+
+  @@unique([websiteId, normalizedQuery])
+  @@index([websiteId, lastSeenAt])
+  @@map("query")
+}
+
+/// Search Console metrics at the documented grain.
+///
+/// country and device are stored as explicit "ALL" sentinels in P1: ingesting the
+/// full breakdown multiplies row count by roughly fifty and would not fit the
+/// current database tier. The columns and the unique key stay at the documented
+/// grain, so broadening later is a configuration change plus a backfill rather
+/// than a migration. Data Health states which breakdown is being ingested.
+///
+/// ctr and position are stored as reported per row but are NEVER averaged across
+/// rows: aggregation recomputes CTR from summed clicks and impressions, and
+/// weights position by impressions.
+model GscMetricDaily {
+  id                 String     @id @default(uuid()) @db.Uuid
+  websiteId          String     @map("website_id") @db.Uuid
+  pageId             String     @map("page_id") @db.Uuid
+  queryId            String     @map("query_id") @db.Uuid
+  date               DateTime   @db.Date
+  country            String     @default("ALL")
+  device             String     @default("ALL")
+  searchType         SearchType @default(WEB) @map("search_type")
+  clicks             Int
+  impressions        Int
+  ctr                Decimal?   @db.Decimal(9, 6)
+  position           Decimal?   @db.Decimal(7, 3)
+  sourceConnectionId String     @map("source_connection_id") @db.Uuid
+  sourceSnapshotId   String?    @map("source_snapshot_id") @db.Uuid
+  createdAt          DateTime   @default(now()) @map("created_at")
+  updatedAt          DateTime   @updatedAt @map("updated_at")
+
+  website          Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  page             Page            @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  queryEntity      Query           @relation(fields: [queryId], references: [id], onDelete: Cascade)
+  sourceConnection Connection      @relation(fields: [sourceConnectionId], references: [id], onDelete: Cascade)
+  sourceSnapshot   SourceSnapshot? @relation(fields: [sourceSnapshotId], references: [id], onDelete: SetNull)
+
+  @@unique([websiteId, date, pageId, queryId, country, device, searchType])
+  @@index([websiteId, date])
+  @@index([pageId, date])
+  @@index([queryId, date])
+  @@map("gsc_metric_daily")
+}
+
+/// GA4 landing-page metrics.
+///
+/// Every metric is nullable. GA4 returns 0 for a property that does not measure
+/// something, and a stored 0 cannot be told apart from a measured zero — so an
+/// unmeasured metric stays NULL and the interface says "Not available".
+model Ga4LandingPageMetricDaily {
+  id                 String   @id @default(uuid()) @db.Uuid
+  websiteId          String   @map("website_id") @db.Uuid
+  pageId             String   @map("page_id") @db.Uuid
+  date               DateTime @db.Date
+  sessions           Int?
+  engagedSessions    Int?     @map("engaged_sessions")
+  users              Int?
+  newUsers           Int?     @map("new_users")
+  keyEvents          Int?     @map("key_events")
+  conversions        Int?
+  revenue            Decimal? @db.Decimal(18, 4)
+  sourceConnectionId String   @map("source_connection_id") @db.Uuid
+  sourceSnapshotId   String?  @map("source_snapshot_id") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  website          Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  page             Page            @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  sourceConnection Connection      @relation(fields: [sourceConnectionId], references: [id], onDelete: Cascade)
+  sourceSnapshot   SourceSnapshot? @relation(fields: [sourceSnapshotId], references: [id], onDelete: SetNull)
+
+  @@unique([websiteId, date, pageId])
+  @@index([websiteId, date])
+  @@map("ga4_landing_page_metric_daily")
+}
+
+/// What a provider actually returned.
+///
+/// objectStorageKey is nullable and unset in P1: retaining raw payloads needs a
+/// bucket that does not exist yet. The column keeps the design honest rather than
+/// inventing a pointer to nothing. Metadata passes through the redaction denylist;
+/// a snapshot must never contain a token.
+model SourceSnapshot {
+  id               String             @id @default(uuid()) @db.Uuid
+  websiteId        String             @map("website_id") @db.Uuid
+  connectionId     String             @map("connection_id") @db.Uuid
+  provider         ConnectionProvider
+  capturedAt       DateTime           @default(now()) @map("captured_at")
+  periodStart      DateTime?          @map("period_start") @db.Date
+  periodEnd        DateTime?          @map("period_end") @db.Date
+  objectStorageKey String?            @map("object_storage_key")
+  checksum         String?
+  metadataJson     Json?              @map("metadata_json")
+  createdAt        DateTime           @default(now()) @map("created_at")
+
+  website    Website    @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  connection Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  gscMetrics GscMetricDaily[]
+  ga4Metrics Ga4LandingPageMetricDaily[]
+
+  @@index([websiteId, capturedAt])
+  @@map("source_snapshot")
+}
+
+/// One attempt to pull data for one period.
+///
+/// The idempotency key is unique per connection, so retrying a window cannot
+/// create a second run. A FAILED or PARTIAL run must not advance the connection's
+/// freshness: "no data since Tuesday" and "everything is fine" have to stay
+/// distinguishable.
+model SyncRun {
+  id              String             @id @default(uuid()) @db.Uuid
+  websiteId       String             @map("website_id") @db.Uuid
+  connectionId    String             @map("connection_id") @db.Uuid
+  provider        ConnectionProvider
+  syncType        SyncType           @map("sync_type")
+  status          SyncStatus         @default(QUEUED)
+  periodStart     DateTime?          @map("period_start") @db.Date
+  periodEnd       DateTime?          @map("period_end") @db.Date
+  startedAt       DateTime?          @map("started_at")
+  finishedAt      DateTime?          @map("finished_at")
+  recordsReceived Int                @default(0) @map("records_received")
+  recordsWritten  Int                @default(0) @map("records_written")
+  recordsSkipped  Int                @default(0) @map("records_skipped")
+  errorCode       String?            @map("error_code")
+  errorSummary    String?            @map("error_summary")
+  idempotencyKey  String             @map("idempotency_key")
+  createdAt       DateTime           @default(now()) @map("created_at")
+
+  website    Website    @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  connection Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, idempotencyKey])
+  @@index([websiteId, createdAt])
+  @@map("sync_run")
+}
+
+model Sitemap {
+  id                    String             @id @default(uuid()) @db.Uuid
+  websiteId             String             @map("website_id") @db.Uuid
+  url                   String
+  fetchStatus           SitemapFetchStatus @default(NEVER_FETCHED) @map("fetch_status")
+  lastFetchedAt         DateTime?          @map("last_fetched_at")
+  lastSuccessfulFetchAt DateTime?          @map("last_successful_fetch_at")
+  urlCount              Int?               @map("url_count")
+  lastError             String?            @map("last_error")
+  createdAt             DateTime           @default(now()) @map("created_at")
+  updatedAt             DateTime           @updatedAt @map("updated_at")
+
+  website Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@unique([websiteId, url])
+  @@map("sitemap")
+}
+
+/// An observation, never a diagnosis.
+///
+/// headline and summary are built from templates containing no causal vocabulary,
+/// and a test asserts none matches /because|caused by|due to/. Explaining why a
+/// change happened is P3 work, and claiming it here would be the exact failure the
+/// product exists to avoid.
+model Signal {
+  id                    String         @id @default(uuid()) @db.Uuid
+  websiteId             String         @map("website_id") @db.Uuid
+  type                  SignalType
+  status                SignalStatus   @default(DETECTED)
+  severity              SignalSeverity @default(INFO)
+  pageId                String?        @map("page_id") @db.Uuid
+  queryId               String?        @map("query_id") @db.Uuid
+  detectedAt            DateTime       @default(now()) @map("detected_at")
+  currentPeriodStart    DateTime       @map("current_period_start") @db.Date
+  currentPeriodEnd      DateTime       @map("current_period_end") @db.Date
+  comparisonPeriodStart DateTime       @map("comparison_period_start") @db.Date
+  comparisonPeriodEnd   DateTime       @map("comparison_period_end") @db.Date
+  score                 Decimal?       @db.Decimal(9, 4)
+  scoringModelVersion   String         @map("scoring_model_version")
+  headline              String
+  summary               String?
+  evidenceJson          Json?          @map("evidence_json")
+  createdAt             DateTime       @default(now()) @map("created_at")
+  updatedAt             DateTime       @updatedAt @map("updated_at")
+  resolvedAt            DateTime?      @map("resolved_at")
+
+  website  Website          @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  page     Page?            @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  queryRef Query?           @relation(fields: [queryId], references: [id], onDelete: Cascade)
+  evidence SignalEvidence[]
+
+  @@unique([websiteId, type, pageId, queryId, currentPeriodStart])
+  @@index([websiteId, status, severity])
+  @@map("signal")
+}
+
+/// The persisted numbers a signal was derived from.
+/// Every signal must be explainable without recomputing anything.
+model SignalEvidence {
+  id               String       @id @default(uuid()) @db.Uuid
+  signalId         String       @map("signal_id") @db.Uuid
+  evidenceType     EvidenceType @map("evidence_type")
+  sourceEntityType String       @map("source_entity_type")
+  sourceEntityId   String       @map("source_entity_id")
+  metricKey        String       @map("metric_key")
+  currentValue     Decimal?     @map("current_value") @db.Decimal(18, 4)
+  previousValue    Decimal?     @map("previous_value") @db.Decimal(18, 4)
+  periodStart      DateTime?    @map("period_start") @db.Date
+  periodEnd        DateTime?    @map("period_end") @db.Date
+  createdAt        DateTime     @default(now()) @map("created_at")
+
+  signal Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  @@index([signalId])
+  @@map("signal_evidence")
 }
