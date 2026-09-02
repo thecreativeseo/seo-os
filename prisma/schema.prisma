@@ -943,8 +943,12 @@ model Signal {
   queryRef Query?           @relation(fields: [queryId], references: [id], onDelete: Cascade)
   evidence SignalEvidence[]
 
-  @@unique([websiteId, type, pageId, queryId, currentPeriodStart])
+  // Identity is enforced by a raw unique index with NULLS NOT DISTINCT
+  // (see migration 20260902030000). Prisma cannot express that, and the default
+  // NULLS DISTINCT behaviour would let a signal with no page and no query — a
+  // freshness risk — insert a duplicate on every detection run.
   @@index([websiteId, status, severity])
+  @@index([websiteId, type, currentPeriodStart])
   @@map("signal")
 }
 
