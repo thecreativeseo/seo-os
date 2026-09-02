@@ -150,6 +150,13 @@ enum AuditAction {
   RETIRE
   COMPLETE
   SIGN_IN
+  // P2 opportunity lifecycle. Four verbs rather than sixteen event names:
+  // entityType already says what was acted on, and the audit screen renders
+  // these as badges.
+  QUALIFY
+  SCHEDULE
+  DECLINE
+  ASSIGN
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +187,12 @@ model User {
   createdContexts    BusinessContextVersion[] @relation("ContextCreator")
   approvedContexts   BusinessContextVersion[] @relation("ContextApprover")
   auditEvents        AuditEvent[]
+
+  // P2
+  assignedOwnerships KeywordPageOwnership[] @relation("OwnershipAssigner")
+  ownedTopics        Topic[]                @relation("TopicOwner")
+  uploadedImports    Import[]               @relation("ImportUploader")
+  ownedOpportunities Opportunity[]          @relation("OpportunityOwner")
 
   @@map("user")
 }
@@ -295,6 +308,16 @@ model Website {
   syncRuns        SyncRun[]
   sitemaps        Sitemap[]
   signals         Signal[]
+
+  // P2
+  keywords            Keyword[]
+  keywordMetrics      KeywordMetricsSnapshot[]
+  rankingSnapshots    RankingSnapshot[]
+  keywordOwnerships   KeywordPageOwnership[]
+  topics              Topic[]
+  competitorSnapshots CompetitorKeywordSnapshot[]
+  imports             Import[]
+  opportunities       Opportunity[]
 
   @@unique([workspaceId, normalizedDomain])
   @@index([workspaceId])
@@ -420,8 +443,9 @@ model BusinessGoal {
   updatedAt         DateTime   @updatedAt @map("updated_at")
   archivedAt        DateTime?  @map("archived_at")
 
-  website Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  owner   User?   @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+  website       Website       @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  owner         User?         @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+  opportunities Opportunity[]
 
   @@index([websiteId])
   @@map("business_goal")
@@ -466,7 +490,9 @@ model Competitor {
   updatedAt        DateTime       @updatedAt @map("updated_at")
   archivedAt       DateTime?      @map("archived_at")
 
-  website Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  website          Website                     @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  keywordSnapshots CompetitorKeywordSnapshot[]
+  opportunities    Opportunity[]
 
   @@index([websiteId])
   @@map("competitor")
@@ -551,6 +577,10 @@ model Connection {
   syncRuns        SyncRun[]
   gscMetrics      GscMetricDaily[]
   ga4Metrics      Ga4LandingPageMetricDaily[]
+
+  // P2
+  keywordMetrics   KeywordMetricsSnapshot[]
+  rankingSnapshots RankingSnapshot[]
 
   @@unique([websiteId, provider])
   @@index([workspaceId])
@@ -680,6 +710,12 @@ enum EvidenceType {
   METRIC_COMPARISON
   THRESHOLD
   SOURCE_FRESHNESS
+  // P2
+  RANKING_OBSERVATION
+  KEYWORD_METRIC
+  OWNERSHIP_STATE
+  COMPETITOR_OVERLAP
+  GOAL_ALIGNMENT
 }
 
 /// Encrypted OAuth material for a Connection.
@@ -731,6 +767,14 @@ model Page {
   gscMetrics GscMetricDaily[]
   ga4Metrics Ga4LandingPageMetricDaily[]
   signals    Signal[]
+
+  // P2
+  rankingSnapshots    RankingSnapshot[]
+  keywordOwnerships   KeywordPageOwnership[]
+  topicPages          TopicPage[]
+  pillarForTopics     Topic[]                @relation("TopicPillarPage")
+  commercialForTopics Topic[]                @relation("TopicCommercialPage")
+  opportunities       Opportunity[]
 
   @@unique([websiteId, normalizedUrl])
   @@index([websiteId, lastSeenAt])
@@ -855,6 +899,11 @@ model SourceSnapshot {
   gscMetrics GscMetricDaily[]
   ga4Metrics Ga4LandingPageMetricDaily[]
 
+  // P2
+  keywordMetrics      KeywordMetricsSnapshot[]
+  rankingSnapshots    RankingSnapshot[]
+  competitorSnapshots CompetitorKeywordSnapshot[]
+
   @@index([websiteId, capturedAt])
   @@map("source_snapshot")
 }
@@ -938,10 +987,11 @@ model Signal {
   updatedAt             DateTime       @updatedAt @map("updated_at")
   resolvedAt            DateTime?      @map("resolved_at")
 
-  website  Website          @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  page     Page?            @relation(fields: [pageId], references: [id], onDelete: Cascade)
-  queryRef Query?           @relation(fields: [queryId], references: [id], onDelete: Cascade)
-  evidence SignalEvidence[]
+  website       Website          @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  page          Page?            @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  queryRef      Query?           @relation(fields: [queryId], references: [id], onDelete: Cascade)
+  evidence      SignalEvidence[]
+  opportunities Opportunity[]
 
   // Identity is enforced by a raw unique index with NULLS NOT DISTINCT
   // (see migration 20260902030000). Prisma cannot express that, and the default
@@ -971,4 +1021,539 @@ model SignalEvidence {
 
   @@index([signalId])
   @@map("signal_evidence")
+}
+
+// ---------------------------------------------------------------------------
+// P2 — Market, keyword and opportunity intelligence
+// ---------------------------------------------------------------------------
+
+/// Where a keyword sits on the buying journey.
+enum KeywordIntent {
+  INFORMATIONAL
+  COMMERCIAL
+  TRANSACTIONAL
+  NAVIGATIONAL
+  LOCAL
+  MIXED
+  UNKNOWN
+}
+
+/// Deliberately separate from the canonical Provenance enum.
+///
+/// CLAUDE.md fixes the data-provenance vocabulary (USER_PROVIDED, SYSTEM_DERIVED,
+/// INFERRED, UNKNOWN) and P2_SPEC §9 names a different set for intent. They answer
+/// different questions — where did this row come from, versus who decided what
+/// this keyword means — so merging them would weaken both.
+enum IntentProvenance {
+  USER_PROVIDED
+  PROVIDER_PROVIDED
+  SYSTEM_CLASSIFIED
+  UNKNOWN
+}
+
+enum OwnershipType {
+  PRIMARY
+  SECONDARY
+  EXPERIMENTAL
+  UNKNOWN
+}
+
+enum OwnershipStatus {
+  ACTIVE
+  REVIEW_NEEDED
+  RETIRED
+}
+
+/// Observations about ownership, never diagnoses. The names end in CANDIDATE
+/// where a diagnosis would be tempting; confirming cannibalization belongs to P3.
+enum OwnershipCandidateType {
+  NO_OWNING_PAGE
+  RANKING_URL_DIVERGENCE
+  RANKING_URL_SWITCH
+  MULTIPLE_RANKING_PAGES
+  CANNIBALIZATION_CANDIDATE
+}
+
+enum TopicCoverage {
+  UNMAPPED
+  PLANNED
+  PARTIAL
+  COVERED
+  OVERLAPPING
+  UNKNOWN
+}
+
+enum TopicAuthority {
+  WEAK
+  DEVELOPING
+  STRONG
+  UNKNOWN
+}
+
+enum TopicPageRole {
+  PILLAR
+  SUPPORTING
+  COMMERCIAL
+  UTILITY
+  UNKNOWN
+}
+
+enum OpportunityType {
+  COMMERCIAL_RANKING
+  KEYWORD_OWNERSHIP
+  CTR
+  TOPIC_GAP
+  COMPETITOR_GAP
+  CONTENT_REFRESH
+  NO_OWNING_PAGE
+  KEYWORD_GAP
+  WEAK_OWNING_PAGE
+  RANKING_URL_DIVERGENCE
+}
+
+enum OpportunityStatus {
+  IDENTIFIED
+  QUALIFIED
+  SCHEDULED
+  IN_PROGRESS
+  DECLINED
+  COMPLETED
+  ARCHIVED
+}
+
+enum OpportunityPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum EffortLevel {
+  LOW
+  MEDIUM
+  HIGH
+  UNKNOWN
+}
+
+enum ConfidenceLevel {
+  LOW
+  MEDIUM
+  HIGH
+  UNKNOWN
+}
+
+enum ImportStatus {
+  UPLOADED
+  PARSING
+  VALIDATED
+  PREVIEWED
+  COMMITTING
+  COMMITTED
+  FAILED
+  CANCELLED
+}
+
+enum ImportSource {
+  SEMRUSH_POSITIONS
+  SEMRUSH_KEYWORD_OVERVIEW
+  SEMRUSH_COMPETITORS
+  MANUAL_CSV
+}
+
+/// A search term this website cares about, in one market.
+///
+/// Identity includes locale, language and market because there is no single global
+/// keyword: "payroll software" in the Philippines and in the United States have
+/// different volumes, different competitors and different money behind them.
+/// Collapsing them would produce one row describing neither.
+///
+/// All three locale columns are non-null with defaults. A NULL does not compare
+/// equal to another NULL in a Postgres unique index, so nullable locale columns
+/// would quietly permit duplicates — the trap that produced duplicate signals in
+/// P1, designed out here rather than indexed around a second time.
+model Keyword {
+  id                String           @id @default(uuid()) @db.Uuid
+  websiteId         String           @map("website_id") @db.Uuid
+  keyword           String
+  normalizedKeyword String           @map("normalized_keyword")
+  locale            String           @default("en-PH")
+  language          String           @default("en")
+  market            String           @default("PH")
+  intent            KeywordIntent    @default(UNKNOWN)
+  intentProvenance  IntentProvenance @default(UNKNOWN) @map("intent_provenance")
+  /// 0–5, set by a person. Feeds the opportunity score, so it is never guessed.
+  businessRelevance Int?             @map("business_relevance")
+  commercialValue   Int?             @map("commercial_value")
+  status            TenantStatus     @default(ACTIVE)
+  firstSeenAt       DateTime         @default(now()) @map("first_seen_at")
+  lastSeenAt        DateTime         @default(now()) @map("last_seen_at")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+  archivedAt        DateTime?        @map("archived_at")
+
+  website             Website                     @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  metricSnapshots     KeywordMetricsSnapshot[]
+  rankingSnapshots    RankingSnapshot[]
+  ownerships          KeywordPageOwnership[]
+  topicKeywords       TopicKeyword[]
+  competitorSnapshots CompetitorKeywordSnapshot[]
+  opportunities       Opportunity[]
+
+  @@unique([websiteId, normalizedKeyword, locale, language, market])
+  @@index([websiteId, lastSeenAt])
+  @@index([websiteId, intent])
+  @@map("keyword")
+}
+
+/// Volume and difficulty as they stood on a date, according to one provider.
+///
+/// Never mutable fields on Keyword: these change, and a prioritization built on
+/// the current volume with no history cannot explain why it ranked something
+/// highly last quarter.
+model KeywordMetricsSnapshot {
+  id                 String             @id @default(uuid()) @db.Uuid
+  websiteId          String             @map("website_id") @db.Uuid
+  keywordId          String             @map("keyword_id") @db.Uuid
+  capturedAt         DateTime           @map("captured_at") @db.Date
+  searchVolume       Int?               @map("search_volume")
+  /// Provider difficulty. Stored WITH its provider and never compared across
+  /// them: a Semrush KD of 40 and an Ahrefs KD of 40 are not the same claim.
+  keywordDifficulty  Decimal?           @map("keyword_difficulty") @db.Decimal(6, 2)
+  cpc                Decimal?           @db.Decimal(12, 4)
+  currency           String?
+  sourceProvider     ConnectionProvider @map("source_provider")
+  sourceConnectionId String?            @map("source_connection_id") @db.Uuid
+  sourceSnapshotId   String?            @map("source_snapshot_id") @db.Uuid
+  sourceImportId     String?            @map("source_import_id") @db.Uuid
+  createdAt          DateTime           @default(now()) @map("created_at")
+
+  website          Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  keyword          Keyword         @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  sourceConnection Connection?     @relation(fields: [sourceConnectionId], references: [id], onDelete: SetNull)
+  sourceSnapshot   SourceSnapshot? @relation(fields: [sourceSnapshotId], references: [id], onDelete: SetNull)
+  sourceImport     Import?         @relation(fields: [sourceImportId], references: [id], onDelete: SetNull)
+
+  @@unique([keywordId, capturedAt, sourceProvider])
+  @@index([websiteId, capturedAt])
+  @@map("keyword_metrics_snapshot")
+}
+
+/// Where a keyword ranked at a moment, according to a named provider.
+///
+/// Append-only. pageId is null when the ranking URL is not in our Page inventory,
+/// and that null is information: it usually means Google is ranking something we
+/// do not know about, which is worth surfacing rather than papering over by
+/// inventing a Page.
+model RankingSnapshot {
+  id                 String             @id @default(uuid()) @db.Uuid
+  websiteId          String             @map("website_id") @db.Uuid
+  keywordId          String             @map("keyword_id") @db.Uuid
+  pageId             String?            @map("page_id") @db.Uuid
+  capturedAt         DateTime           @map("captured_at") @db.Date
+  position           Decimal?           @db.Decimal(7, 2)
+  /// Only when the provider supplied it. Deriving it from our own previous
+  /// snapshot would mix two different claims under one column.
+  previousPosition   Decimal?           @map("previous_position") @db.Decimal(7, 2)
+  rankingUrl         String?            @map("ranking_url")
+  rankingType        String?            @map("ranking_type")
+  serpFeaturesJson   Json?              @map("serp_features_json")
+  sourceProvider     ConnectionProvider @map("source_provider")
+  sourceConnectionId String?            @map("source_connection_id") @db.Uuid
+  sourceSnapshotId   String?            @map("source_snapshot_id") @db.Uuid
+  sourceImportId     String?            @map("source_import_id") @db.Uuid
+  createdAt          DateTime           @default(now()) @map("created_at")
+
+  website          Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  keyword          Keyword         @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  page             Page?           @relation(fields: [pageId], references: [id], onDelete: SetNull)
+  sourceConnection Connection?     @relation(fields: [sourceConnectionId], references: [id], onDelete: SetNull)
+  sourceSnapshot   SourceSnapshot? @relation(fields: [sourceSnapshotId], references: [id], onDelete: SetNull)
+  sourceImport     Import?         @relation(fields: [sourceImportId], references: [id], onDelete: SetNull)
+
+  @@unique([keywordId, capturedAt, sourceProvider])
+  @@index([websiteId, capturedAt])
+  @@index([pageId, capturedAt])
+  @@map("ranking_snapshot")
+}
+
+/// The page a team INTENDS to own a keyword.
+///
+/// Distinct from wherever Google currently ranks, and the gap between the two is
+/// the most useful thing P2 knows. One active PRIMARY owner per keyword and market
+/// is enforced by a partial unique index in migration 20260903000100 — Postgres
+/// can express unique WHERE status = ACTIVE AND ownership_type = PRIMARY, which
+/// application code could always be talked out of.
+model KeywordPageOwnership {
+  id               String          @id @default(uuid()) @db.Uuid
+  websiteId        String          @map("website_id") @db.Uuid
+  keywordId        String          @map("keyword_id") @db.Uuid
+  pageId           String          @map("page_id") @db.Uuid
+  ownershipType    OwnershipType   @default(PRIMARY) @map("ownership_type")
+  status           OwnershipStatus @default(ACTIVE)
+  market           String          @default("PH")
+  language         String          @default("en")
+  locale           String          @default("en-PH")
+  assignedByUserId String?         @map("assigned_by_user_id") @db.Uuid
+  assignedAt       DateTime        @default(now()) @map("assigned_at")
+  notes            String?
+  createdAt        DateTime        @default(now()) @map("created_at")
+  updatedAt        DateTime        @updatedAt @map("updated_at")
+  archivedAt       DateTime?       @map("archived_at")
+
+  website    Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  keyword    Keyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  page       Page    @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  assignedBy User?   @relation("OwnershipAssigner", fields: [assignedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([websiteId, status])
+  @@index([keywordId, status])
+  @@index([pageId])
+  @@map("keyword_page_ownership")
+}
+
+/// A subject the business wants to be known for. Authored, never inferred.
+///
+/// P2 has no clustering algorithm and should not pretend to: a cluster that is 80%
+/// right produces a topic map nobody trusts and everybody re-checks by hand.
+model Topic {
+  id                          String         @id @default(uuid()) @db.Uuid
+  websiteId                   String         @map("website_id") @db.Uuid
+  name                        String
+  slug                        String
+  description                 String?
+  /// The words a customer uses, not the words the business uses.
+  customerLanguage            String?        @map("customer_language")
+  businessOutcome             String?        @map("business_outcome")
+  parentTopicId               String?        @map("parent_topic_id") @db.Uuid
+  pillarPageId                String?        @map("pillar_page_id") @db.Uuid
+  /// Separate from the pillar: the page that explains a topic is rarely the page
+  /// that sells it.
+  commercialDestinationPageId String?        @map("commercial_destination_page_id") @db.Uuid
+  coverageStatus              TopicCoverage  @default(UNKNOWN) @map("coverage_status")
+  /// A human judgement, presented as one. The spec is explicit that topic
+  /// authority must not pretend to be scientifically precise.
+  authorityStatus             TopicAuthority @default(UNKNOWN) @map("authority_status")
+  ownerUserId                 String?        @map("owner_user_id") @db.Uuid
+  priority                    Int?
+  status                      TenantStatus   @default(ACTIVE)
+  createdAt                   DateTime       @default(now()) @map("created_at")
+  updatedAt                   DateTime       @updatedAt @map("updated_at")
+  archivedAt                  DateTime?      @map("archived_at")
+
+  website               Website        @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  parentTopic           Topic?         @relation("TopicHierarchy", fields: [parentTopicId], references: [id], onDelete: SetNull)
+  childTopics           Topic[]        @relation("TopicHierarchy")
+  pillarPage            Page?          @relation("TopicPillarPage", fields: [pillarPageId], references: [id], onDelete: SetNull)
+  commercialDestination Page?          @relation("TopicCommercialPage", fields: [commercialDestinationPageId], references: [id], onDelete: SetNull)
+  owner                 User?          @relation("TopicOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  topicKeywords         TopicKeyword[]
+  topicPages            TopicPage[]
+  opportunities         Opportunity[]
+
+  @@unique([websiteId, slug])
+  @@index([websiteId, coverageStatus])
+  @@map("topic")
+}
+
+/// Many-to-many: a keyword can legitimately serve two topics.
+model TopicKeyword {
+  id        String   @id @default(uuid()) @db.Uuid
+  topicId   String   @map("topic_id") @db.Uuid
+  keywordId String   @map("keyword_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+
+  topic   Topic   @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  keyword Keyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+
+  @@unique([topicId, keywordId])
+  @@index([keywordId])
+  @@map("topic_keyword")
+}
+
+model TopicPage {
+  id        String        @id @default(uuid()) @db.Uuid
+  topicId   String        @map("topic_id") @db.Uuid
+  pageId    String        @map("page_id") @db.Uuid
+  role      TopicPageRole @default(UNKNOWN)
+  createdAt DateTime      @default(now()) @map("created_at")
+
+  topic Topic @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  page  Page  @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@unique([topicId, pageId])
+  @@index([pageId])
+  @@map("topic_page")
+}
+
+/// A third-party observation about somebody else's site.
+///
+/// Labelled as third-party everywhere it is displayed. The rule from the spec is
+/// blunt and worth keeping blunt: do not present third-party estimates as
+/// first-party truth.
+model CompetitorKeywordSnapshot {
+  id               String             @id @default(uuid()) @db.Uuid
+  websiteId        String             @map("website_id") @db.Uuid
+  competitorId     String             @map("competitor_id") @db.Uuid
+  keywordId        String             @map("keyword_id") @db.Uuid
+  capturedAt       DateTime           @map("captured_at") @db.Date
+  position         Decimal?           @db.Decimal(7, 2)
+  rankingUrl       String?            @map("ranking_url")
+  sourceProvider   ConnectionProvider @map("source_provider")
+  sourceSnapshotId String?            @map("source_snapshot_id") @db.Uuid
+  sourceImportId   String?            @map("source_import_id") @db.Uuid
+  createdAt        DateTime           @default(now()) @map("created_at")
+
+  website        Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  competitor     Competitor      @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+  keyword        Keyword         @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  sourceSnapshot SourceSnapshot? @relation(fields: [sourceSnapshotId], references: [id], onDelete: SetNull)
+  sourceImport   Import?         @relation(fields: [sourceImportId], references: [id], onDelete: SetNull)
+
+  @@unique([competitorId, keywordId, capturedAt, sourceProvider])
+  @@index([websiteId, capturedAt])
+  @@map("competitor_keyword_snapshot")
+}
+
+/// A file somebody uploaded, and everything that happened to it.
+///
+/// Nothing reaches a live table before a person has seen a preview, so the status
+/// column is the actual state machine rather than a label.
+model Import {
+  id                String       @id @default(uuid()) @db.Uuid
+  websiteId         String       @map("website_id") @db.Uuid
+  source            ImportSource
+  status            ImportStatus @default(UPLOADED)
+  fileName          String       @map("file_name")
+  /// Same file twice is the same import, which is what makes a retry safe.
+  checksum          String
+  byteSize          Int          @map("byte_size")
+  rowCount          Int          @default(0) @map("row_count")
+  validRowCount     Int          @default(0) @map("valid_row_count")
+  invalidRowCount   Int          @default(0) @map("invalid_row_count")
+  committedRowCount Int          @default(0) @map("committed_row_count")
+  /// The raw file, retained so an import stays auditable after the fact. Capped;
+  /// objectStorageKey is here for when file sizes outgrow a column.
+  rawContent        String?      @map("raw_content")
+  objectStorageKey  String?      @map("object_storage_key")
+  capturedAt        DateTime?    @map("captured_at") @db.Date
+  uploadedByUserId  String?      @map("uploaded_by_user_id") @db.Uuid
+  startedAt         DateTime?    @map("started_at")
+  finishedAt        DateTime?    @map("finished_at")
+  errorCode         String?      @map("error_code")
+  /// Our own sentence. Never the parser output, which can echo file content.
+  errorSummary      String?      @map("error_summary")
+  createdAt         DateTime     @default(now()) @map("created_at")
+  updatedAt         DateTime     @updatedAt @map("updated_at")
+
+  website             Website                     @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  uploadedBy          User?                       @relation("ImportUploader", fields: [uploadedByUserId], references: [id], onDelete: SetNull)
+  rows                ImportRow[]
+  keywordMetrics      KeywordMetricsSnapshot[]
+  rankingSnapshots    RankingSnapshot[]
+  competitorSnapshots CompetitorKeywordSnapshot[]
+
+  @@unique([websiteId, checksum])
+  @@index([websiteId, createdAt])
+  @@map("import")
+}
+
+/// One staged row, with whatever was wrong with it.
+///
+/// Exists so that surfacing invalid rows safely is a screen rather than a log
+/// line. Values are held as text: coercion happens at validation, so a bad number
+/// is a reportable row rather than a failed import.
+model ImportRow {
+  id          String   @id @default(uuid()) @db.Uuid
+  importId    String   @map("import_id") @db.Uuid
+  rowNumber   Int      @map("row_number")
+  rawJson     Json     @map("raw_json")
+  isValid     Boolean  @default(false) @map("is_valid")
+  errorReason String?  @map("error_reason")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  import Import @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@unique([importId, rowNumber])
+  @@index([importId, isValid])
+  @@map("import_row")
+}
+
+/// Something worth doing, with the reasoning attached.
+///
+/// Identity is enforced by a raw unique index with NULLS NOT DISTINCT (migration
+/// 20260903000200) so re-running detection updates rather than duplicates. A human
+/// status is never overwritten by a re-run: somebody's judgement outranks a rule.
+model Opportunity {
+  id                        String              @id @default(uuid()) @db.Uuid
+  websiteId                 String              @map("website_id") @db.Uuid
+  type                      OpportunityType
+  status                    OpportunityStatus   @default(IDENTIFIED)
+  priority                  OpportunityPriority @default(LOW)
+  title                     String
+  summary                   String?
+  pageId                    String?             @map("page_id") @db.Uuid
+  keywordId                 String?             @map("keyword_id") @db.Uuid
+  topicId                   String?             @map("topic_id") @db.Uuid
+  competitorId              String?             @map("competitor_id") @db.Uuid
+  businessGoalId            String?             @map("business_goal_id") @db.Uuid
+  sourceSignalId            String?             @map("source_signal_id") @db.Uuid
+  effort                    EffortLevel         @default(UNKNOWN)
+  confidence                ConfidenceLevel     @default(UNKNOWN)
+  businessImportance        Int?                @map("business_importance")
+  /// Descriptive only. A numeric traffic or revenue forecast would be fabricated,
+  /// and the spec forbids it outright.
+  expectedEffectDescription String?             @map("expected_effect_description")
+  /// 0–100. A prioritization heuristic, not a prediction.
+  score                     Decimal?            @db.Decimal(6, 2)
+  /// Every sub-score that produced `score`, so the number is reproducible from
+  /// stored inputs months later. Untraceable priority scoring is a P2 FAIL.
+  scoreInputsJson           Json?               @map("score_inputs_json")
+  scoringModelVersion       String              @default("opportunity-scoring-v1") @map("scoring_model_version")
+  ownerUserId               String?             @map("owner_user_id") @db.Uuid
+  identifiedAt              DateTime            @default(now()) @map("identified_at")
+  qualifiedAt               DateTime?           @map("qualified_at")
+  scheduledAt               DateTime?           @map("scheduled_at")
+  closedAt                  DateTime?           @map("closed_at")
+  createdAt                 DateTime            @default(now()) @map("created_at")
+  updatedAt                 DateTime            @updatedAt @map("updated_at")
+  archivedAt                DateTime?           @map("archived_at")
+
+  website      Website               @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  page         Page?                 @relation(fields: [pageId], references: [id], onDelete: SetNull)
+  keyword      Keyword?              @relation(fields: [keywordId], references: [id], onDelete: SetNull)
+  topic        Topic?                @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  competitor   Competitor?           @relation(fields: [competitorId], references: [id], onDelete: SetNull)
+  businessGoal BusinessGoal?         @relation(fields: [businessGoalId], references: [id], onDelete: SetNull)
+  sourceSignal Signal?               @relation(fields: [sourceSignalId], references: [id], onDelete: SetNull)
+  owner        User?                 @relation("OpportunityOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  evidence     OpportunityEvidence[]
+
+  @@index([websiteId, status, priority])
+  @@index([websiteId, type])
+  @@index([keywordId])
+  @@map("opportunity")
+}
+
+/// What the opportunity was derived from. Every opportunity must be traceable.
+model OpportunityEvidence {
+  id               String              @id @default(uuid()) @db.Uuid
+  opportunityId    String              @map("opportunity_id") @db.Uuid
+  evidenceType     EvidenceType        @map("evidence_type")
+  sourceEntityType String              @map("source_entity_type")
+  sourceEntityId   String              @map("source_entity_id")
+  metricKey        String              @map("metric_key")
+  numericValue     Decimal?            @map("numeric_value") @db.Decimal(18, 4)
+  textValue        String?             @map("text_value")
+  capturedAt       DateTime?           @map("captured_at")
+  periodStart      DateTime?           @map("period_start") @db.Date
+  periodEnd        DateTime?           @map("period_end") @db.Date
+  /// First-party or third-party, stated rather than implied.
+  sourceProvider   ConnectionProvider? @map("source_provider")
+  sourceSnapshotId String?             @map("source_snapshot_id") @db.Uuid
+  createdAt        DateTime            @default(now()) @map("created_at")
+
+  opportunity Opportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  @@index([opportunityId])
+  @@map("opportunity_evidence")
 }

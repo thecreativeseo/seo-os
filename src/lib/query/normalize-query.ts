@@ -1,3 +1,5 @@
+import { foldSearchText } from "@/lib/text/fold-search-text";
+
 /**
  * Search query normalization for Query identity (docs/P1_SPEC.md §7).
  *
@@ -6,11 +8,9 @@
  * differ only by spacing would otherwise become two queries whose metrics never
  * add up to the real total.
  *
- * Deliberately conservative. Stemming, stop-word removal and de-pluralisation all
- * merge queries that people actually search differently and that rank
- * differently — "seo agency" and "seo agencies" are not the same query, and
- * treating them as one would hide exactly the kind of split this phase exists to
- * surface. Normalization here is limited to typographic noise.
+ * The folding itself lives in foldSearchText, shared with keyword normalization:
+ * a GSC query and a Semrush keyword that are the same string must produce the same
+ * identity, and two copies of the rules would eventually disagree.
  */
 
 export type QueryNormalizeError = "empty" | "too_long";
@@ -23,19 +23,7 @@ export type QueryNormalizeResult =
 const MAX_QUERY_LENGTH = 300;
 
 export function normalizeQuery(input: string): QueryNormalizeResult {
-  const collapsed = input
-    // Unicode spaces, tabs and newlines all become a single space.
-    .replace(/\s+/gu, " ")
-    .trim()
-    // Curly quotes and dashes are typographic variants of the same query.
-    .replace(/[‘’‛′]/gu, "'")
-    .replace(/[“”‟″]/gu, '"')
-    .replace(/[‐-―]/gu, "-")
-    // Combining marks are folded so "café" and "café" are one query. Base
-    // accented characters are left alone: "cafe" and "café" stay distinct, because
-    // they are typed and ranked separately.
-    .normalize("NFC")
-    .toLowerCase();
+  const collapsed = foldSearchText(input);
 
   if (collapsed.length === 0) {
     return { ok: false, reason: "empty" };
