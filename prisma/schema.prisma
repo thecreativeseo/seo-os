@@ -1337,6 +1337,10 @@ model Topic {
   /// that sells it.
   commercialDestinationPageId String?        @map("commercial_destination_page_id") @db.Uuid
   coverageStatus              TopicCoverage  @default(UNKNOWN) @map("coverage_status")
+  /// Whether coverage was computed from the mapping or set by a person.
+  /// The spec warns against pretending topic judgements are precise, so the
+  /// screen has to be able to say which of the two a reader is looking at.
+  coverageSource              Provenance     @default(SYSTEM_DERIVED) @map("coverage_source")
   /// A human judgement, presented as one. The spec is explicit that topic
   /// authority must not pretend to be scientifically precise.
   authorityStatus             TopicAuthority @default(UNKNOWN) @map("authority_status")
