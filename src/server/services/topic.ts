@@ -9,6 +9,7 @@ import { prisma } from "@/server/db/prisma";
 import { recordAudit } from "@/server/audit/record";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
 import { computeCoverage, type CoverageResult } from "@/lib/topic/coverage";
+import { slugify } from "@/lib/topic/slug";
 
 /**
  * Topics (docs/P2_SPEC.md §14, §15, §24).
@@ -40,15 +41,7 @@ export class TopicError extends Error {
   }
 }
 
-export function slugify(name: string): string {
-  return name
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-}
+export { slugify };
 
 export type TopicSummary = Topic & {
   keywordCount: number;

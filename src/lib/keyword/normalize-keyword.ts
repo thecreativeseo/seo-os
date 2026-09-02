@@ -1,4 +1,7 @@
 import { foldSearchText } from "@/lib/text/fold-search-text";
+import { marketIdentityFor } from "@/lib/keyword/market";
+
+export { DEFAULT_LANGUAGE, DEFAULT_MARKET, marketIdentityFor } from "@/lib/keyword/market";
 
 /**
  * Keyword identity (docs/P2_SPEC.md §8).
@@ -16,12 +19,7 @@ import { foldSearchText } from "@/lib/text/fold-search-text";
  * market evidence at all.
  */
 
-export type KeywordNormalizeError =
-  | "empty"
-  | "too_long"
-  | "invalid_language"
-  | "invalid_market"
-  | "invalid_locale";
+export type KeywordNormalizeError = "empty" | "too_long";
 
 export type NormalizedKeyword = {
   normalized: string;
@@ -43,14 +41,7 @@ export type KeywordNormalizeResult =
  */
 export const MAX_KEYWORD_LENGTH = 300;
 
-/** Used when a website has not stated its own. */
-export const DEFAULT_LANGUAGE = "en";
-export const DEFAULT_MARKET = "PH";
-
-const LANGUAGE = /^[a-z]{2}$/;
-const MARKET = /^[A-Z]{2}$/;
-
-export type MarketIdentity = {
+export type MarketIdentityInput = {
   language?: string | null;
   market?: string | null;
 };
@@ -63,27 +54,28 @@ export type MarketIdentity = {
  * locale columns would silently permit duplicate keywords — the same trap that
  * produced duplicate signals in P1, and one worth designing out rather than
  * indexing around a second time.
+ *
+ * Coerces rather than rejects. P0 collects market and language as free text, so a
+ * website says "United Kingdom" and "English" — and the first version of this
+ * refused every keyword from such a site, failing entire imports over a label
+ * nobody was told mattered. See lib/keyword/market for why filing under a default
+ * is the recoverable choice and refusing is not.
  */
 export function resolveMarketIdentity(
-  identity: MarketIdentity = {},
-): { ok: true; value: Omit<NormalizedKeyword, "normalized"> } | { ok: false; reason: KeywordNormalizeError } {
-  const language = (identity.language ?? DEFAULT_LANGUAGE).trim().toLowerCase();
-  const market = (identity.market ?? DEFAULT_MARKET).trim().toUpperCase();
+  identity: MarketIdentityInput = {},
+): Omit<NormalizedKeyword, "normalized"> {
+  const resolved = marketIdentityFor(identity);
 
-  if (!LANGUAGE.test(language)) {
-    return { ok: false, reason: "invalid_language" };
-  }
-
-  if (!MARKET.test(market)) {
-    return { ok: false, reason: "invalid_market" };
-  }
-
-  return { ok: true, value: { language, market, locale: `${language}-${market}` } };
+  return {
+    language: resolved.language,
+    market: resolved.market,
+    locale: resolved.locale,
+  };
 }
 
 export function normalizeKeyword(
   input: string,
-  identity: MarketIdentity = {},
+  identity: MarketIdentityInput = {},
 ): KeywordNormalizeResult {
   const normalized = foldSearchText(input);
 
@@ -95,19 +87,11 @@ export function normalizeKeyword(
     return { ok: false, reason: "too_long" };
   }
 
-  const resolved = resolveMarketIdentity(identity);
-
-  if (!resolved.ok) {
-    return resolved;
-  }
-
-  return { ok: true, value: { normalized, ...resolved.value } };
+  // Only the keyword itself can fail. A locale label is filed, not validated.
+  return { ok: true, value: { normalized, ...resolveMarketIdentity(identity) } };
 }
 
 export const KEYWORD_NORMALIZE_ERROR_MESSAGES: Record<KeywordNormalizeError, string> = {
   empty: "Enter a keyword.",
   too_long: "That keyword is longer than any provider supports.",
-  invalid_language: "Language must be a two-letter code, for example en.",
-  invalid_market: "Market must be a two-letter country code, for example PH.",
-  invalid_locale: "Locale must be a language and market, for example en-PH.",
 };

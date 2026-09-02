@@ -114,13 +114,32 @@ describe("market identity", () => {
     expect(ph.ok && ph.value.locale).not.toBe(us.ok ? us.value.locale : "");
   });
 
-  it("refuses codes that are not codes", () => {
-    expect(normalizeKeyword("payroll", { language: "english" }).ok).toBe(false);
-    expect(normalizeKeyword("payroll", { market: "PHL" }).ok).toBe(false);
+  it("understands the prose a website actually stores", () => {
+    // P0 asks these as free-text questions, so a real website holds "English"
+    // and "United Kingdom". Rejecting those failed entire imports over a label
+    // nobody was told mattered.
+    const uk = normalizeKeyword("payroll", {
+      language: "English",
+      market: "United Kingdom",
+    });
 
-    const bad = normalizeKeyword("payroll", { market: "12" });
-    expect(bad.ok).toBe(false);
-    if (!bad.ok) expect(bad.reason).toBe("invalid_market");
+    expect(uk.ok).toBe(true);
+    if (uk.ok) expect(uk.value.locale).toBe("en-GB");
+
+    const iso3 = normalizeKeyword("payroll", { market: "PHL" });
+    expect(iso3.ok && iso3.value.market).toBe("PH");
+  });
+
+  it("files an unrecognisable label under the default rather than refusing", () => {
+    // A market code is a filing decision, not a claim about the world. Filing
+    // under the default is recoverable; refusing the import is not.
+    const odd = normalizeKeyword("payroll", { language: "??", market: "12" });
+
+    expect(odd.ok).toBe(true);
+    if (odd.ok) {
+      expect(odd.value.language).toBe(DEFAULT_LANGUAGE);
+      expect(odd.value.market).toBe(DEFAULT_MARKET);
+    }
   });
 
   it("never returns a blank locale field", () => {
@@ -129,11 +148,8 @@ describe("market identity", () => {
     // duplicate keywords. P1 learned this with signals; P2 designs it out.
     const resolved = resolveMarketIdentity({ language: null, market: null });
 
-    expect(resolved.ok).toBe(true);
-    if (resolved.ok) {
-      expect(resolved.value.language).not.toBe("");
-      expect(resolved.value.market).not.toBe("");
-      expect(resolved.value.locale).toMatch(/^[a-z]{2}-[A-Z]{2}$/);
-    }
+    expect(resolved.language).not.toBe("");
+    expect(resolved.market).not.toBe("");
+    expect(resolved.locale).toMatch(/^[a-z]{2}-[A-Z]{2}$/);
   });
 });

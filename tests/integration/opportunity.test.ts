@@ -794,3 +794,68 @@ describe("content refresh knows its keyword", () => {
     expect(demand?.basis).not.toMatch(/no provider/i);
   });
 });
+
+/**
+ * An opportunity whose condition has gone should not sit in the queue forever.
+ * An open item nobody can act on trains people to ignore the whole screen.
+ */
+describe("closing what no longer applies", () => {
+  it("archives an opportunity once its condition is resolved", async () => {
+    const context = await makeContext("closes");
+    const keyword = await makeKeyword(context, "unowned keyword");
+    await addVolume(context, keyword.id, 4000);
+
+    await detectAndStoreOpportunities(context);
+    const [noOwner] = await listOpportunities(context, { type: "NO_OWNING_PAGE" });
+    expect(noOwner).toBeDefined();
+
+    // Somebody nominates a page, so the finding stops being true.
+    const page = await makePage(context, "/now-owned");
+    await assignOwnership(context, { keywordId: keyword.id, pageId: page.id });
+
+    const summary = await detectAndStoreOpportunities(context);
+
+    expect(summary.closed).toBeGreaterThan(0);
+    expect(await listOpportunities(context, { type: "NO_OWNING_PAGE" })).toHaveLength(0);
+
+    const archived = await prisma.opportunity.findUniqueOrThrow({
+      where: { id: noOwner!.id },
+    });
+    expect(archived.status).toBe("ARCHIVED");
+  });
+
+  it("does not close something a person has qualified", async () => {
+    // Re-detection may change what we know; it may not overrule a decision.
+    const context = await makeContext("respects");
+    const keyword = await makeKeyword(context, "unowned keyword");
+    await addVolume(context, keyword.id, 4000);
+
+    await detectAndStoreOpportunities(context);
+    const [opportunity] = await listOpportunities(context, { type: "NO_OWNING_PAGE" });
+    await setOpportunityStatus(context, opportunity!.id, "QUALIFIED");
+
+    const page = await makePage(context, "/now-owned");
+    await assignOwnership(context, { keywordId: keyword.id, pageId: page.id });
+
+    await detectAndStoreOpportunities(context);
+
+    const after = await getOpportunity(context, opportunity!.id);
+    expect(after?.status).toBe("QUALIFIED");
+  });
+
+  it("reports what the rules found even when the queue shows less", async () => {
+    const context = await makeContext("totals");
+
+    for (let index = 0; index < 14; index += 1) {
+      const keyword = await makeKeyword(context, `unowned keyword ${index}`);
+      await addVolume(context, keyword.id, 1000 + index * 100);
+    }
+
+    const summary = await detectAndStoreOpportunities(context);
+
+    // The queue is capped; the true figure is still reported, so nobody is
+    // misled about how much was found.
+    expect(summary.totalsByType.NO_OWNING_PAGE).toBe(14);
+    expect(await listOpportunities(context, { type: "NO_OWNING_PAGE" })).toHaveLength(10);
+  });
+});

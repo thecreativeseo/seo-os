@@ -4,6 +4,14 @@ import { requireWebsiteAccess } from "@/server/auth/guards";
 import { getReadiness } from "@/server/services/readiness";
 import { getWebsiteSummary } from "@/server/services/metrics";
 import { listSignals } from "@/server/services/signals";
+import {
+  getNextBestStep,
+  getOpportunityCounts,
+  listOpportunities,
+} from "@/server/services/opportunity";
+import { listRankingChanges } from "@/server/services/ranking";
+import { MOVEMENT_LABELS } from "@/lib/ranking/movement";
+import { PriorityBadge, ScorePill } from "@/components/opportunity/primitives";
 import { engagementRate } from "@/lib/metrics/aggregate";
 import { freshnessInDays, isStale } from "@/lib/metrics/compare";
 import {
@@ -19,12 +27,18 @@ export const metadata = { title: "Command Center · SEO OS" };
 /**
  * Command Center.
  *
- * In P0 this answered "what is missing from setup?". Once first-party data exists
- * it answers "what changed?" — the setup view moves below, still available, because
- * it is still true and still occasionally the thing you need.
+ * The question this screen answers has changed once per phase, and each time the
+ * previous answer moved down rather than away:
  *
- * Nothing here explains a change. Attention lists what moved; Signals carries the
- * evidence; the cause is P3's job.
+ *   P0  What is missing from setup?
+ *   P1  What changed?
+ *   P2  What should we work on?
+ *
+ * Freshness stays at the top through all of it. A prioritized list built on stale
+ * data is worse than no list, because it looks exactly as confident.
+ *
+ * Nothing here explains a change. Opportunities say what is worth doing and what
+ * that judgement rests on; the cause of anything is P3's job.
  */
 export default async function CommandCenterPage({
   params,
@@ -41,10 +55,17 @@ export default async function CommandCenterPage({
     return <SetupOnly websiteId={websiteId} />;
   }
 
-  const [signals, readiness] = await Promise.all([
-    listSignals(context, { status: "DETECTED", limit: 200 }),
-    getReadiness(context),
-  ]);
+  const [signals, readiness, topOpportunities, opportunityCounts, nextBest, movement] =
+    await Promise.all([
+      listSignals(context, { status: "DETECTED", limit: 200 }),
+      getReadiness(context),
+      listOpportunities(context, { limit: 5 }),
+      getOpportunityCounts(context),
+      getNextBestStep(context),
+      // Only what actually moved: positions wobble between crawls, and reporting
+      // that teaches people to ignore this screen.
+      listRankingChanges(context, { materialOnly: true, limit: 6 }),
+    ]);
 
   const byType = (type: string) => signals.filter((signal) => signal.type === type);
   const winners = byType("PAGE_WINNER").slice(0, 4);
@@ -94,6 +115,107 @@ export default async function CommandCenterPage({
             : "Search Console reports two to three days behind, so the most recent days are always partial."}
         </p>
       </section>
+
+      {/* The P2 headline: what to work on, before what happened. */}
+      {topOpportunities.length > 0 ? (
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <h2 className="text-sm font-medium">Top opportunities</h2>
+            <Link
+              href={`/websites/${websiteId}/opportunities`}
+              className="text-muted-foreground hover:text-foreground text-sm underline underline-offset-4"
+            >
+              Full queue ({opportunityCounts.total})
+            </Link>
+          </div>
+
+          <ul className="divide-border border-border divide-y rounded-lg border">
+            {topOpportunities.map((opportunity) => (
+              <li key={opportunity.id} className="space-y-1.5 px-4 py-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <Link
+                    href={`/websites/${websiteId}/opportunities/${opportunity.id}`}
+                    className="font-medium underline underline-offset-4"
+                  >
+                    {opportunity.title}
+                  </Link>
+                  <span className="flex items-center gap-3">
+                    <PriorityBadge priority={opportunity.priority} />
+                    <ScorePill
+                      score={opportunity.score === null ? null : Number(opportunity.score)}
+                    />
+                  </span>
+                </div>
+                <p className="text-muted-foreground text-xs">
+                  {opportunity.businessGoal
+                    ? `${opportunity.businessGoal.title} · `
+                    : ""}
+                  effort {opportunity.effort.toLowerCase()} · confidence{" "}
+                  {opportunity.confidence.toLowerCase()}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {Object.keys(opportunityCounts.byType).length > 0 ? (
+        <section className="space-y-3">
+          <h2 className="text-sm font-medium">Opportunity mix</h2>
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(opportunityCounts.byType)
+              .sort((a, b) => b[1] - a[1])
+              .map(([type, count]) => (
+                <Link
+                  key={type}
+                  href={`/websites/${websiteId}/opportunities?type=${type}`}
+                  className="border-border hover:bg-accent/40 rounded-lg border px-3 py-2 text-sm"
+                >
+                  <span className="tabular-nums font-medium">{count}</span>{" "}
+                  <span className="text-muted-foreground">
+                    {type.replace(/_/g, " ").toLowerCase()}
+                  </span>
+                </Link>
+              ))}
+          </div>
+          <p className="text-muted-foreground text-xs">
+            {/* A queue that is all one type is a queue that has stopped looking. */}
+            A varied mix suggests the whole picture is being read; a single type
+            dominating usually means one source of evidence is doing all the work.
+          </p>
+        </section>
+      ) : null}
+
+      {movement.length > 0 ? (
+        <section className="space-y-3">
+          <h2 className="text-sm font-medium">Market movement</h2>
+          <ul className="divide-border border-border divide-y rounded-lg border">
+            {movement.map((change) => (
+              <li
+                key={`${change.keywordId}-${change.provider}`}
+                className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 text-sm"
+              >
+                <Link
+                  href={`/websites/${websiteId}/keywords/${change.keywordId}`}
+                  className="underline underline-offset-4"
+                >
+                  {change.keyword}
+                </Link>
+                <span className="text-muted-foreground text-xs">
+                  {MOVEMENT_LABELS[change.movement.state]}
+                  {change.movement.placesGained !== null
+                    ? ` ${Math.abs(change.movement.placesGained)} places`
+                    : ""}
+                  {change.previous !== null && change.current !== null
+                    ? ` · ${change.previous} → ${change.current}`
+                    : ""}
+                  {change.urlChanged ? " · ranking page changed" : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       <section className="space-y-3">
         <h2 className="text-sm font-medium">Executive snapshot</h2>
@@ -193,7 +315,30 @@ export default async function CommandCenterPage({
         />
       </section>
 
-      {nextStep ? (
+      {/*
+        Next best step prefers a scored opportunity over a signal.
+        A signal says something happened; an opportunity says something is worth
+        doing and shows the reasoning behind that claim, which is a better place
+        to send somebody who has one afternoon.
+      */}
+      {nextBest ? (
+        <section className="border-border space-y-3 rounded-lg border p-5">
+          <h2 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+            Next best step
+          </h2>
+          <div className="flex flex-wrap items-center gap-2">
+            <PriorityBadge priority={nextBest.priority} />
+            <p className="text-base">{nextBest.title}</p>
+          </div>
+          <p className="text-muted-foreground text-sm">{nextBest.summary}</p>
+          <Link
+            href={`/websites/${websiteId}/opportunities/${nextBest.id}`}
+            className="bg-foreground text-background inline-flex h-9 items-center rounded-md px-4 text-sm font-medium"
+          >
+            See the reasoning
+          </Link>
+        </section>
+      ) : nextStep ? (
         <section className="border-border space-y-3 rounded-lg border p-5">
           <h2 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
             Next best step

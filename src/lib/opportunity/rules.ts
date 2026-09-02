@@ -124,8 +124,35 @@ export type DetectedOpportunity = {
   evidence: EvidenceDraft[];
 };
 
-/** Demand below this is not worth raising a new page for on its own. */
-export const MIN_DEMAND_FOR_NEW_PAGE = 100;
+/**
+ * Demand below this is not worth raising a new page for on its own.
+ *
+ * Set from what the demo dataset showed: at 100 the rule fired for nearly every
+ * unowned keyword in an ordinary 80-keyword market, because most keywords in any
+ * market have no nominated owner and that is normal rather than a finding. A page
+ * is a real piece of work, and this is roughly the demand that justifies one.
+ */
+export const MIN_DEMAND_FOR_NEW_PAGE = 500;
+
+/**
+ * How many of each type reach the queue.
+ *
+ * P1 learned this with signals: 143 findings is not more useful than 12, it is
+ * less, because a queue nobody can read is a queue nobody uses. The cap keeps the
+ * highest-scoring of each type and the true count travels alongside, so nothing is
+ * hidden — a person can always see that they are looking at 12 of 52.
+ */
+export const MAX_PER_TYPE: Partial<Record<OpportunityType, number>> = {
+  NO_OWNING_PAGE: 10,
+  COMPETITOR_GAP: 10,
+  COMMERCIAL_RANKING: 12,
+  KEYWORD_OWNERSHIP: 12,
+  TOPIC_GAP: 8,
+  CTR: 10,
+  CONTENT_REFRESH: 10,
+};
+
+export const DEFAULT_MAX_PER_TYPE = 10;
 
 /** A topic needs this many keywords before thin coverage is a finding. */
 export const MIN_TOPIC_KEYWORDS = 3;
@@ -225,7 +252,21 @@ function scoreFor(
 const isCommercialIntent = (intent: string) =>
   intent === "COMMERCIAL" || intent === "TRANSACTIONAL";
 
-export function detectOpportunities(input: DetectionInput): DetectedOpportunity[] {
+export type DetectionResult = {
+  opportunities: DetectedOpportunity[];
+  /**
+   * Everything the rules found, before the cap.
+   *
+   * The caller needs this to tell two very different absences apart: an
+   * opportunity missing because its condition is gone, which should be closed,
+   * and one missing because the cap held it back, which should not.
+   */
+  all: DetectedOpportunity[];
+  /** What each rule found before the cap, so the true figure is never lost. */
+  totalsByType: Partial<Record<OpportunityType, number>>;
+};
+
+export function detectOpportunities(input: DetectionInput): DetectionResult {
   const found: DetectedOpportunity[] = [];
 
   for (const keyword of input.keywords) {
@@ -247,7 +288,42 @@ export function detectOpportunities(input: DetectionInput): DetectedOpportunity[
     if (opportunity) found.push(opportunity);
   }
 
-  return found.sort((a, b) => b.scoring.score - a.scoring.score);
+  const totalsByType = found.reduce<Partial<Record<OpportunityType, number>>>(
+    (totals, opportunity) => {
+      totals[opportunity.type] = (totals[opportunity.type] ?? 0) + 1;
+      return totals;
+    },
+    {},
+  );
+
+  const ranked = found.sort((a, b) => b.scoring.score - a.scoring.score);
+  const kept: DetectedOpportunity[] = [];
+  const seen: Partial<Record<OpportunityType, number>> = {};
+
+  // Highest-scoring first, so a cap keeps the best of each type rather than
+  // whichever the loops happened to reach first.
+  for (const opportunity of ranked) {
+    const count = seen[opportunity.type] ?? 0;
+    const limit = MAX_PER_TYPE[opportunity.type] ?? DEFAULT_MAX_PER_TYPE;
+
+    if (count >= limit) continue;
+
+    seen[opportunity.type] = count + 1;
+    kept.push(opportunity);
+  }
+
+  return { opportunities: kept, all: ranked, totalsByType };
+}
+
+/** The identity an opportunity collides with itself on. */
+export function identityOf(opportunity: DetectedOpportunity): string {
+  return [
+    opportunity.type,
+    opportunity.keywordId ?? "",
+    opportunity.pageId ?? "",
+    opportunity.topicId ?? "",
+    opportunity.competitorId ?? "",
+  ].join("|");
 }
 
 function keywordOpportunities(keyword: KeywordFact): DetectedOpportunity[] {

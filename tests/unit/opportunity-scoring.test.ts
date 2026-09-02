@@ -15,7 +15,12 @@ import {
   scoreCurrentVisibility,
   scoreSearchDemand,
 } from "@/lib/opportunity/scoring";
-import { detectOpportunities, type KeywordFact } from "@/lib/opportunity/rules";
+import {
+  MAX_PER_TYPE,
+  MIN_DEMAND_FOR_NEW_PAGE,
+  detectOpportunities,
+  type KeywordFact,
+} from "@/lib/opportunity/rules";
 import { CAUSAL_VOCABULARY, PRESCRIPTIVE_VOCABULARY } from "@/lib/signals/templates";
 import { DIAGNOSTIC_VOCABULARY } from "@/lib/ownership/templates";
 
@@ -55,31 +60,31 @@ function keyword(overrides: Partial<KeywordFact> = {}): KeywordFact {
  */
 describe("a score can be rebuilt from what was stored", () => {
   it("reproduces the total from the sub-scores alone", () => {
-    const [opportunity] = detectOpportunities({
+    const { opportunities } = detectOpportunities({
       keywords: [keyword()],
       topics: [],
       signals: [],
       decliningPages: [],
     });
 
-    expect(opportunity).toBeDefined();
+    expect(opportunities[0]).toBeDefined();
 
     // Nothing but the stored breakdown goes in.
-    const rebuilt = rescore(opportunity!.scoring.subScores);
+    const rebuilt = rescore(opportunities[0]!.scoring.subScores);
 
-    expect(rebuilt.score).toBe(opportunity!.scoring.score);
-    expect(rebuilt.raw).toBe(opportunity!.scoring.raw);
+    expect(rebuilt.score).toBe(opportunities[0]!.scoring.score);
+    expect(rebuilt.raw).toBe(opportunities[0]!.scoring.raw);
   });
 
   it("stores a reason for every criterion", () => {
-    const [opportunity] = detectOpportunities({
+    const { opportunities } = detectOpportunities({
       keywords: [keyword()],
       topics: [],
       signals: [],
       decliningPages: [],
     });
 
-    for (const subScore of opportunity!.scoring.subScores) {
+    for (const subScore of opportunities[0]!.scoring.subScores) {
       // A number with no sentence beside it is exactly what the rule forbids.
       expect(subScore.basis.length).toBeGreaterThan(0);
       expect(subScore.label.length).toBeGreaterThan(0);
@@ -89,28 +94,28 @@ describe("a score can be rebuilt from what was stored", () => {
   });
 
   it("scores all eight criteria, including the one the spec left unweighted", () => {
-    const [opportunity] = detectOpportunities({
+    const { opportunities } = detectOpportunities({
       keywords: [keyword()],
       topics: [],
       signals: [],
       decliningPages: [],
     });
 
-    const keys = opportunity!.scoring.subScores.map((entry) => entry.key).sort();
+    const keys = opportunities[0]!.scoring.subScores.map((entry) => entry.key).sort();
 
     expect(keys).toEqual(Object.keys(WEIGHTS).sort());
     expect(keys).toContain("competitiveGap");
   });
 
   it("carries the model version, so a reweighting does not rewrite history", () => {
-    const [opportunity] = detectOpportunities({
+    const { opportunities } = detectOpportunities({
       keywords: [keyword()],
       topics: [],
       signals: [],
       decliningPages: [],
     });
 
-    expect(opportunity!.scoring.modelVersion).toBe(SCORING_MODEL_VERSION);
+    expect(opportunities[0]!.scoring.modelVersion).toBe(SCORING_MODEL_VERSION);
   });
 
   it("is deterministic", () => {
@@ -119,8 +124,12 @@ describe("a score can be rebuilt from what was stored", () => {
     const first = detectOpportunities(facts);
     const second = detectOpportunities(facts);
 
-    expect(second.map((o) => o.scoring.score)).toEqual(first.map((o) => o.scoring.score));
-    expect(second.map((o) => o.type)).toEqual(first.map((o) => o.type));
+    expect(second.opportunities.map((o) => o.scoring.score)).toEqual(
+      first.opportunities.map((o) => o.scoring.score),
+    );
+    expect(second.opportunities.map((o) => o.type)).toEqual(
+      first.opportunities.map((o) => o.type),
+    );
   });
 });
 
@@ -220,7 +229,7 @@ describe("criteria that could quietly lie", () => {
  * specific to a screen that ranks work by value.
  */
 describe("opportunity wording", () => {
-  const everything = detectOpportunities({
+  const { opportunities: everything } = detectOpportunities({
     keywords: [
       keyword(),
       keyword({
@@ -310,7 +319,7 @@ describe("opportunity wording", () => {
 
 describe("rules", () => {
   it("raises a commercial ranking opportunity just off page one", () => {
-    const found = detectOpportunities({
+    const { opportunities: found } = detectOpportunities({
       keywords: [keyword({ position: 11 })],
       topics: [],
       signals: [],
@@ -321,7 +330,7 @@ describe("rules", () => {
   });
 
   it("does not raise one for a keyword already at the top", () => {
-    const found = detectOpportunities({
+    const { opportunities: found } = detectOpportunities({
       keywords: [keyword({ position: 2 })],
       topics: [],
       signals: [],
@@ -332,7 +341,7 @@ describe("rules", () => {
   });
 
   it("does not raise one for informational intent", () => {
-    const found = detectOpportunities({
+    const { opportunities: found } = detectOpportunities({
       keywords: [keyword({ intent: "INFORMATIONAL" })],
       topics: [],
       signals: [],
@@ -343,7 +352,7 @@ describe("rules", () => {
   });
 
   it("raises ownership divergence when the ranking page is not the owner", () => {
-    const found = detectOpportunities({
+    const { opportunities: found } = detectOpportunities({
       keywords: [keyword({ rankingPageId: "page-blog", rankingPath: "/blog/guide" })],
       topics: [],
       signals: [],
@@ -358,7 +367,7 @@ describe("rules", () => {
   });
 
   it("ignores a topic with too few keywords to judge", () => {
-    const found = detectOpportunities({
+    const { opportunities: found } = detectOpportunities({
       keywords: [],
       topics: [
         {
@@ -380,7 +389,7 @@ describe("rules", () => {
   });
 
   it("ignores a page whose decline is within normal movement", () => {
-    const found = detectOpportunities({
+    const { opportunities: found } = detectOpportunities({
       keywords: [],
       topics: [],
       signals: [],
@@ -401,7 +410,7 @@ describe("rules", () => {
   });
 
   it("returns the highest-scoring opportunity first", () => {
-    const found = detectOpportunities({
+    const { opportunities: found } = detectOpportunities({
       keywords: [keyword(), keyword({ keywordId: "kw-low", businessRelevance: 0, commercialValue: 0, searchVolume: 10 })],
       topics: [],
       signals: [],
@@ -413,5 +422,94 @@ describe("rules", () => {
         found[index]!.scoring.score,
       );
     }
+  });
+});
+
+/**
+ * Caps.
+ *
+ * P1 learned this with signals: 143 findings is not more useful than 12, it is
+ * less, because a queue nobody can read is a queue nobody uses. The demo dataset
+ * proved the same for opportunities — 85 of them, 52 of one type.
+ */
+describe("per-type caps", () => {
+  const manyUnowned = Array.from({ length: 40 }, (_, index) =>
+    keyword({
+      keywordId: `kw-${index}`,
+      keyword: `unowned keyword ${index}`,
+      ownerPageId: null,
+      ownerPath: null,
+      rankingPageId: null,
+      rankingPath: null,
+      position: null,
+      searchVolume: 1000 + index * 10,
+      competitorsRanking: 0,
+      competitorsAhead: 0,
+    }),
+  );
+
+  it("keeps a readable number of each type", () => {
+    const { opportunities } = detectOpportunities({
+      keywords: manyUnowned,
+      topics: [],
+      signals: [],
+      decliningPages: [],
+    });
+
+    const noOwner = opportunities.filter((o) => o.type === "NO_OWNING_PAGE");
+
+    expect(noOwner.length).toBe(MAX_PER_TYPE.NO_OWNING_PAGE);
+    expect(noOwner.length).toBeLessThan(manyUnowned.length);
+  });
+
+  it("reports the true count alongside, so nothing is hidden", () => {
+    const { opportunities, totalsByType } = detectOpportunities({
+      keywords: manyUnowned,
+      topics: [],
+      signals: [],
+      decliningPages: [],
+    });
+
+    // A person can always see they are looking at 10 of 40.
+    expect(totalsByType.NO_OWNING_PAGE).toBe(manyUnowned.length);
+    expect(opportunities.filter((o) => o.type === "NO_OWNING_PAGE").length).toBeLessThan(
+      totalsByType.NO_OWNING_PAGE!,
+    );
+  });
+
+  it("keeps the highest-scoring of each type, not the first found", () => {
+    const { opportunities } = detectOpportunities({
+      keywords: manyUnowned,
+      topics: [],
+      signals: [],
+      decliningPages: [],
+    });
+
+    const kept = opportunities.filter((o) => o.type === "NO_OWNING_PAGE");
+    const scores = kept.map((o) => o.scoring.score);
+
+    expect([...scores].sort((a, b) => b - a)).toEqual(scores);
+  });
+
+  it("does not raise a new page for demand too small to justify one", () => {
+    // A page is real work. Below the threshold, an unowned keyword is normal
+    // rather than a finding.
+    const { opportunities } = detectOpportunities({
+      keywords: [
+        keyword({
+          ownerPageId: null,
+          ownerPath: null,
+          position: null,
+          rankingPageId: null,
+          searchVolume: MIN_DEMAND_FOR_NEW_PAGE - 1,
+          competitorsRanking: 0,
+        }),
+      ],
+      topics: [],
+      signals: [],
+      decliningPages: [],
+    });
+
+    expect(opportunities.map((o) => o.type)).not.toContain("NO_OWNING_PAGE");
   });
 });

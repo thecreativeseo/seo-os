@@ -83,9 +83,21 @@ export async function detectOpportunitiesAction(
       summary.preserved > 0 ? `${summary.preserved} left as you set them` : null,
     ].filter(Boolean);
 
+    // The true figure travels with the capped one. A queue showing 10 of 40 is
+    // useful; a queue showing 10 while 40 exist and saying nothing is not.
+    const found = Object.values(summary.totalsByType).reduce(
+      (total, count) => total + (count ?? 0),
+      0,
+    );
+    const held = found - summary.detected;
+
     return summary.detected === 0
       ? "No opportunities found. Import keyword data or connect Search Console first."
-      : `${summary.detected} opportunities: ${parts.join(", ")}.`;
+      : `${summary.detected} opportunities: ${parts.join(", ")}.${
+          held > 0
+            ? ` ${held} more were found and held back to keep the queue readable.`
+            : ""
+        }`;
   });
 }
 

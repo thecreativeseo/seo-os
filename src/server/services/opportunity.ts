@@ -20,6 +20,7 @@ import {
   type PageDeclineFact,
   type SignalFact,
   type TopicFact,
+  identityOf,
 } from "@/lib/opportunity/rules";
 import { rescore, type SubScore } from "@/lib/opportunity/scoring";
 import { listTopics } from "@/server/services/topic";
@@ -440,6 +441,10 @@ export type DetectionSummary = {
   created: number;
   updated: number;
   preserved: number;
+  /** Opportunities whose condition no longer applies. */
+  closed: number;
+  /** What the rules found before the per-type cap. Nothing is hidden, only held back. */
+  totalsByType: Partial<Record<OpportunityType, number>>;
 };
 
 /**
@@ -462,7 +467,12 @@ export async function detectAndStoreOpportunities(
     decliningPageFacts(context),
   ]);
 
-  const detected = detectOpportunities({ keywords, topics, signals, decliningPages });
+  const { opportunities: detected, totalsByType } = detectOpportunities({
+    keywords,
+    topics,
+    signals,
+    decliningPages,
+  });
 
   let created = 0;
   let updated = 0;
@@ -561,7 +571,61 @@ export async function detectAndStoreOpportunities(
     created += 1;
   }
 
-  return { detected: detected.length, created, updated, preserved };
+  /*
+   * Close what this run did not keep.
+   *
+   * A keyword that gained an owner should not keep a "no page owns this"
+   * opportunity forever — an open item nobody can act on trains people to ignore
+   * the queue.
+   *
+   * Reconciled against the KEPT set rather than the uncapped one, so the stored
+   * queue is exactly what the last run decided rather than an accumulation of
+   * every run's leftovers. Detection is deterministic, so the same rows are kept
+   * each time and nothing thrashes. What the cap held back is archived rather
+   * than deleted, and `totalsByType` reports the true figure, so the count is
+   * available even though the row is not in the queue.
+   *
+   * Only rule-owned statuses are closed. Anything a person touched is theirs.
+   */
+  const stillApplies = new Set(detected.map(identityOf));
+
+  const openRows = await prisma.opportunity.findMany({
+    where: {
+      ...websiteScope(context),
+      status: { in: DETECTED_STATUSES },
+      archivedAt: null,
+    },
+    select: {
+      id: true,
+      type: true,
+      keywordId: true,
+      pageId: true,
+      topicId: true,
+      competitorId: true,
+    },
+  });
+
+  let closed = 0;
+
+  for (const row of openRows) {
+    const identity = [
+      row.type,
+      row.keywordId ?? "",
+      row.pageId ?? "",
+      row.topicId ?? "",
+      row.competitorId ?? "",
+    ].join("|");
+
+    if (stillApplies.has(identity)) continue;
+
+    await prisma.opportunity.update({
+      where: { id: row.id },
+      data: { status: "ARCHIVED", archivedAt: now, closedAt: now },
+    });
+    closed += 1;
+  }
+
+  return { detected: detected.length, created, updated, preserved, closed, totalsByType };
 }
 
 export type OpportunityWithContext = Opportunity & {
