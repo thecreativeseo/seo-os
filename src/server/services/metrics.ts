@@ -421,3 +421,140 @@ export async function getQueryMetrics(
     };
   });
 }
+
+export type PageDetail = {
+  page: {
+    id: string;
+    path: string;
+    url: string;
+    pageType: string;
+    sitemapPresent: boolean;
+    firstSeenAt: Date;
+    lastSeenAt: Date;
+    sourceFirstSeen: string;
+  };
+  gsc: { current: GscTotals; previous: GscTotals };
+  ga4: { current: Ga4Totals; previous: Ga4Totals };
+  topQueries: {
+    queryId: string;
+    query: string;
+    clicks: number;
+    impressions: number;
+    ctr: number | null;
+    position: number | null;
+  }[];
+  /** Daily clicks and impressions across the current window, for the trend charts. */
+  series: { date: string; clicks: number; impressions: number }[];
+};
+
+export async function getPageDetail(
+  context: TenantContext,
+  pageId: string,
+  windows: MetricsWindow,
+): Promise<PageDetail | null> {
+  // Scoped by websiteId as well as id: a page id from another tenant resolves to
+  // nothing rather than leaking a row.
+  const page = await prisma.page.findFirst({
+    where: { id: pageId, websiteId: context.website.id },
+  });
+
+  if (!page) return null;
+
+  const pageFilter = Prisma.sql`AND m.page_id = ${page.id}::uuid`;
+  const ga4Filter = Prisma.sql`AND g.page_id = ${page.id}::uuid`;
+
+  const [gscCurrent, gscPrevious, ga4Current, ga4Previous, topQueries, series] =
+    await Promise.all([
+      gscTotalsFor(context.website.id, windows.current, pageFilter),
+      gscTotalsFor(context.website.id, windows.previous, pageFilter),
+      ga4TotalsFor(context.website.id, windows.current, ga4Filter),
+      ga4TotalsFor(context.website.id, windows.previous, ga4Filter),
+      prisma.$queryRaw<
+        {
+          query_id: string;
+          query: string;
+          clicks: bigint;
+          impressions: bigint;
+          position: number | null;
+        }[]
+      >`
+        SELECT q.id AS query_id,
+               q.query,
+               SUM(m.clicks)::bigint AS clicks,
+               SUM(m.impressions)::bigint AS impressions,
+               (SUM(m.position * m.impressions) / NULLIF(SUM(m.impressions), 0))::float AS position
+        FROM gsc_metric_daily m
+        JOIN query q ON q.id = m.query_id
+        WHERE m.website_id = ${context.website.id}::uuid
+          AND m.page_id = ${page.id}::uuid
+          AND m.date BETWEEN ${windows.current.start}::date AND ${windows.current.end}::date
+        GROUP BY q.id, q.query
+        ORDER BY SUM(m.clicks) DESC, q.query ASC
+        LIMIT 10
+      `,
+      prisma.$queryRaw<{ date: Date; clicks: bigint; impressions: bigint }[]>`
+        SELECT m.date,
+               SUM(m.clicks)::bigint AS clicks,
+               SUM(m.impressions)::bigint AS impressions
+        FROM gsc_metric_daily m
+        WHERE m.website_id = ${context.website.id}::uuid
+          AND m.page_id = ${page.id}::uuid
+          AND m.date BETWEEN ${windows.current.start}::date AND ${windows.current.end}::date
+        GROUP BY m.date
+        ORDER BY m.date ASC
+      `,
+    ]);
+
+  return {
+    page: {
+      id: page.id,
+      path: page.path,
+      url: page.url,
+      pageType: page.pageType,
+      sitemapPresent: page.sitemapPresent,
+      firstSeenAt: page.firstSeenAt,
+      lastSeenAt: page.lastSeenAt,
+      sourceFirstSeen: page.sourceFirstSeen,
+    },
+    gsc: { current: gscCurrent, previous: gscPrevious },
+    ga4: { current: ga4Current, previous: ga4Previous },
+    topQueries: topQueries.map((row) => {
+      const clicks = Number(row.clicks);
+      const impressions = Number(row.impressions);
+      return {
+        queryId: row.query_id,
+        query: row.query,
+        clicks,
+        impressions,
+        ctr: impressions > 0 ? clicks / impressions : null,
+        position: row.position,
+      };
+    }),
+    series: series.map((row) => ({
+      date: row.date.toISOString().slice(0, 10),
+      clicks: Number(row.clicks),
+      impressions: Number(row.impressions),
+    })),
+  };
+}
+
+/** Row counts for pagination. */
+export async function countPagesWithMetrics(
+  context: TenantContext,
+  windows: MetricsWindow,
+  search?: string,
+): Promise<number> {
+  const rows = await prisma.$queryRaw<{ total: bigint }[]>`
+    SELECT COUNT(DISTINCT p.id)::bigint AS total
+    FROM page p
+    LEFT JOIN gsc_metric_daily m
+      ON m.page_id = p.id
+     AND m.date BETWEEN ${windows.previous.start}::date AND ${windows.current.end}::date
+    WHERE p.website_id = ${context.website.id}::uuid
+      AND p.archived_at IS NULL
+      ${search ? Prisma.sql`AND p.path ILIKE ${`%${search}%`}` : Prisma.empty}
+      AND m.id IS NOT NULL
+  `;
+
+  return Number(rows[0]?.total ?? 0);
+}

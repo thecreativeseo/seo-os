@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { WebsiteNav } from "@/components/shell/website-nav";
+import { DemoBadge } from "@/components/metrics/primitives";
 
 /**
  * Website shell.
@@ -35,6 +36,14 @@ export default async function WebsiteLayout({
             {context.website.normalizedDomain}
           </p>
         </Link>
+
+        {/* Persistent, not a footnote: someone joining mid-demo, or seeing a
+            screenshot later, has to be able to tell these numbers are synthetic. */}
+        {context.website.isDemo ? (
+          <p className="mt-2">
+            <DemoBadge />
+          </p>
+        ) : null}
         <WebsiteNav websiteId={websiteId} />
 
         <nav aria-label="Workspace" className="mt-5">

@@ -16,6 +16,14 @@ const GROUPS = [
     sections: [{ slug: "", label: "Command Center" }],
   },
   {
+    heading: "Intelligence",
+    sections: [
+      { slug: "pages", label: "Pages" },
+      { slug: "queries", label: "Queries" },
+      { slug: "signals", label: "Signals" },
+    ],
+  },
+  {
     heading: "Website",
     sections: [
       { slug: "overview", label: "Overview" },
