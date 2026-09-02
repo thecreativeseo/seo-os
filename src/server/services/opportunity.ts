@@ -247,26 +247,62 @@ async function topicFacts(context: TenantContext): Promise<TopicFact[]> {
   }));
 }
 
+/**
+ * P1 signals, with their Query resolved to a Keyword.
+ *
+ * A Query and a Keyword look alike and are not the same thing: a Query is a
+ * string Search Console reported, a Keyword is one a provider measures and a
+ * person can own. `Opportunity.keywordId` points at the second, so a signal's
+ * `queryId` cannot be used directly — it is a foreign key into a different table
+ * and the database rejects it.
+ *
+ * The bridge is the shared text fold from O1: a Query and a Keyword that are the
+ * same string normalize identically, so the match is a lookup rather than a guess.
+ * Where no Keyword exists for that string the link is honestly absent, because a
+ * page can have a click-through problem for a search nobody has added as a
+ * keyword.
+ */
 async function signalFacts(context: TenantContext): Promise<SignalFact[]> {
   const signals = await prisma.signal.findMany({
     where: { ...websiteScope(context), type: "CTR_OPPORTUNITY", status: "DETECTED" },
     include: {
       page: { select: { id: true, path: true } },
+      queryRef: { select: { normalizedQuery: true } },
       evidence: true,
     },
     take: 50,
   });
 
+  const normalizedQueries = signals
+    .map((signal) => signal.queryRef?.normalizedQuery)
+    .filter((value): value is string => Boolean(value));
+
+  const keywords =
+    normalizedQueries.length === 0
+      ? []
+      : await prisma.keyword.findMany({
+          where: {
+            websiteId: context.website.id,
+            normalizedKeyword: { in: normalizedQueries },
+          },
+          select: { id: true, normalizedKeyword: true },
+        });
+
+  const keywordByText = new Map(
+    keywords.map((keyword) => [keyword.normalizedKeyword, keyword.id]),
+  );
+
   return signals.map((signal) => {
     const impressions = signal.evidence.find((row) => row.metricKey === "impressions");
     const ctr = signal.evidence.find((row) => row.metricKey === "ctr");
+    const normalized = signal.queryRef?.normalizedQuery;
 
     return {
       signalId: signal.id,
       type: signal.type,
       pageId: signal.pageId,
       pagePath: signal.page?.path ?? null,
-      keywordId: signal.queryId,
+      keywordId: normalized ? (keywordByText.get(normalized) ?? null) : null,
       impressions: impressions?.currentValue === null || impressions?.currentValue === undefined
         ? null
         : Number(impressions.currentValue),

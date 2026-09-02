@@ -453,3 +453,120 @@ describe("the queue", () => {
     expect(await getNextBestStep(a)).toBeNull();
   });
 });
+
+/**
+ * A P1 signal becoming a P2 opportunity crosses the boundary between two
+ * identities that look alike and are not: a Query is what Search Console
+ * reported, a Keyword is what a provider measures. Opportunity.keywordId points
+ * at the second.
+ */
+describe("signals promoted to opportunities", () => {
+  async function seedCtrSignal(context: TenantContext, options: { withKeyword: boolean }) {
+    const page = await makePage(context, "/pricing");
+    const connection = await prisma.connection.create({
+      data: {
+        websiteId: context.website.id,
+        workspaceId: context.workspace.id,
+        provider: "GOOGLE_SEARCH_CONSOLE",
+        status: "CONNECTED",
+      },
+    });
+
+    const query = await prisma.query.create({
+      data: {
+        websiteId: context.website.id,
+        query: "Payroll Software",
+        normalizedQuery: "payroll software",
+      },
+    });
+
+    if (options.withKeyword) {
+      await makeKeyword(context, "payroll software");
+    }
+
+    await prisma.gscMetricDaily.create({
+      data: {
+        websiteId: context.website.id,
+        pageId: page.id,
+        queryId: query.id,
+        date: daysAgo(3),
+        clicks: 4,
+        impressions: 12000,
+        ctr: 0.00033,
+        position: 8,
+        sourceConnectionId: connection.id,
+      },
+    });
+
+    const signal = await prisma.signal.create({
+      data: {
+        websiteId: context.website.id,
+        type: "CTR_OPPORTUNITY",
+        status: "DETECTED",
+        pageId: page.id,
+        queryId: query.id,
+        currentPeriodStart: daysAgo(28),
+        currentPeriodEnd: daysAgo(1),
+        comparisonPeriodStart: daysAgo(56),
+        comparisonPeriodEnd: daysAgo(29),
+        scoringModelVersion: "signals-v1",
+        headline: "Click-through rate below others at this position",
+      },
+    });
+
+    await prisma.signalEvidence.createMany({
+      data: [
+        {
+          signalId: signal.id,
+          evidenceType: "METRIC_COMPARISON",
+          sourceEntityType: "Page",
+          sourceEntityId: page.id,
+          metricKey: "impressions",
+          currentValue: 12000,
+        },
+        {
+          signalId: signal.id,
+          evidenceType: "METRIC_COMPARISON",
+          sourceEntityType: "Page",
+          sourceEntityId: page.id,
+          metricKey: "ctr",
+          currentValue: 0.00033,
+        },
+      ],
+    });
+
+    return { page, query, signal };
+  }
+
+  it("promotes a CTR signal whose query has no matching keyword", async () => {
+    // The failing case: a Query id in a column that is a foreign key to Keyword
+    // is either a constraint violation or a link to the wrong row.
+    const context = await makeContext("ctr-noky");
+    const { signal } = await seedCtrSignal(context, { withKeyword: false });
+
+    await detectAndStoreOpportunities(context);
+
+    const [opportunity] = await listOpportunities(context, { type: "CTR" });
+
+    expect(opportunity).toBeDefined();
+    expect(opportunity?.sourceSignalId).toBe(signal.id);
+    // No keyword exists for that string, so the link is honestly absent.
+    expect(opportunity?.keywordId).toBeNull();
+  });
+
+  it("links the keyword when one exists for the same string", async () => {
+    // The payoff of sharing one text-folding rule between queries and keywords.
+    const context = await makeContext("ctr-ky");
+    await seedCtrSignal(context, { withKeyword: true });
+
+    await detectAndStoreOpportunities(context);
+
+    const [opportunity] = await listOpportunities(context, { type: "CTR" });
+    const keyword = await prisma.keyword.findFirstOrThrow({
+      where: { websiteId: context.website.id, normalizedKeyword: "payroll software" },
+    });
+
+    expect(opportunity?.keywordId).toBe(keyword.id);
+    expect(opportunity?.keyword?.keyword).toBe("payroll software");
+  });
+});
