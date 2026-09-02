@@ -14,6 +14,7 @@ import {
   verifyStoredScore,
 } from "@/server/services/opportunity";
 import { assignOwnership } from "@/server/services/ownership";
+import { KeywordError, updateKeyword } from "@/server/services/keyword";
 
 const organizationIds: string[] = [];
 const userIds: string[] = [];
@@ -568,5 +569,228 @@ describe("signals promoted to opportunities", () => {
 
     expect(opportunity?.keywordId).toBe(keyword.id);
     expect(opportunity?.keyword?.keyword).toBe("payroll software");
+  });
+});
+
+/**
+ * Business goal linkage.
+ *
+ * The scoring model weights business relevance at 3 — the joint heaviest. Without
+ * a stated link that weight rests on nothing and the queue ranks work in a vacuum.
+ * The link is always stated by a person: a keyword is not evidence of a business
+ * intention, and guessing would put weight on the score nobody put there.
+ */
+describe("business goals", () => {
+  const makeGoal = (context: TenantContext, title: string) =>
+    prisma.businessGoal.create({
+      data: { websiteId: context.website.id, title, status: "ACTIVE" },
+    });
+
+  it("carries a keyword's goal onto its opportunity", async () => {
+    const context = await makeContext("goal-kw");
+    const goal = await makeGoal(context, "Generate demo requests");
+    const { keyword } = await seedCommercialRanking(context);
+
+    await prisma.keyword.update({
+      where: { id: keyword.id },
+      data: { businessGoalId: goal.id },
+    });
+
+    await detectAndStoreOpportunities(context);
+    const [opportunity] = await listOpportunities(context);
+
+    expect(opportunity?.businessGoalId).toBe(goal.id);
+    expect(opportunity?.businessGoal?.title).toBe("Generate demo requests");
+  });
+
+  it("falls back to the topic's goal when the keyword has none", async () => {
+    const context = await makeContext("goal-topic");
+    const goal = await makeGoal(context, "Own payroll as a subject");
+    const { keyword } = await seedCommercialRanking(context);
+
+    const topic = await prisma.topic.create({
+      data: {
+        websiteId: context.website.id,
+        name: "Payroll",
+        slug: "payroll",
+        businessGoalId: goal.id,
+      },
+    });
+    await prisma.topicKeyword.create({
+      data: { topicId: topic.id, keywordId: keyword.id },
+    });
+
+    await detectAndStoreOpportunities(context);
+    const [opportunity] = await listOpportunities(context);
+
+    expect(opportunity?.businessGoalId).toBe(goal.id);
+  });
+
+  it("prefers the keyword's own goal over its topic's", async () => {
+    // The more specific statement wins: somebody made it deliberately about
+    // this keyword.
+    const context = await makeContext("goal-precedence");
+    const specific = await makeGoal(context, "Specific");
+    const general = await makeGoal(context, "General");
+    const { keyword } = await seedCommercialRanking(context);
+
+    const topic = await prisma.topic.create({
+      data: {
+        websiteId: context.website.id,
+        name: "Payroll",
+        slug: "payroll",
+        businessGoalId: general.id,
+      },
+    });
+    await prisma.topicKeyword.create({
+      data: { topicId: topic.id, keywordId: keyword.id },
+    });
+    await prisma.keyword.update({
+      where: { id: keyword.id },
+      data: { businessGoalId: specific.id },
+    });
+
+    await detectAndStoreOpportunities(context);
+    const [opportunity] = await listOpportunities(context);
+
+    expect(opportunity?.businessGoal?.title).toBe("Specific");
+  });
+
+  it("raises the score when work serves a stated goal", async () => {
+    const unlinked = await makeContext("goal-unlinked");
+    await seedCommercialRanking(unlinked);
+    await detectAndStoreOpportunities(unlinked);
+    const [without] = await listOpportunities(unlinked);
+
+    const linked = await makeContext("goal-linked");
+    const goal = await makeGoal(linked, "Generate demo requests");
+    const { keyword } = await seedCommercialRanking(linked);
+    await prisma.keyword.update({
+      where: { id: keyword.id },
+      data: { businessGoalId: goal.id },
+    });
+    await detectAndStoreOpportunities(linked);
+    const [withGoal] = await listOpportunities(linked);
+
+    expect(Number(withGoal?.score)).toBeGreaterThan(Number(without?.score));
+
+    const inputs = withGoal!.scoreInputsJson as {
+      subScores: { key: string; basis: string }[];
+    };
+    const relevance = inputs.subScores.find((entry) => entry.key === "businessRelevance");
+
+    // The reason is stored, not inferred at render time.
+    expect(relevance?.basis).toMatch(/linked to a business goal/i);
+  });
+
+  it("refuses a goal belonging to another tenant", async () => {
+    const a = await makeContext("goal-iso-a");
+    const b = await makeContext("goal-iso-b");
+    const theirGoal = await makeGoal(b, "Their goal");
+    const keyword = await makeKeyword(a, "payroll software");
+
+    await expect(
+      updateKeyword(a, keyword.id, { businessGoalId: theirGoal.id }),
+    ).rejects.toBeInstanceOf(KeywordError);
+  });
+});
+
+/**
+ * A refresh candidate is only worth ranking if the demand is still there. A page
+ * losing clicks for a term nobody searches any more is a different situation from
+ * one losing clicks while the market holds steady.
+ */
+describe("content refresh knows its keyword", () => {
+  async function seedDecliningPage(
+    context: TenantContext,
+    options: { withOwnership: boolean },
+  ) {
+    const page = await makePage(context, "/guides/payroll");
+    const keyword = await makeKeyword(context, "payroll guide");
+    await addVolume(context, keyword.id, 4800);
+
+    const connection = await prisma.connection.create({
+      data: {
+        websiteId: context.website.id,
+        workspaceId: context.workspace.id,
+        provider: "GOOGLE_SEARCH_CONSOLE",
+        status: "CONNECTED",
+      },
+    });
+    const query = await prisma.query.create({
+      data: {
+        websiteId: context.website.id,
+        query: "payroll guide",
+        normalizedQuery: "payroll guide",
+      },
+    });
+
+    if (options.withOwnership) {
+      await assignOwnership(context, { keywordId: keyword.id, pageId: page.id });
+    } else {
+      await addRanking(context, keyword.id, 9, page.id);
+    }
+
+    // Clicks fall sharply between the two windows.
+    for (const [daysBack, clicks] of [
+      [40, 200],
+      [10, 60],
+    ] as const) {
+      await prisma.gscMetricDaily.create({
+        data: {
+          websiteId: context.website.id,
+          pageId: page.id,
+          queryId: query.id,
+          date: daysAgo(daysBack),
+          clicks,
+          impressions: clicks * 20,
+          ctr: 0.05,
+          position: 9,
+          sourceConnectionId: connection.id,
+        },
+      });
+    }
+
+    return { page, keyword };
+  }
+
+  it("attaches the keyword the page is nominated to own", async () => {
+    const context = await makeContext("refresh-owned");
+    const { keyword } = await seedDecliningPage(context, { withOwnership: true });
+
+    await detectAndStoreOpportunities(context);
+
+    const [refresh] = await listOpportunities(context, { type: "CONTENT_REFRESH" });
+
+    expect(refresh).toBeDefined();
+    expect(refresh?.keywordId).toBe(keyword.id);
+  });
+
+  it("falls back to a keyword the page ranks for", async () => {
+    const context = await makeContext("refresh-ranked");
+    const { keyword } = await seedDecliningPage(context, { withOwnership: false });
+
+    await detectAndStoreOpportunities(context);
+
+    const [refresh] = await listOpportunities(context, { type: "CONTENT_REFRESH" });
+
+    expect(refresh?.keywordId).toBe(keyword.id);
+  });
+
+  it("scores demand from that keyword instead of guessing", async () => {
+    const context = await makeContext("refresh-demand");
+    await seedDecliningPage(context, { withOwnership: true });
+
+    await detectAndStoreOpportunities(context);
+
+    const [refresh] = await listOpportunities(context, { type: "CONTENT_REFRESH" });
+    const inputs = refresh!.scoreInputsJson as {
+      subScores: { key: string; basis: string }[];
+    };
+    const demand = inputs.subScores.find((entry) => entry.key === "searchDemand");
+
+    // Previously this always read "no provider has reported search volume".
+    expect(demand?.basis).toContain("4,800");
+    expect(demand?.basis).not.toMatch(/no provider/i);
   });
 });

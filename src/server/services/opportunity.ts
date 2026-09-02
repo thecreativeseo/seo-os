@@ -80,6 +80,7 @@ type KeywordRow = {
   is_commercial_destination: boolean;
   competitors_ranking: bigint;
   competitors_ahead: bigint;
+  business_goal_id: string | null;
 };
 
 const DISAGREEMENT = 0.25;
@@ -163,7 +164,10 @@ async function keywordFacts(
       t.name AS topic_name,
       COALESCE(t.commercial_destination_page_id = own.page_id, false) AS is_commercial_destination,
       COALESCE(comp.ranking, 0) AS competitors_ranking,
-      COALESCE(comp.ahead, 0) AS competitors_ahead
+      COALESCE(comp.ahead, 0) AS competitors_ahead,
+      -- The keyword's own goal wins over its topic's: it is the more specific
+      -- statement, and somebody made it deliberately about this keyword.
+      COALESCE(k.business_goal_id, t.business_goal_id) AS business_goal_id
     FROM keyword k
     LEFT JOIN latest_metric lm ON lm.keyword_id = k.id
     LEFT JOIN metric_spread ms ON ms.keyword_id = k.id
@@ -206,7 +210,7 @@ async function keywordFacts(
       isCommercialDestination: row.is_commercial_destination,
       competitorsRanking: Number(row.competitors_ranking),
       competitorsAhead: Number(row.competitors_ahead),
-      businessGoalId: null,
+      businessGoalId: row.business_goal_id,
     };
   });
 }
@@ -243,7 +247,7 @@ async function topicFacts(context: TenantContext): Promise<TopicFact[]> {
     coverage: topic.coverage.status,
     keywordsWithDemand: Number(byTopic.get(topic.id)?.with_demand ?? 0),
     totalVolume: byTopic.get(topic.id)?.total_volume ?? null,
-    businessGoalId: null,
+    businessGoalId: topic.businessGoalId,
   }));
 }
 
@@ -285,56 +289,139 @@ async function signalFacts(context: TenantContext): Promise<SignalFact[]> {
             websiteId: context.website.id,
             normalizedKeyword: { in: normalizedQueries },
           },
-          select: { id: true, normalizedKeyword: true },
+          select: {
+            id: true,
+            normalizedKeyword: true,
+            businessGoalId: true,
+            topicKeywords: {
+              select: { topic: { select: { businessGoalId: true } } },
+              take: 1,
+            },
+          },
         });
 
   const keywordByText = new Map(
-    keywords.map((keyword) => [keyword.normalizedKeyword, keyword.id]),
+    keywords.map((keyword) => [
+      keyword.normalizedKeyword,
+      {
+        id: keyword.id,
+        // Same precedence as everywhere else: the keyword's own goal is the more
+        // specific statement, and falls back to its topic's.
+        businessGoalId:
+          keyword.businessGoalId ??
+          keyword.topicKeywords[0]?.topic.businessGoalId ??
+          null,
+      },
+    ]),
   );
 
   return signals.map((signal) => {
     const impressions = signal.evidence.find((row) => row.metricKey === "impressions");
     const ctr = signal.evidence.find((row) => row.metricKey === "ctr");
     const normalized = signal.queryRef?.normalizedQuery;
+    const matched = normalized ? keywordByText.get(normalized) : undefined;
 
     return {
       signalId: signal.id,
       type: signal.type,
       pageId: signal.pageId,
       pagePath: signal.page?.path ?? null,
-      keywordId: normalized ? (keywordByText.get(normalized) ?? null) : null,
+      keywordId: matched?.id ?? null,
       impressions: impressions?.currentValue === null || impressions?.currentValue === undefined
         ? null
         : Number(impressions.currentValue),
       ctr: ctr?.currentValue === null || ctr?.currentValue === undefined
         ? null
         : Number(ctr.currentValue),
-      businessGoalId: null,
+      businessGoalId: matched?.businessGoalId ?? null,
     };
   });
 }
 
+/**
+ * Pages earning fewer clicks than they used to, with the keyword they exist for.
+ *
+ * The keyword matters because a refresh candidate is only worth ranking if the
+ * demand is still there: a page losing clicks for a term nobody searches any more
+ * is a different situation from one losing clicks while the market holds steady.
+ * Without the join, this rule scored blind on demand.
+ *
+ * The keyword is chosen the way a person would: the one this page is nominated to
+ * own, and failing that the highest-volume keyword it actually ranks for.
+ */
 async function decliningPageFacts(context: TenantContext): Promise<PageDeclineFact[]> {
   const rows = await prisma.$queryRaw<
-    { page_id: string; path: string; current_clicks: bigint; previous_clicks: bigint }[]
+    {
+      page_id: string;
+      path: string;
+      current_clicks: bigint;
+      previous_clicks: bigint;
+      keyword_id: string | null;
+      search_volume: number | null;
+      business_goal_id: string | null;
+    }[]
   >`
-    SELECT
-      p.id AS page_id,
-      p.path,
-      COALESCE(SUM(m.clicks) FILTER (
-        WHERE m.date >= CURRENT_DATE - 28
-      ), 0)::bigint AS current_clicks,
-      COALESCE(SUM(m.clicks) FILTER (
+    WITH clicks AS (
+      SELECT
+        p.id AS page_id,
+        p.path,
+        COALESCE(SUM(m.clicks) FILTER (
+          WHERE m.date >= CURRENT_DATE - 28
+        ), 0)::bigint AS current_clicks,
+        COALESCE(SUM(m.clicks) FILTER (
+          WHERE m.date >= CURRENT_DATE - 56 AND m.date < CURRENT_DATE - 28
+        ), 0)::bigint AS previous_clicks
+      FROM page p
+      JOIN gsc_metric_daily m ON m.page_id = p.id
+      WHERE p.website_id = ${context.website.id}::uuid
+        AND m.date >= CURRENT_DATE - 56
+      GROUP BY p.id, p.path
+      HAVING COALESCE(SUM(m.clicks) FILTER (
         WHERE m.date >= CURRENT_DATE - 56 AND m.date < CURRENT_DATE - 28
-      ), 0)::bigint AS previous_clicks
-    FROM page p
-    JOIN gsc_metric_daily m ON m.page_id = p.id
-    WHERE p.website_id = ${context.website.id}::uuid
-      AND m.date >= CURRENT_DATE - 56
-    GROUP BY p.id, p.path
-    HAVING COALESCE(SUM(m.clicks) FILTER (
-      WHERE m.date >= CURRENT_DATE - 56 AND m.date < CURRENT_DATE - 28
-    ), 0) > 0
+      ), 0) > 0
+    ),
+    latest_volume AS (
+      SELECT DISTINCT ON (keyword_id) keyword_id, search_volume
+      FROM keyword_metrics_snapshot
+      WHERE website_id = ${context.website.id}::uuid
+      ORDER BY keyword_id, captured_at DESC
+    )
+    SELECT
+      c.page_id,
+      c.path,
+      c.current_clicks,
+      c.previous_clicks,
+      best.keyword_id,
+      best.search_volume,
+      best.business_goal_id
+    FROM clicks c
+    LEFT JOIN LATERAL (
+      SELECT k.id AS keyword_id, lv.search_volume, k.business_goal_id
+      FROM keyword k
+      LEFT JOIN latest_volume lv ON lv.keyword_id = k.id
+      WHERE k.website_id = ${context.website.id}::uuid
+        AND (
+          EXISTS (
+            SELECT 1 FROM keyword_page_ownership o
+            WHERE o.keyword_id = k.id AND o.page_id = c.page_id
+              AND o.ownership_type = 'PRIMARY' AND o.status = 'ACTIVE'
+          )
+          OR EXISTS (
+            SELECT 1 FROM ranking_snapshot r
+            WHERE r.keyword_id = k.id AND r.page_id = c.page_id
+          )
+        )
+      -- Ownership first, then demand: a nominated keyword is a statement of
+      -- intent, and outranks whatever happens to have the biggest number.
+      ORDER BY
+        EXISTS (
+          SELECT 1 FROM keyword_page_ownership o
+          WHERE o.keyword_id = k.id AND o.page_id = c.page_id
+            AND o.ownership_type = 'PRIMARY' AND o.status = 'ACTIVE'
+        ) DESC,
+        lv.search_volume DESC NULLS LAST
+      LIMIT 1
+    ) best ON true
   `;
 
   return rows.map((row) => ({
@@ -342,9 +429,9 @@ async function decliningPageFacts(context: TenantContext): Promise<PageDeclineFa
     path: row.path,
     currentClicks: Number(row.current_clicks),
     previousClicks: Number(row.previous_clicks),
-    keywordId: null,
-    searchVolume: null,
-    businessGoalId: null,
+    keywordId: row.keyword_id,
+    searchVolume: row.search_volume,
+    businessGoalId: row.business_goal_id,
   }));
 }
 

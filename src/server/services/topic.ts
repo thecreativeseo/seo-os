@@ -168,6 +168,8 @@ export type TopicInput = {
   commercialDestinationPageId?: string | null;
   priority?: number | null;
   authorityStatus?: TopicAuthority;
+  /** The goal this topic serves. Stated by a person, never inferred. */
+  businessGoalId?: string | null;
 };
 
 async function assertPageBelongs(
@@ -183,6 +185,24 @@ async function assertPageBelongs(
 
   if (!page) {
     throw new TopicError("That page is not available.", "page_not_found");
+  }
+}
+
+async function assertGoalBelongs(
+  context: TenantContext,
+  goalId: string | null | undefined,
+): Promise<void> {
+  if (!goalId) return;
+
+  // Scoped, so a goal id from another tenant resolves to nothing rather than
+  // attaching this website's work to somebody else's objective.
+  const goal = await prisma.businessGoal.findFirst({
+    where: { id: goalId, ...websiteScope(context) },
+    select: { id: true },
+  });
+
+  if (!goal) {
+    throw new TopicError("That business goal is not available.", "not_found");
   }
 }
 
@@ -213,6 +233,7 @@ export async function createTopic(
   await Promise.all([
     assertPageBelongs(context, input.pillarPageId),
     assertPageBelongs(context, input.commercialDestinationPageId),
+    assertGoalBelongs(context, input.businessGoalId),
   ]);
 
   if (input.parentTopicId) {
@@ -237,6 +258,7 @@ export async function createTopic(
         commercialDestinationPageId: input.commercialDestinationPageId ?? null,
         priority: input.priority ?? null,
         authorityStatus: input.authorityStatus ?? "UNKNOWN",
+        businessGoalId: input.businessGoalId ?? null,
       },
     });
 
@@ -270,6 +292,7 @@ export async function updateTopic(
   await Promise.all([
     assertPageBelongs(context, patch.pillarPageId),
     assertPageBelongs(context, patch.commercialDestinationPageId),
+    assertGoalBelongs(context, patch.businessGoalId),
   ]);
 
   if (patch.parentTopicId !== undefined && patch.parentTopicId !== null) {
@@ -302,6 +325,9 @@ export async function updateTopic(
         ...(patch.priority !== undefined ? { priority: patch.priority } : {}),
         ...(patch.authorityStatus !== undefined
           ? { authorityStatus: patch.authorityStatus }
+          : {}),
+        ...(patch.businessGoalId !== undefined
+          ? { businessGoalId: patch.businessGoalId }
           : {}),
         ...(patch.coverageStatus !== undefined
           ? { coverageStatus: patch.coverageStatus, coverageSource: "USER_PROVIDED" }

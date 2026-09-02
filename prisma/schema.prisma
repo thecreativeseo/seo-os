@@ -451,6 +451,11 @@ model BusinessGoal {
   owner         User?         @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
   opportunities Opportunity[]
 
+  // P2. What a goal is attached to, so an opportunity can say which business
+  // outcome it serves rather than being ranked in a vacuum.
+  keywords Keyword[]
+  topics   Topic[]
+
   @@index([websiteId])
   @@map("business_goal")
 }
@@ -1191,6 +1196,10 @@ model Keyword {
   /// 0–5, set by a person. Feeds the opportunity score, so it is never guessed.
   businessRelevance Int?             @map("business_relevance")
   commercialValue   Int?             @map("commercial_value")
+  /// The goal this keyword serves, stated by a person. Never inferred: a
+  /// keyword is not evidence of a business intention, and guessing the link
+  /// would put weight on the score that nobody put there.
+  businessGoalId    String?          @map("business_goal_id") @db.Uuid
   status            TenantStatus     @default(ACTIVE)
   firstSeenAt       DateTime         @default(now()) @map("first_seen_at")
   lastSeenAt        DateTime         @default(now()) @map("last_seen_at")
@@ -1199,6 +1208,7 @@ model Keyword {
   archivedAt        DateTime?        @map("archived_at")
 
   website             Website                     @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  businessGoal        BusinessGoal?               @relation(fields: [businessGoalId], references: [id], onDelete: SetNull)
   metricSnapshots     KeywordMetricsSnapshot[]
   rankingSnapshots    RankingSnapshot[]
   ownerships          KeywordPageOwnership[]
@@ -1345,6 +1355,8 @@ model Topic {
   /// authority must not pretend to be scientifically precise.
   authorityStatus             TopicAuthority @default(UNKNOWN) @map("authority_status")
   ownerUserId                 String?        @map("owner_user_id") @db.Uuid
+  /// The goal this topic serves. Stated, not inferred.
+  businessGoalId              String?        @map("business_goal_id") @db.Uuid
   priority                    Int?
   status                      TenantStatus   @default(ACTIVE)
   createdAt                   DateTime       @default(now()) @map("created_at")
@@ -1357,6 +1369,7 @@ model Topic {
   pillarPage            Page?          @relation("TopicPillarPage", fields: [pillarPageId], references: [id], onDelete: SetNull)
   commercialDestination Page?          @relation("TopicCommercialPage", fields: [commercialDestinationPageId], references: [id], onDelete: SetNull)
   owner                 User?          @relation("TopicOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  businessGoal          BusinessGoal?  @relation(fields: [businessGoalId], references: [id], onDelete: SetNull)
   topicKeywords         TopicKeyword[]
   topicPages            TopicPage[]
   opportunities         Opportunity[]

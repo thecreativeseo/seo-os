@@ -416,6 +416,8 @@ export type KeywordPatch = {
   intent?: KeywordIntent;
   businessRelevance?: number | null;
   commercialValue?: number | null;
+  /** The goal this keyword serves. Stated by a person, never inferred. */
+  businessGoalId?: string | null;
 };
 
 /**
@@ -445,6 +447,19 @@ export async function updateKeyword(
     }
   }
 
+  if (patch.businessGoalId) {
+    // Scoped, so a goal id from another tenant resolves to nothing rather than
+    // attaching this website's work to somebody else's objective.
+    const goal = await prisma.businessGoal.findFirst({
+      where: { id: patch.businessGoalId, ...websiteScope(context) },
+      select: { id: true },
+    });
+
+    if (!goal) {
+      throw new KeywordError("That business goal is not available.", "not_found");
+    }
+  }
+
   return prisma.$transaction(async (tx) => {
     const updated = await tx.keyword.update({
       where: { id: existing.id },
@@ -458,6 +473,9 @@ export async function updateKeyword(
         ...(patch.commercialValue !== undefined
           ? { commercialValue: patch.commercialValue }
           : {}),
+        ...(patch.businessGoalId !== undefined
+          ? { businessGoalId: patch.businessGoalId }
+          : {}),
       },
     });
 
@@ -469,11 +487,13 @@ export async function updateKeyword(
         intent: existing.intent,
         businessRelevance: existing.businessRelevance,
         commercialValue: existing.commercialValue,
+        businessGoalId: existing.businessGoalId,
       },
       after: {
         intent: updated.intent,
         businessRelevance: updated.businessRelevance,
         commercialValue: updated.commercialValue,
+        businessGoalId: updated.businessGoalId,
       },
     });
 
