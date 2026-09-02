@@ -1,35 +1,80 @@
 import { requireWebsiteAccess } from "@/server/auth/guards";
+import { hasRole } from "@/server/auth/roles";
 import { PROVIDER_COUNT, listConnectionCards } from "@/server/services/connections";
+import { listAvailableProperties } from "@/server/services/connection-auth";
+import { isGoogleProvider, slugForProvider } from "@/server/connectors/google/oauth";
 import { Badge, PageHeader } from "@/components/governance/primitives";
+import {
+  ConnectButton,
+  DisconnectButton,
+  PropertyPicker,
+} from "@/components/connections/connect-controls";
 
 export const metadata = { title: "Connections · SEO OS" };
 
 /**
- * Data & Publishing (docs/P0_SPEC.md §18, blueprint "Connections").
+ * Data & Publishing.
  *
- * Every card is read-only. There is no connect button, because nothing connects in
- * this phase and a button that did nothing — or worse, appeared to succeed — would
- * be exactly the dishonesty CLAUDE.md rules out.
- *
- * Availability is stated per provider so the roadmap is legible without implying
- * anything is available now.
+ * Search Console and Analytics can now be connected. The others still state when
+ * they become available and offer no button, because a button that did nothing —
+ * or appeared to succeed — is the dishonesty CLAUDE.md rules out.
  */
+const ERRORS: Record<string, string> = {
+  access_denied: "Authorization was cancelled, or Google refused the request.",
+  missing_code: "The authorization response was incomplete.",
+  invalid_state: "That authorization link is no longer valid. Start again.",
+  no_refresh_token:
+    "Google did not return a long-lived token. Remove SEO OS from your Google account's third-party access, then connect again.",
+  exchange_failed: "The authorization could not be completed.",
+  not_configured:
+    "Google OAuth is not configured for this deployment yet, so connecting is unavailable.",
+};
+
+const CONNECTABLE = new Set(["GOOGLE_SEARCH_CONSOLE", "GOOGLE_ANALYTICS"]);
+
 export default async function ConnectionsPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ websiteId: string }>;
+  searchParams: Promise<{ error?: string; select?: string }>;
 }) {
   const { websiteId } = await params;
+  const { error, select } = await searchParams;
   const context = await requireWebsiteAccess(websiteId);
   const cards = await listConnectionCards(context);
+  const canManage = hasRole(context.membership.role, "ADMIN");
+
   const connected = cards.filter((card) => card.status === "CONNECTED").length;
+
+  // Properties are fetched only for the provider being set up, so a page view does
+  // not call Google for every connection.
+  const selectingProvider = select && isGoogleProvider(select) ? select : null;
+
+  let properties: { id: string; name: string }[] = [];
+  let propertyError: string | null = null;
+
+  if (selectingProvider && canManage) {
+    try {
+      properties = await listAvailableProperties(context, selectingProvider);
+    } catch {
+      propertyError =
+        "Could not read the list of properties. The authorization may need to be repeated.";
+    }
+  }
 
   return (
     <main className="space-y-8">
       <PageHeader
         title="Data & Publishing"
-        description="The systems SEO OS is built to operate with. Nothing connects in this phase — these are shown so the architecture is visible, not to suggest data is flowing."
+        description="The systems SEO OS is built to operate with. Search Console and Analytics can be connected; the rest state when they become available."
       />
+
+      {error ? (
+        <p role="alert" className="rounded-lg border border-red-300 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:text-red-300">
+          {ERRORS[error] ?? ERRORS.exchange_failed}
+        </p>
+      ) : null}
 
       <p className="text-muted-foreground text-sm">
         <span className="font-mono">
@@ -39,36 +84,90 @@ export default async function ConnectionsPage({
       </p>
 
       <ul className="divide-border border-border divide-y rounded-lg border">
-        {cards.map((card) => (
-          <li
-            key={card.provider}
-            className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-4"
-          >
-            <div className="min-w-0">
-              <p className="text-sm font-medium">{card.name}</p>
-              <p className="text-muted-foreground text-sm">{card.purpose}</p>
-            </div>
+        {cards.map((card) => {
+          const slug = slugForProvider(card.provider);
+          const connectable = CONNECTABLE.has(card.provider);
+          const isSelecting = selectingProvider === card.provider;
 
-            <div className="flex shrink-0 items-center gap-3">
-              <span className="text-muted-foreground text-xs">{card.availability}</span>
-              <Badge>{card.status}</Badge>
-            </div>
-          </li>
-        ))}
+          return (
+            <li key={card.provider} className="space-y-3 px-4 py-4">
+              <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">{card.name}</p>
+                  <p className="text-muted-foreground text-sm">{card.purpose}</p>
+                  {card.status === "CONNECTED" ? (
+                    <p className="text-muted-foreground mt-1 font-mono text-xs">
+                      {card.hasCredentialReference || connectable
+                        ? "Property selected"
+                        : null}
+                    </p>
+                  ) : null}
+                </div>
+
+                <div className="flex shrink-0 items-center gap-3">
+                  <span className="text-muted-foreground text-xs">{card.availability}</span>
+                  <Badge>{card.status}</Badge>
+                </div>
+              </div>
+
+              {connectable && canManage && slug ? (
+                <div className="space-y-3">
+                  {card.status === "NOT_CONNECTED" ? (
+                    <ConnectButton
+                      websiteId={websiteId}
+                      slug={slug}
+                      label={`Connect ${card.name}`}
+                    />
+                  ) : null}
+
+                  {card.status === "CONNECTING" && !isSelecting ? (
+                    <p className="text-muted-foreground text-sm">
+                      Authorised. Choose a property to finish connecting.
+                    </p>
+                  ) : null}
+
+                  {isSelecting ? (
+                    propertyError ? (
+                      <p role="alert" className="text-sm text-red-600">
+                        {propertyError}
+                      </p>
+                    ) : (
+                      <PropertyPicker
+                        websiteId={websiteId}
+                        slug={slug}
+                        properties={properties}
+                        selectedId={null}
+                      />
+                    )
+                  ) : null}
+
+                  {card.status !== "NOT_CONNECTED" ? (
+                    <DisconnectButton websiteId={websiteId} slug={slug} />
+                  ) : null}
+                </div>
+              ) : null}
+
+              {connectable && !canManage ? (
+                <p className="text-muted-foreground text-sm">
+                  An owner or admin connects data sources.
+                </p>
+              ) : null}
+            </li>
+          );
+        })}
       </ul>
 
       <section className="border-border space-y-2 rounded-lg border border-dashed p-5">
-        <h2 className="text-sm font-medium">How connections will work</h2>
+        <h2 className="text-sm font-medium">How connections work</h2>
         <p className="text-muted-foreground text-sm leading-relaxed">
-          When a provider is connected, SEO OS stores a reference to the credential in
-          a secret manager — never the credential itself. Provider-specific logic sits
-          behind a connector abstraction, so adding a provider does not change how the
-          rest of the system reads data.
+          Signing in with Google proves who you are. Connecting Search Console or
+          Analytics is a separate authorization, asking only for read access, and it is
+          attached to the property you choose rather than to your account as a whole.
         </p>
         <p className="text-muted-foreground text-sm leading-relaxed">
-          Search Console and Analytics activate in P1. Until then every provider stays{" "}
-          <span className="font-mono text-xs">NOT_CONNECTED</span>, and nothing in SEO
-          OS reports a metric it has not been given.
+          The long-lived token is encrypted before it is stored and is never returned by
+          any page. Data already collected stays if a connection is removed, because it
+          was really measured.
         </p>
       </section>
     </main>
