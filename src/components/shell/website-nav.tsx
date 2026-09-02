@@ -16,10 +16,19 @@ const GROUPS = [
     sections: [{ slug: "", label: "Command Center" }],
   },
   {
+    heading: "Opportunities",
+    sections: [{ slug: "opportunities", label: "Opportunity Queue" }],
+  },
+  {
     heading: "Intelligence",
     sections: [
       { slug: "pages", label: "Pages" },
       { slug: "queries", label: "Queries" },
+      { slug: "keywords", label: "Keywords" },
+      { slug: "topics", label: "Topics" },
+      // Moved from Website in P2: competitors stopped being a list somebody
+      // maintains and became something the product has evidence about.
+      { slug: "competitors", label: "Competitors" },
       { slug: "signals", label: "Signals" },
     ],
   },
@@ -30,7 +39,6 @@ const GROUPS = [
       { slug: "goals", label: "Business Goals" },
       { slug: "context", label: "Business Context" },
       { slug: "brand-facts", label: "Brand Facts" },
-      { slug: "competitors", label: "Competitors" },
       { slug: "seo-rules", label: "SEO Rules" },
     ],
   },

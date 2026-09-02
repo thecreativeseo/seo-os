@@ -81,6 +81,14 @@ export type KeywordRow = {
   rankingUrl: string | null;
   rankingPageId: string | null;
   rankingPagePath: string | null;
+  /**
+   * The page nominated to own this keyword.
+   *
+   * Sits beside the ranking page on purpose: their disagreement is the most
+   * useful thing P2 knows, and putting them in distant columns would hide it.
+   */
+  ownerPageId: string | null;
+  ownerPath: string | null;
   /** True when providers differ enough on volume to be worth a second look. */
   volumeDisagreement: boolean;
   capturedAt: Date | null;
@@ -177,10 +185,13 @@ async function latestRankings(keywordIds: string[]): Promise<Map<string, Ranking
   return byKeyword;
 }
 
+export type OwnerRef = { pageId: string; path: string } | null;
+
 function assembleRow(
   keyword: Keyword,
   metrics: MetricReading[],
   rankings: RankingReading[],
+  owner: OwnerRef = null,
 ): KeywordRow {
   const volumeReadings: Reading<number | null>[] = metrics.map((reading) => ({
     provider: reading.provider,
@@ -224,6 +235,8 @@ function assembleRow(
     rankingUrl: primaryRanking?.value.rankingUrl ?? null,
     rankingPageId: primaryRanking?.value.pageId ?? null,
     rankingPagePath: primaryRanking?.value.pagePath ?? null,
+    ownerPageId: owner?.pageId ?? null,
+    ownerPath: owner?.path ?? null,
     volumeDisagreement: providersDisagree(volumeReadings),
     capturedAt: primaryMetric?.capturedAt ?? primaryRanking?.capturedAt ?? null,
     lastSeenAt: keyword.lastSeenAt,
@@ -266,10 +279,44 @@ export async function listKeywords(
   });
 
   const ids = keywords.map((keyword) => keyword.id);
-  const [metrics, rankings] = await Promise.all([latestMetrics(ids), latestRankings(ids)]);
+  const [metrics, rankings, owners] = await Promise.all([
+    latestMetrics(ids),
+    latestRankings(ids),
+    primaryOwners(ids),
+  ]);
 
   return keywords.map((keyword) =>
-    assembleRow(keyword, metrics.get(keyword.id) ?? [], rankings.get(keyword.id) ?? []),
+    assembleRow(
+      keyword,
+      metrics.get(keyword.id) ?? [],
+      rankings.get(keyword.id) ?? [],
+      owners.get(keyword.id) ?? null,
+    ),
+  );
+}
+
+/**
+ * The nominated owner for each keyword, in one query.
+ *
+ * Only ACTIVE PRIMARY: secondary and retired assignments are real history but
+ * they are not the answer to "which page is this keyword supposed to be".
+ */
+async function primaryOwners(
+  keywordIds: string[],
+): Promise<Map<string, { pageId: string; path: string }>> {
+  if (keywordIds.length === 0) return new Map();
+
+  const rows = await prisma.keywordPageOwnership.findMany({
+    where: {
+      keywordId: { in: keywordIds },
+      ownershipType: "PRIMARY",
+      status: "ACTIVE",
+    },
+    select: { keywordId: true, pageId: true, page: { select: { path: true } } },
+  });
+
+  return new Map(
+    rows.map((row) => [row.keywordId, { pageId: row.pageId, path: row.page.path }]),
   );
 }
 
@@ -332,10 +379,11 @@ export async function getKeyword(
 
   if (!keyword) return null;
 
-  const [metricsMap, rankingsMap, metricHistory, rankingHistoryRows, firstParty] =
+  const [metricsMap, rankingsMap, ownerMap, metricHistory, rankingHistoryRows, firstParty] =
     await Promise.all([
       latestMetrics([keyword.id]),
       latestRankings([keyword.id]),
+      primaryOwners([keyword.id]),
       prisma.keywordMetricsSnapshot.findMany({
         where: { keywordId: keyword.id },
         orderBy: [{ capturedAt: "desc" }, { sourceProvider: "asc" }],
@@ -363,7 +411,7 @@ export async function getKeyword(
       pagePath: page?.path ?? null,
     })),
     firstParty,
-    row: assembleRow(keyword, metrics, rankings),
+    row: assembleRow(keyword, metrics, rankings, ownerMap.get(keyword.id) ?? null),
   };
 }
 
