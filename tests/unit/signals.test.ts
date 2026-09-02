@@ -48,7 +48,18 @@ function query(overrides: Partial<QueryInput> = {}): QueryInput {
   };
 }
 
+/** Unwraps to the signal list; the cap and totals are covered separately below. */
 function detect(input: Partial<Parameters<typeof detectSignals>[0]>) {
+  return detectSignals({
+    pages: [],
+    queries: [],
+    freshnessDays: 3,
+    lastSyncFailed: false,
+    ...input,
+  }).signals;
+}
+
+function detectFull(input: Partial<Parameters<typeof detectSignals>[0]>) {
   return detectSignals({
     pages: [],
     queries: [],
@@ -331,5 +342,57 @@ describe("signals never claim a cause", () => {
     expect(copy.summary).toContain("1,240");
     expect(copy.summary).toContain("920");
     expect(copy.summary).toContain("down 25.8%");
+  });
+});
+
+describe("per-type caps", () => {
+  it("caps a type that matches many candidates but reports the true total", () => {
+    // Forty queries all sit in the striking-distance band.
+    const queries = Array.from({ length: 40 }, (_, index) =>
+      query({
+        query: `query ${String(index).padStart(2, "0")}`,
+        position: 12,
+        impressions: 200 + index,
+      }),
+    );
+
+    const result = detectFull({ queries });
+    const striking = result.signals.filter(
+      (signal) => signal.type === "STRIKING_DISTANCE",
+    );
+
+    // An Attention list with forty items is a second inbox, not attention.
+    expect(striking).toHaveLength(12);
+    // But nothing is hidden: the interface can say "12 of 40".
+    expect(result.totalsByType.STRIKING_DISTANCE).toBe(40);
+  });
+
+  it("keeps the highest-scoring candidates when capping", () => {
+    const queries = Array.from({ length: 20 }, (_, index) =>
+      query({
+        query: `query ${String(index).padStart(2, "0")}`,
+        position: 12,
+        // Impressions rise with the index, so the last ones score highest.
+        impressions: 100 + index * 100,
+      }),
+    );
+
+    const result = detectFull({ queries });
+    const kept = result.signals
+      .filter((signal) => signal.type === "STRIKING_DISTANCE")
+      .map((signal) => signal.subject);
+
+    expect(kept).toContain("query 19");
+    expect(kept).not.toContain("query 00");
+  });
+
+  it("does not cap types that are already bounded", () => {
+    const pages = Array.from({ length: 10 }, (_, index) =>
+      page({ path: `/p${index}`, clicks: 300 - index * 10, previousClicks: 50 }),
+    );
+
+    const result = detectFull({ pages });
+    // Winners are already limited to three by their own rule.
+    expect(result.signals.filter((signal) => signal.type === "PAGE_WINNER")).toHaveLength(3);
   });
 });

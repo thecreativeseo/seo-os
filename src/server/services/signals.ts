@@ -44,7 +44,12 @@ export type SignalWithEvidence = Signal & {
 export async function detectAndStoreSignals(
   context: TenantContext,
   options: { now?: Date } = {},
-): Promise<{ detected: number; resolved: number; windows: MetricsWindow }> {
+): Promise<{
+  detected: number;
+  resolved: number;
+  windows: MetricsWindow;
+  totalsByType: Partial<Record<string, number>>;
+}> {
   const now = options.now ?? new Date();
   const { windows, latestDataDate } = await resolveWebsiteWindows(context, "28d");
 
@@ -58,7 +63,7 @@ export async function detectAndStoreSignals(
     }),
   ]);
 
-  const detected = detectSignals({
+  const detection = detectSignals({
     pages: pages.map((page) => ({
       pageId: page.pageId,
       path: page.path,
@@ -84,6 +89,8 @@ export async function detectAndStoreSignals(
     lastSyncFailed: lastRun?.status === "FAILED" || lastRun?.status === "PARTIAL",
   });
 
+  const detected = detection.signals;
+
   const keptIds: string[] = [];
 
   for (const signal of detected) {
@@ -103,7 +110,12 @@ export async function detectAndStoreSignals(
     data: { status: "RESOLVED", resolvedAt: now },
   });
 
-  return { detected: detected.length, resolved: resolved.count, windows };
+  return {
+    detected: detected.length,
+    resolved: resolved.count,
+    windows,
+    totalsByType: detection.totalsByType,
+  };
 }
 
 async function upsertSignal(

@@ -59,6 +59,17 @@ export type EvidenceInput = {
   previousValue: number | null;
 };
 
+export type DetectionResult = {
+  signals: DetectedSignal[];
+  /**
+   * How many candidates met each rule, before the per-type cap below.
+   *
+   * Reported separately so the interface can say "12 of 63" rather than either
+   * showing an unusable list or quietly understating what was found.
+   */
+  totalsByType: Partial<Record<SignalTypeName, number>>;
+};
+
 export type DetectedSignal = {
   type: SignalTypeName;
   severity: Severity;
@@ -78,6 +89,22 @@ export type DetectedSignal = {
  * makes noise look like news — a page going from 2 clicks to 1 is a 50% decline
  * that nobody should be shown.
  */
+/**
+ * How many signals of each type are worth surfacing.
+ *
+ * A rule can legitimately match sixty queries; an Attention list with sixty items
+ * is not attention, it is a second inbox. The cap is a presentation limit applied
+ * after detection, and the true count is preserved in totalsByType so nothing is
+ * hidden — only deferred to the full list.
+ */
+export const MAX_PER_TYPE: Partial<Record<SignalTypeName, number>> = {
+  STRIKING_DISTANCE: 12,
+  CTR_OPPORTUNITY: 10,
+  TRAFFIC_DECLINE: 10,
+  TRAFFIC_GROWTH: 10,
+  IMPRESSION_GROWTH: 10,
+};
+
 export const THRESHOLDS = {
   trafficDecline: { relative: -0.25, absoluteClicks: 20 },
   trafficGrowth: { relative: 0.3, absoluteClicks: 20 },
@@ -136,8 +163,8 @@ export type DetectionInput = {
   lastSyncFailed: boolean;
 };
 
-export function detectSignals(input: DetectionInput): DetectedSignal[] {
-  const signals: DetectedSignal[] = [
+export function detectSignals(input: DetectionInput): DetectionResult {
+  const candidates: DetectedSignal[] = [
     ...detectTrafficChanges(input.pages),
     ...detectImpressionGrowth(input.pages),
     ...detectCtrOpportunities(input.pages),
@@ -149,12 +176,32 @@ export function detectSignals(input: DetectionInput): DetectedSignal[] {
   // Deterministic order: severity, then score, then subject as a stable tiebreak.
   const severityRank: Record<Severity, number> = { HIGH: 3, MEDIUM: 2, LOW: 1, INFO: 0 };
 
-  return signals.sort((a, b) => {
+  const ordered = candidates.sort((a, b) => {
     const bySeverity = severityRank[b.severity] - severityRank[a.severity];
     if (bySeverity !== 0) return bySeverity;
     if (b.score !== a.score) return b.score - a.score;
     return a.subject < b.subject ? -1 : a.subject > b.subject ? 1 : 0;
   });
+
+  const totalsByType: Partial<Record<SignalTypeName, number>> = {};
+  for (const signal of ordered) {
+    totalsByType[signal.type] = (totalsByType[signal.type] ?? 0) + 1;
+  }
+
+  // Cap per type, keeping the highest-scoring. Because `ordered` is already sorted,
+  // taking the first N of each type takes the most significant ones.
+  const kept: DetectedSignal[] = [];
+  const seenPerType = new Map<SignalTypeName, number>();
+
+  for (const signal of ordered) {
+    const cap = MAX_PER_TYPE[signal.type];
+    const seen = seenPerType.get(signal.type) ?? 0;
+    if (cap !== undefined && seen >= cap) continue;
+    seenPerType.set(signal.type, seen + 1);
+    kept.push(signal);
+  }
+
+  return { signals: kept, totalsByType };
 }
 
 function detectTrafficChanges(pages: PageInput[]): DetectedSignal[] {
