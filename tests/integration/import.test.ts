@@ -278,6 +278,7 @@ describe("commit", () => {
     const upload = await uploadImport(context, {
       fileName: "payload.csv",
       content: 'Keyword,Position\n"=cmd|\'/c calc\'!A1",5\n',
+      source: "SEMRUSH_POSITIONS",
     });
     await validateImport(context, upload.record.id);
     await commitImport(context, upload.record.id);
@@ -329,7 +330,11 @@ describe("commit", () => {
       "payroll software,5,https://stranger.example.net/payroll/,stranger.example.net",
     ].join("\n");
 
-    const upload = await uploadImport(context, { fileName: "competitors.csv", content });
+    const upload = await uploadImport(context, {
+      fileName: "competitors.csv",
+      content,
+      source: "SEMRUSH_COMPETITORS",
+    });
     expect(upload.detected?.source).toBe("SEMRUSH_COMPETITORS");
 
     await validateImport(context, upload.record.id);
@@ -396,5 +401,101 @@ describe("an import cannot be aimed at another tenant", () => {
 
     expect(second.duplicate).toBe(false);
     expect(second.record.id).not.toBe(first.record.id);
+  });
+});
+
+/**
+ * Two providers, kept apart end to end.
+ *
+ * The failure that matters is not a rejected file — it is one vendor's numbers
+ * quietly filed as the other's, which corrupts the data rather than refusing it.
+ */
+describe("Semrush and Ahrefs", () => {
+  it("refuses a file whose vendor it cannot identify", async () => {
+    const context = await makeContext("novendor");
+
+    // Volume and difficulty, but nothing naming who measured them.
+    await expect(
+      uploadImport(context, {
+        fileName: "unknown.csv",
+        content: "Keyword,Volume,KD\npayroll software,2400,43\n",
+      }),
+    ).rejects.toBeInstanceOf(ImportError);
+
+    // And nothing was staged: refusing means refusing.
+    expect(await listImports(context)).toHaveLength(0);
+  });
+
+  it("imports the same numbers under the vendor that supplied them", async () => {
+    const context = await makeContext("ahrefs");
+    const host = context.website.normalizedDomain;
+
+    const upload = await uploadImport(context, {
+      fileName: "ahrefs.csv",
+      content: [
+        "Keyword,Current position,Previous position,Volume,KD,CPC,Current URL,Last Update",
+        `payroll software philippines,9,12,2400,38,3.10,https://${host}/payroll/,2026-08-30`,
+      ].join("\n"),
+    });
+
+    expect(upload.detected?.source).toBe("AHREFS_POSITIONS");
+
+    await validateImport(context, upload.record.id);
+    await commitImport(context, upload.record.id);
+
+    const metrics = await prisma.keywordMetricsSnapshot.findFirstOrThrow({
+      where: { websiteId: context.website.id },
+    });
+    const ranking = await prisma.rankingSnapshot.findFirstOrThrow({
+      where: { websiteId: context.website.id },
+    });
+
+    expect(metrics.sourceProvider).toBe("AHREFS");
+    expect(ranking.sourceProvider).toBe("AHREFS");
+    // 38 here is an Ahrefs KD. Stored with its provider so nothing ever compares
+    // it to a Semrush 38, which is a different measurement wearing the same label.
+    expect(Number(metrics.keywordDifficulty)).toBe(38);
+  });
+
+  it("keeps both vendors' readings of one keyword side by side", async () => {
+    const context = await makeContext("both");
+    const host = context.website.normalizedDomain;
+
+    await uploadImport(context, {
+      fileName: "semrush.csv",
+      content: [
+        "Keyword,Position,Search Volume,Keyword Difficulty,URL,Timestamp",
+        `payroll software,4,2400,51,https://${host}/payroll/,2026-08-30`,
+      ].join("\n"),
+    }).then(async (upload) => {
+      await validateImport(context, upload.record.id);
+      await commitImport(context, upload.record.id);
+    });
+
+    await uploadImport(context, {
+      fileName: "ahrefs.csv",
+      content: [
+        "Keyword,Current position,Volume,KD,Current URL,Last Update",
+        `payroll software,5,1900,38,https://${host}/payroll/,2026-08-30`,
+      ].join("\n"),
+    }).then(async (upload) => {
+      await validateImport(context, upload.record.id);
+      await commitImport(context, upload.record.id);
+    });
+
+    // One keyword — identity does not depend on who reported it.
+    expect(await prisma.keyword.count({ where: { websiteId: context.website.id } })).toBe(1);
+
+    // Two readings of the same day, neither overwriting the other, because the
+    // snapshot key includes the provider. They disagree, and that disagreement is
+    // a fact worth keeping rather than a conflict to resolve.
+    const metrics = await prisma.keywordMetricsSnapshot.findMany({
+      where: { websiteId: context.website.id },
+      orderBy: { sourceProvider: "asc" },
+    });
+
+    expect(metrics).toHaveLength(2);
+    expect(metrics.map((row) => row.sourceProvider)).toEqual(["SEMRUSH", "AHREFS"]);
+    expect(metrics.map((row) => row.searchVolume)).toEqual([2400, 1900]);
   });
 });

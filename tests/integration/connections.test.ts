@@ -69,17 +69,20 @@ afterAll(async () => {
 });
 
 describe("provider registry", () => {
-  it("lists exactly the seven P0 providers", async () => {
+  it("lists every P0 provider, in a stable order", async () => {
+    // The registry grows — AHREFS arrived in P2 — but a P0 provider disappearing
+    // would orphan any connection pointing at it, and a reordering would move the
+    // cards under someone mid-click.
     const context = await makeContext("registry");
     const cards = await listConnectionCards(context);
 
-    expect(cards).toHaveLength(7);
-    expect(PROVIDER_COUNT).toBe(7);
+    expect(cards).toHaveLength(PROVIDER_COUNT);
     expect(cards.map((card) => card.provider)).toEqual([
       "GOOGLE_SEARCH_CONSOLE",
       "GOOGLE_ANALYTICS",
       "HUBSPOT",
       "SEMRUSH",
+      "AHREFS",
       "SIMILARWEB",
       "SCREAMING_FROG",
       "WORDPRESS",
@@ -107,6 +110,7 @@ describe("provider registry", () => {
     // A provider added to the enum but not the registry would be invisible in the UI.
     const registryProviders = CONNECTION_PROVIDERS.map((card) => card.provider).sort();
     const enumProviders = [
+      "AHREFS",
       "GOOGLE_ANALYTICS",
       "GOOGLE_SEARCH_CONSOLE",
       "HUBSPOT",
@@ -155,7 +159,9 @@ describe("connection state", () => {
 
     expect(gsc?.status).toBe("ERROR");
     // Untouched providers are unaffected.
-    expect(cards.filter((card) => card.status === "NOT_CONNECTED")).toHaveLength(6);
+    expect(cards.filter((card) => card.status === "NOT_CONNECTED")).toHaveLength(
+      PROVIDER_COUNT - 1,
+    );
   });
 });
 

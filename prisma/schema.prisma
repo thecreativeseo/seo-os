@@ -127,6 +127,10 @@ enum ConnectionProvider {
   GOOGLE_ANALYTICS
   HUBSPOT
   SEMRUSH
+  // P2. Either Semrush or Ahrefs can supply market evidence; a snapshot always
+  // records which one, because their volume and difficulty figures are computed
+  // differently and are not interchangeable.
+  AHREFS
   SIMILARWEB
   SCREAMING_FROG
   WORDPRESS
@@ -1157,6 +1161,9 @@ enum ImportSource {
   SEMRUSH_POSITIONS
   SEMRUSH_KEYWORD_OVERVIEW
   SEMRUSH_COMPETITORS
+  AHREFS_POSITIONS
+  AHREFS_KEYWORD_OVERVIEW
+  AHREFS_COMPETITORS
   MANUAL_CSV
 }
 

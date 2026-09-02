@@ -26,7 +26,6 @@ const GROUPS = [
   {
     heading: "Website",
     sections: [
-      { slug: "overview", label: "Overview" },
       { slug: "ownership", label: "Ownership" },
       { slug: "goals", label: "Business Goals" },
       { slug: "context", label: "Business Context" },

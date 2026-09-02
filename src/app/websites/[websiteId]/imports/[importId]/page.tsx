@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { hasRole } from "@/server/auth/roles";
 import { ImportError, validateImport } from "@/server/services/import";
-import { IMPORT_SOURCE_LABELS } from "@/lib/import/semrush";
+import { IMPORT_SOURCE_LABELS } from "@/lib/import/formats";
 import { Badge, EmptyState, PageHeader } from "@/components/governance/primitives";
 import { CommitImportControls } from "@/components/imports/import-controls";
 

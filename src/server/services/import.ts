@@ -11,8 +11,9 @@ import {
   IMPORT_SOURCE_LABELS,
   mapIntent,
   mapRow,
+  providerForSource,
   type NormalizedImportRow,
-} from "@/lib/import/semrush";
+} from "@/lib/import/formats";
 import { normalizeUrl } from "@/lib/url/normalize-url";
 
 /**
@@ -42,6 +43,7 @@ export type ImportErrorCode =
   | "unsupported_type"
   | "unreadable"
   | "unrecognised_format"
+  | "provider_required"
   | "wrong_state"
   | "not_found"
   | "no_valid_rows";
@@ -148,11 +150,26 @@ export async function uploadImport(
     );
   }
 
+  const source = detected.source;
+
+  if (!source) {
+    // The file carries volume, difficulty or positions, but nothing in it says
+    // whose they are. Three things could be done here and only one is honest:
+    // guess a vendor (attributes a difficulty score to the wrong scale, and the
+    // mistake is invisible afterwards), treat it as a plain keyword list (drops
+    // every metric silently, looking like a successful import of far less data),
+    // or say so and ask. The third costs one click.
+    throw new ImportError(
+      "This looks like a keyword export, but nothing in it names Semrush or Ahrefs. Choose the format and upload again.",
+      "provider_required",
+    );
+  }
+
   const record = await prisma.$transaction(async (tx) => {
     const created = await tx.import.create({
       data: {
         websiteId: context.website.id,
-        source: detected.source,
+        source,
         status: "PARSING",
         fileName: input.fileName,
         checksum,
@@ -183,7 +200,7 @@ export async function uploadImport(
       action: "CREATE",
       after: {
         fileName: input.fileName,
-        source: detected.source,
+        source,
         rowCount: parsed.rows.length,
       },
     });
@@ -191,7 +208,7 @@ export async function uploadImport(
     return created;
   });
 
-  return { record, detected, duplicate: false };
+  return { record, detected: { ...detected, source }, duplicate: false };
 }
 
 export type PreviewRow = {
@@ -350,17 +367,20 @@ export async function commitImport(
   const fallbackCapturedAt = (record.capturedAt ?? record.createdAt).toISOString().slice(0, 10);
 
   /**
-   * A hand-written keyword list creates Keywords and nothing else.
+   * The provider whose numbers these are — Semrush or Ahrefs — or null for a
+   * hand-written list.
    *
-   * Every snapshot carries the provider that produced it, and there is no provider
-   * value that honestly describes a CSV somebody typed. Labelling those numbers
-   * SEMRUSH would be attributing a measurement to a company that never made it —
-   * exactly the "third-party estimate as first-party truth" the spec forbids, with
-   * the direction reversed. So a manual list contributes keyword identities, and
-   * the metrics wait for a source that can be named.
+   * A manual list creates Keywords and nothing else. Every snapshot carries the
+   * provider that produced it, and no provider value honestly describes a CSV
+   * somebody typed; attributing those figures to a vendor would credit a
+   * measurement to a company that never made it.
+   *
+   * Downstream, this is what keeps the two vendors apart. Their volumes come from
+   * different models and their difficulty scores are both labelled 0–100 while
+   * meaning different things, so an unattributed snapshot would be a number nobody
+   * could interpret.
    */
-  const metricsAllowed = record.source !== "MANUAL_CSV";
-  const provider = "SEMRUSH" as const;
+  const provider = providerForSource(record.source);
 
   const mapped: NormalizedImportRow[] = [];
 
@@ -376,7 +396,7 @@ export async function commitImport(
   }
 
   const competitors =
-    record.source === "SEMRUSH_COMPETITORS"
+    record.source.endsWith("_COMPETITORS")
       ? await prisma.competitor.findMany({ where: { websiteId: context.website.id } })
       : [];
 
@@ -390,9 +410,13 @@ export async function commitImport(
     const keyword = await upsertKeyword(context, row);
     if (keyword.created) keywordsCreated += 1;
 
+    // A hand-written list contributes keyword identities and stops there: with no
+    // provider to attribute them to, its numbers have nowhere honest to live.
+    if (provider === null) continue;
+
     const capturedAt = new Date(`${row.capturedAt ?? fallbackCapturedAt}T00:00:00.000Z`);
 
-    if (record.source === "SEMRUSH_COMPETITORS") {
+    if (record.source.endsWith("_COMPETITORS")) {
       const competitor = matchCompetitor(competitors, row.domain);
 
       if (!competitor) {
@@ -428,10 +452,7 @@ export async function commitImport(
       continue;
     }
 
-    if (
-      metricsAllowed &&
-      (row.searchVolume !== null || row.keywordDifficulty !== null || row.cpc !== null)
-    ) {
+    if (row.searchVolume !== null || row.keywordDifficulty !== null || row.cpc !== null) {
       await prisma.keywordMetricsSnapshot.upsert({
         where: {
           keywordId_capturedAt_sourceProvider: {
@@ -463,7 +484,7 @@ export async function commitImport(
       metricsWritten += 1;
     }
 
-    if (metricsAllowed && row.position !== null) {
+    if (row.position !== null) {
       const pageId = await resolvePageId(context, row.landingUrl);
 
       await prisma.rankingSnapshot.upsert({
@@ -679,6 +700,7 @@ export const IMPORT_ERROR_MESSAGES: Record<ImportErrorCode, string> = {
   unsupported_type: "Upload a .csv file.",
   unreadable: "That file could not be read as CSV.",
   unrecognised_format: "That file does not look like a keyword export.",
+  provider_required: "Choose whether this export came from Semrush or Ahrefs.",
   wrong_state: "That import cannot be changed in its current state.",
   not_found: "That import is not available.",
   no_valid_rows: "No valid rows to commit.",

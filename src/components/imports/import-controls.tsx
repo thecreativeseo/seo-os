@@ -49,13 +49,21 @@ export function UploadImportForm({ websiteId }: { websiteId: string }) {
             className="border-border h-9 w-full rounded-md border px-2 text-sm"
           >
             {/* Detection is a suggestion. Reading a competitor export as our own
-                positions would attribute their rankings to us, so the format
-                stays overridable. */}
+                positions would attribute their rankings to us, and reading an
+                Ahrefs file as Semrush would attribute their difficulty score to a
+                scale it was not computed on. Both stay overridable. */}
             <option value="">Detect from the column headings</option>
-            <option value="SEMRUSH_POSITIONS">Semrush organic positions</option>
-            <option value="SEMRUSH_KEYWORD_OVERVIEW">Semrush keyword overview</option>
-            <option value="SEMRUSH_COMPETITORS">Semrush competitor positions</option>
-            <option value="MANUAL_CSV">Keyword list</option>
+            <optgroup label="Semrush">
+              <option value="SEMRUSH_POSITIONS">Organic positions</option>
+              <option value="SEMRUSH_KEYWORD_OVERVIEW">Keyword overview</option>
+              <option value="SEMRUSH_COMPETITORS">Competitor positions</option>
+            </optgroup>
+            <optgroup label="Ahrefs">
+              <option value="AHREFS_POSITIONS">Organic keywords</option>
+              <option value="AHREFS_KEYWORD_OVERVIEW">Keywords explorer</option>
+              <option value="AHREFS_COMPETITORS">Competitor keywords</option>
+            </optgroup>
+            <option value="MANUAL_CSV">Keyword list (no provider metrics)</option>
           </select>
         </div>
 

@@ -70,13 +70,35 @@ describe("connections", () => {
     "WORDPRESS",
   ];
 
-  it("registers exactly the seven P0 providers", () => {
+  it("still registers every P0 provider", () => {
+    // The registry may grow — AHREFS arrived in P2 — but a P0 provider
+    // disappearing would silently orphan any connection pointing at it.
     const block = schema.match(/enum ConnectionProvider \{([\s\S]*?)\}/)?.[1] ?? "";
     const found = block
       .split("\n")
       .map((line) => line.trim())
-      .filter(Boolean);
-    expect(found.sort()).toEqual([...providers].sort());
+      .filter((line) => line !== "" && !line.startsWith("//"));
+
+    for (const provider of providers) {
+      expect(found).toContain(provider);
+    }
+  });
+
+  it("keeps the schema registry and CLAUDE.md in step", () => {
+    // The registry is documented in two places, and a provider the code knows
+    // about but the rules do not is how a documented constraint quietly rots.
+    const block = schema.match(/enum ConnectionProvider \{([\s\S]*?)\}/)?.[1] ?? "";
+    const inSchema = block
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && !line.startsWith("//"));
+
+    const claudeMd = readFileSync(join(root, "CLAUDE.md"), "utf8");
+    const documented = claudeMd.match(/Initial provider registry:\s*```text\n([\s\S]*?)```/)?.[1] ?? "";
+
+    expect(documented.trim().split("\n").map((line) => line.trim()).sort()).toEqual(
+      [...inSchema].sort(),
+    );
   });
 
   it("stores a credential reference and no credential columns", () => {

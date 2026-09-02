@@ -3,7 +3,7 @@ import Link from "next/link";
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { hasRole } from "@/server/auth/roles";
 import { listImports } from "@/server/services/import";
-import { IMPORT_SOURCE_LABELS } from "@/lib/import/semrush";
+import { IMPORT_SOURCE_LABELS } from "@/lib/import/formats";
 import { Badge, EmptyState, PageHeader } from "@/components/governance/primitives";
 import { UploadImportForm } from "@/components/imports/import-controls";
 

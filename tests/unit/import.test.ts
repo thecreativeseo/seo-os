@@ -7,7 +7,7 @@ import {
   toCsv,
   toCsvField,
 } from "@/lib/import/formula-guard";
-import { detectFormat, mapIntent, mapRow } from "@/lib/import/semrush";
+import { detectFormat, mapIntent, mapRow, providerForSource } from "@/lib/import/formats";
 import { validateUpload, checksumOf, MAX_IMPORT_BYTES } from "@/server/services/import";
 
 describe("csv parsing", () => {
@@ -179,13 +179,32 @@ describe("format detection", () => {
   it("prefers the competitor format when a domain column is present", () => {
     // A competitor export is a positions export plus a domain, so the more
     // specific format has to win or every competitor row would be filed as ours.
-    const detected = detectFormat(["Keyword", "Position", "URL", "Domain"]);
+    const detected = detectFormat(["Keyword", "Position", "URL", "Domain", "Timestamp"]);
     expect(detected?.source).toBe("SEMRUSH_COMPETITORS");
   });
 
   it("recognises a keyword overview export", () => {
-    const detected = detectFormat(["Keyword", "Intent", "Volume", "Keyword Difficulty", "CPC"]);
+    const detected = detectFormat([
+      "Keyword",
+      "Keyword Intents",
+      "Search Volume",
+      "Keyword Difficulty",
+      "CPC",
+      "Competitive Density",
+    ]);
     expect(detected?.source).toBe("SEMRUSH_KEYWORD_OVERVIEW");
+  });
+
+  it("asks rather than guessing when the shape is clear but the vendor is not", () => {
+    // Volume and difficulty with nothing naming a vendor. Importing it as a plain
+    // keyword list would drop every metric silently; guessing would file a
+    // difficulty score against the wrong scale.
+    const detected = detectFormat(["Keyword", "Volume", "KD", "CPC"]);
+
+    expect(detected).not.toBeNull();
+    expect(detected?.shape).toBe("KEYWORD_OVERVIEW");
+    expect(detected?.source).toBeNull();
+    expect(detected?.provider).toBeNull();
   });
 
   it("falls back to a plain keyword list", () => {
@@ -197,9 +216,15 @@ describe("format detection", () => {
   });
 
   it("is case- and spelling-tolerant across export versions", () => {
-    expect(detectFormat(["keyword", "current position", "landing page"])?.source).toBe(
-      "SEMRUSH_POSITIONS",
-    );
+    const detected = detectFormat([
+      "keyword",
+      "current position",
+      "landing page",
+      "search volume",
+      "timestamp",
+    ]);
+
+    expect(detected?.source).toBe("SEMRUSH_POSITIONS");
   });
 });
 
@@ -307,5 +332,116 @@ describe("intent mapping", () => {
     expect(mapIntent("something else")).toBe("UNKNOWN");
     expect(mapIntent(null)).toBe("UNKNOWN");
     expect(mapIntent("")).toBe("UNKNOWN");
+  });
+});
+
+/**
+ * Two providers, kept apart.
+ *
+ * Semrush and Ahrefs answer the same questions with different models. The failure
+ * that matters is not rejecting a file — it is quietly attributing one vendor's
+ * numbers to the other, which corrupts the data instead of refusing it.
+ */
+describe("provider attribution", () => {
+  it("recognises an Ahrefs organic keywords export", () => {
+    const detected = detectFormat([
+      "#",
+      "Keyword",
+      "Country",
+      "SERP features",
+      "Volume",
+      "KD",
+      "CPC",
+      "Traffic",
+      "Current position",
+      "Previous position",
+      "Current URL",
+      "Updated",
+    ]);
+
+    expect(detected?.source).toBe("AHREFS_POSITIONS");
+    expect(detected?.provider).toBe("AHREFS");
+  });
+
+  it("recognises an Ahrefs keywords explorer export", () => {
+    const detected = detectFormat([
+      "Keyword",
+      "Country",
+      "Difficulty",
+      "Volume",
+      "CPS",
+      "CPC",
+      "Parent Topic",
+      "Global volume",
+      "Last Update",
+    ]);
+
+    expect(detected?.source).toBe("AHREFS_KEYWORD_OVERVIEW");
+    expect(detected?.provider).toBe("AHREFS");
+  });
+
+  it("keeps the two vendors' positions exports apart", () => {
+    const semrush = detectFormat([
+      "Keyword",
+      "Position",
+      "Search Volume",
+      "URL",
+      "Timestamp",
+      "Position Type",
+    ]);
+    const ahrefs = detectFormat([
+      "Keyword",
+      "Current position",
+      "Volume",
+      "Current URL",
+      "Last Update",
+    ]);
+
+    expect(semrush?.provider).toBe("SEMRUSH");
+    expect(ahrefs?.provider).toBe("AHREFS");
+    expect(semrush?.source).not.toBe(ahrefs?.source);
+  });
+
+  it("declines to guess when a file could be either", () => {
+    // A shared header set names no vendor. Better to say "not sure" and let a
+    // person choose than to attribute a difficulty score to the wrong scale.
+    const detected = detectFormat(["Keyword", "Position", "URL"]);
+
+    expect(detected?.provider).toBeNull();
+    expect(detected?.source).toBeNull();
+    expect(detected?.confidence).toBeLessThanOrEqual(0.5);
+  });
+
+  it("attributes each source to the vendor that produced it", () => {
+    expect(providerForSource("SEMRUSH_POSITIONS")).toBe("SEMRUSH");
+    expect(providerForSource("AHREFS_COMPETITORS")).toBe("AHREFS");
+
+    // A hand-written list has no provider, and that null is the point: no vendor
+    // made those measurements.
+    expect(providerForSource("MANUAL_CSV")).toBeNull();
+  });
+
+  it("reads an Ahrefs row through the shared column vocabulary", () => {
+    const headers = ["Keyword", "Current position", "Previous position", "Volume", "KD", "Current URL", "Updated"];
+
+    const result = mapRow(
+      {
+        Keyword: "payroll software philippines",
+        "Current position": "11",
+        "Previous position": "14",
+        Volume: "2400",
+        KD: "43",
+        "Current URL": "https://example.com/payroll-guide/",
+        Updated: "2026-08-30",
+      },
+      { headers, language: "en", market: "PH", fallbackCapturedAt: "2026-09-01" },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.value.position).toBe(11);
+    expect(result.value.searchVolume).toBe(2400);
+    expect(result.value.capturedAt).toBe("2026-08-30");
   });
 });

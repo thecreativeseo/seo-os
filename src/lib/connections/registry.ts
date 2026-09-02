@@ -40,6 +40,12 @@ export const CONNECTION_PROVIDERS: readonly ProviderCard[] = [
     availability: "P2",
   },
   {
+    provider: "AHREFS",
+    name: "Ahrefs",
+    purpose: "Keywords + rankings + competitors",
+    availability: "P2",
+  },
+  {
     provider: "SIMILARWEB",
     name: "Similarweb",
     purpose: "Market + competitor intelligence",
