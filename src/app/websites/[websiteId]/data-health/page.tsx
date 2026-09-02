@@ -2,11 +2,13 @@ import { requireWebsiteAccess } from "@/server/auth/guards";
 import { hasRole } from "@/server/auth/roles";
 import { getDataHealth } from "@/server/services/data-health";
 import { listSitemaps } from "@/server/services/sitemap";
+import { listSyncRuns } from "@/server/services/sync";
 import { Badge, EmptyState, PageHeader } from "@/components/governance/primitives";
 import {
   AddSitemapForm,
   SitemapRowActions,
 } from "@/components/connections/sitemap-controls";
+import { SyncButton } from "@/components/connections/sync-controls";
 
 export const metadata = { title: "Data Health · SEO OS" };
 
@@ -24,9 +26,10 @@ export default async function DataHealthPage({
 }) {
   const { websiteId } = await params;
   const context = await requireWebsiteAccess(websiteId);
-  const [health, sitemaps] = await Promise.all([
+  const [health, sitemaps, runs] = await Promise.all([
     getDataHealth(context),
     listSitemaps(context),
+    listSyncRuns(context, 10),
   ]);
 
   const canWrite = hasRole(context.membership.role, "MEMBER");
@@ -58,6 +61,7 @@ export default async function DataHealthPage({
                   <th className="px-3 py-2 font-medium">Latest data</th>
                   <th className="px-3 py-2 font-medium">Last sync</th>
                   <th className="px-3 py-2 text-right font-medium">Rows</th>
+                  {canWrite ? <th className="px-3 py-2 font-medium">Sync</th> : null}
                 </tr>
               </thead>
               <tbody className="divide-border divide-y">
@@ -103,6 +107,24 @@ export default async function DataHealthPage({
                     <td className="px-3 py-3 text-right tabular-nums">
                       {source.rowCount.toLocaleString("en-GB")}
                     </td>
+                    {canWrite ? (
+                      <td className="px-3 py-3">
+                        {/* Only a connection with a chosen property can be read.
+                            Offering the button otherwise would promise something
+                            the sync would immediately refuse. */}
+                        {source.status === "CONNECTED" &&
+                        source.propertyName &&
+                        (source.provider === "GOOGLE_SEARCH_CONSOLE" ||
+                          source.provider === "GOOGLE_ANALYTICS") ? (
+                          <SyncButton
+                            websiteId={websiteId}
+                            provider={source.provider}
+                          />
+                        ) : (
+                          <span className="text-muted-foreground text-xs">—</span>
+                        )}
+                      </td>
+                    ) : null}
                   </tr>
                 ))}
               </tbody>
@@ -116,6 +138,68 @@ export default async function DataHealthPage({
             Console normally reports. Figures for recent days are incomplete.
           </p>
         ) : null}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-sm font-medium">Recent runs</h2>
+        <p className="text-muted-foreground text-sm">
+          Every attempt, including the ones that failed. A failed run leaves the
+          figures above unchanged rather than making the data look newer than it is.
+        </p>
+
+        {runs.length === 0 ? (
+          <EmptyState>No sync has been run for this website yet.</EmptyState>
+        ) : (
+          <div className="border-border overflow-x-auto rounded-lg border">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-border text-muted-foreground border-b text-left">
+                  <th className="px-4 py-2 font-medium">Started</th>
+                  <th className="px-3 py-2 font-medium">Type</th>
+                  <th className="px-3 py-2 font-medium">Period</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-3 py-2 text-right font-medium">Received</th>
+                  <th className="px-3 py-2 text-right font-medium">Written</th>
+                  <th className="px-3 py-2 text-right font-medium">Skipped</th>
+                </tr>
+              </thead>
+              <tbody className="divide-border divide-y">
+                {runs.map((run) => (
+                  <tr key={run.id}>
+                    <td className="px-4 py-3 text-xs">
+                      {(run.startedAt ?? run.createdAt).toLocaleString("en-GB")}
+                    </td>
+                    <td className="text-muted-foreground px-3 py-3 text-xs">
+                      {run.syncType}
+                    </td>
+                    <td className="text-muted-foreground px-3 py-3 text-xs">
+                      {run.periodStart && run.periodEnd
+                        ? `${run.periodStart.toISOString().slice(0, 10)} → ${run.periodEnd
+                            .toISOString()
+                            .slice(0, 10)}`
+                        : "—"}
+                    </td>
+                    <td className="px-3 py-3">
+                      <Badge>{run.status}</Badge>
+                      {run.errorSummary ? (
+                        <p className="mt-1 text-xs text-red-600">{run.errorSummary}</p>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">
+                      {run.recordsReceived.toLocaleString("en-GB")}
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">
+                      {run.recordsWritten.toLocaleString("en-GB")}
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">
+                      {run.recordsSkipped.toLocaleString("en-GB")}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
 
       <section className="space-y-3">

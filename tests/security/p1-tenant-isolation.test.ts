@@ -4,6 +4,7 @@ import { prisma } from "@/server/db/prisma";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
 import { getDataHealth } from "@/server/services/data-health";
 import { listSitemaps, syncSitemap, removeSitemap } from "@/server/services/sitemap";
+import { listSyncRuns } from "@/server/services/sync";
 import {
   getPageDetail,
   getPageMetrics,
@@ -311,6 +312,11 @@ describe("tenant A cannot reach tenant B", () => {
       where: { id: b.syncRunId, ...websiteScope(a) },
     });
     expect(found).toBeNull();
+
+    // Run history is displayed on Data Health, so the service behind it is checked
+    // as well as the scope fragment.
+    const runs = await listSyncRuns(a);
+    expect(runs.map((run) => run.id)).not.toContain(b.syncRunId);
   });
 
   it("Signal", async () => {
