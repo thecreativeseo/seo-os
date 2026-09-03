@@ -198,6 +198,18 @@ model User {
   uploadedImports    Import[]               @relation("ImportUploader")
   ownedOpportunities Opportunity[]          @relation("OpportunityOwner")
 
+  // P3. decisions is the one that matters: a Decision's actor is a User and
+  // nothing else, which is how "AI cannot approve its own recommendation" holds
+  // in the schema rather than in a check somebody could forget.
+  aiRuns                 AiRun[]               @relation("AiRunCreator")
+  diagnosisRequests      DiagnosisRequest[]    @relation("DiagnosisRequester")
+  createdDiagnoses       Diagnosis[]           @relation("DiagnosisCreator")
+  reviewedDiagnoses      Diagnosis[]           @relation("DiagnosisReviewer")
+  ownedRecommendations   Recommendation[]      @relation("RecommendationOwner")
+  createdRecommendations Recommendation[]      @relation("RecommendationCreator")
+  decisions              Decision[]            @relation("DecisionMaker")
+  capturedContent        PageContentSnapshot[] @relation("ContentCapturer")
+
   @@map("user")
 }
 
@@ -218,6 +230,9 @@ model Organization {
   workspaces         Workspace[]
   onboardingSessions OnboardingSession[]
   auditEvents        AuditEvent[]
+
+  // P3
+  aiRuns AiRun[]
 
   @@map("organization")
 }
@@ -259,6 +274,9 @@ model Workspace {
   connections        Connection[]
   onboardingSessions OnboardingSession[]
   auditEvents        AuditEvent[]
+
+  // P3
+  aiRuns AiRun[]
 
   @@unique([organizationId, slug])
   @@map("workspace")
@@ -322,6 +340,15 @@ model Website {
   competitorSnapshots CompetitorKeywordSnapshot[]
   imports             Import[]
   opportunities       Opportunity[]
+
+  // P3
+  aiRuns            AiRun[]
+  evidencePackages  EvidencePackage[]
+  diagnosisRequests DiagnosisRequest[]
+  diagnoses         Diagnosis[]
+  recommendations   Recommendation[]
+  decisions         Decision[]
+  contentSnapshots  PageContentSnapshot[]
 
   @@unique([workspaceId, normalizedDomain])
   @@index([workspaceId])
@@ -417,6 +444,10 @@ model BusinessContextVersion {
   owner           User?            @relation("ContextOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
   createdBy       User             @relation("ContextCreator", fields: [createdByUserId], references: [id])
   approvedBy      User?            @relation("ContextApprover", fields: [approvedByUserId], references: [id], onDelete: SetNull)
+
+  // P3. A package records which approved context version it reasoned from, so a
+  // diagnosis stays readable after the context is revised.
+  evidencePackages EvidencePackage[]
 
   @@unique([businessContextId, versionNumber])
   @@map("business_context_version")
@@ -523,6 +554,11 @@ model SeoRule {
 
   website Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   owner   User?   @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  // P3. A BLOCKING rule can stop a recommendation, and an override records which
+  // rule was set aside and by whom.
+  blockedRecommendations Recommendation[]
+  overridingDecisions    Decision[]       @relation("DecisionRuleOverride")
 
   @@index([websiteId])
   @@map("seo_rule")
@@ -785,6 +821,10 @@ model Page {
   commercialForTopics Topic[]                @relation("TopicCommercialPage")
   opportunities       Opportunity[]
 
+  // P3
+  contentSnapshots PageContentSnapshot[]
+  recommendations  Recommendation[]
+
   @@unique([websiteId, normalizedUrl])
   @@index([websiteId, lastSeenAt])
   @@map("page")
@@ -1002,6 +1042,10 @@ model Signal {
   evidence      SignalEvidence[]
   opportunities Opportunity[]
 
+  // P3. A signal is one of the two things a diagnosis can be asked about.
+  diagnosisRequests DiagnosisRequest[]
+  diagnoses         Diagnosis[]
+
   // Identity is enforced by a raw unique index with NULLS NOT DISTINCT
   // (see migration 20260902030000). Prisma cannot express that, and the default
   // NULLS DISTINCT behaviour would let a signal with no page and no query — a
@@ -1215,6 +1259,7 @@ model Keyword {
   topicKeywords       TopicKeyword[]
   competitorSnapshots CompetitorKeywordSnapshot[]
   opportunities       Opportunity[]
+  recommendations     Recommendation[]
 
   @@unique([websiteId, normalizedKeyword, locale, language, market])
   @@index([websiteId, lastSeenAt])
@@ -1363,16 +1408,17 @@ model Topic {
   updatedAt                   DateTime       @updatedAt @map("updated_at")
   archivedAt                  DateTime?      @map("archived_at")
 
-  website               Website        @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  parentTopic           Topic?         @relation("TopicHierarchy", fields: [parentTopicId], references: [id], onDelete: SetNull)
-  childTopics           Topic[]        @relation("TopicHierarchy")
-  pillarPage            Page?          @relation("TopicPillarPage", fields: [pillarPageId], references: [id], onDelete: SetNull)
-  commercialDestination Page?          @relation("TopicCommercialPage", fields: [commercialDestinationPageId], references: [id], onDelete: SetNull)
-  owner                 User?          @relation("TopicOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
-  businessGoal          BusinessGoal?  @relation(fields: [businessGoalId], references: [id], onDelete: SetNull)
+  website               Website          @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  parentTopic           Topic?           @relation("TopicHierarchy", fields: [parentTopicId], references: [id], onDelete: SetNull)
+  childTopics           Topic[]          @relation("TopicHierarchy")
+  pillarPage            Page?            @relation("TopicPillarPage", fields: [pillarPageId], references: [id], onDelete: SetNull)
+  commercialDestination Page?            @relation("TopicCommercialPage", fields: [commercialDestinationPageId], references: [id], onDelete: SetNull)
+  owner                 User?            @relation("TopicOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  businessGoal          BusinessGoal?    @relation(fields: [businessGoalId], references: [id], onDelete: SetNull)
   topicKeywords         TopicKeyword[]
   topicPages            TopicPage[]
   opportunities         Opportunity[]
+  recommendations       Recommendation[]
 
   @@unique([websiteId, slug])
   @@index([websiteId, coverageStatus])
@@ -1552,6 +1598,11 @@ model Opportunity {
   owner        User?                 @relation("OpportunityOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
   evidence     OpportunityEvidence[]
 
+  // P3
+  diagnosisRequests DiagnosisRequest[]
+  diagnoses         Diagnosis[]
+  recommendations   Recommendation[]
+
   @@index([websiteId, status, priority])
   @@index([websiteId, type])
   @@index([keywordId])
@@ -1580,4 +1631,591 @@ model OpportunityEvidence {
 
   @@index([opportunityId])
   @@map("opportunity_evidence")
+}
+
+// ---------------------------------------------------------------------------
+// P3 — Evidence-based AI diagnosis and recommendations
+// ---------------------------------------------------------------------------
+
+enum AgentType {
+  PAGE_DIAGNOSIS
+}
+
+enum AiTaskType {
+  DIAGNOSE_PAGE
+}
+
+enum AiRunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum PromptStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+}
+
+/// What a piece of evidence is. Maps to the vocabulary in P3_SPEC §9.
+enum EvidenceCategory {
+  BUSINESS_CONTEXT
+  BUSINESS_GOAL
+  BRAND_FACT
+  SEO_RULE
+  GSC_METRIC
+  GA4_METRIC
+  KEYWORD_METRIC
+  RANKING_SNAPSHOT
+  KEYWORD_OWNERSHIP
+  TOPIC_MAPPING
+  COMPETITOR_OBSERVATION
+  PAGE_CONTENT
+  INTERNAL_LINK
+  TECHNICAL_FINDING
+  PREVIOUS_CHANGE
+  PREVIOUS_DIAGNOSIS
+  PREVIOUS_LEARNING
+  MANUAL_VERIFICATION
+}
+
+/// How much weight a piece of evidence carries.
+///
+/// AI_INFERRED exists so that a conclusion drawn by a model can be recorded
+/// without ever being presented as equivalent to something measured. P3_SPEC §10
+/// is explicit about that, and the ordering here is the ordering on screen.
+enum EvidenceReliability {
+  DIRECT_FIRST_PARTY
+  DIRECT_PROVIDER
+  USER_PROVIDED
+  SYSTEM_DERIVED
+  AI_INFERRED
+  UNKNOWN
+}
+
+enum DiagnosisRequestStatus {
+  REQUESTED
+  ASSEMBLING_EVIDENCE
+  READY
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum DiagnosisStatus {
+  DRAFT
+  AWAITING_REVIEW
+  REVIEWED
+  SUPERSEDED
+  ARCHIVED
+}
+
+/// The taxonomy from P3_SPEC §16.
+///
+/// Three of these — the technical categories — will return UNKNOWN for the whole
+/// of P3, because they need crawl evidence the product does not collect. That is
+/// the correct answer rather than a gap, and naming the missing evidence is what
+/// the agent is instructed to do instead of guessing.
+enum DiagnosticCategory {
+  INTENT_MISMATCH
+  CTR_SERP_MISMATCH
+  KEYWORD_OWNERSHIP_CONFLICT
+  CANNIBALIZATION
+  CONTENT_GAP
+  CONTENT_STALENESS
+  WEAK_INTERNAL_SUPPORT
+  COMPETITOR_DISPLACEMENT
+  TECHNICAL_INDEXATION
+  TECHNICAL_RENDERING
+  TECHNICAL_CANONICALIZATION
+  SERP_FEATURE_CHANGE
+  SEASONALITY
+  CONVERSION_MISMATCH
+  INSUFFICIENT_EVIDENCE
+  OTHER
+}
+
+/// How strongly the evidence supports a finding.
+///
+/// CONFIRMED is reserved and enforced server-side: a finding with no supporting
+/// evidence is downgraded whatever the model returned. UNKNOWN is a valid,
+/// expected result rather than a failure to answer.
+enum FindingVerdict {
+  CONFIRMED
+  STRONGLY_SUPPORTED
+  SUSPECT
+  CLEAR
+  UNKNOWN
+  NOT_APPLICABLE
+}
+
+enum EvidenceRelationship {
+  SUPPORTS
+  CONTRADICTS
+  CONTEXT
+}
+
+enum RecommendationType {
+  CONTENT_REFRESH
+  CONTENT_CREATE
+  TITLE_META_UPDATE
+  INTENT_REALIGNMENT
+  KEYWORD_OWNERSHIP_FIX
+  INTERNAL_LINK_UPDATE
+  PAGE_CONSOLIDATION
+  PAGE_SPLIT
+  TECHNICAL_INVESTIGATION
+  TECHNICAL_FIX
+  SERP_REVIEW
+  CONVERSION_REVIEW
+  MONITOR_ONLY
+  REQUEST_MORE_EVIDENCE
+  OTHER
+}
+
+/// P3 lifecycle only. The later states exist for P4 and are unreachable here,
+/// because nothing in P3 executes anything.
+enum RecommendationStatus {
+  DRAFT
+  AWAITING_REVIEW
+  APPROVED
+  MODIFIED
+  REJECTED
+  NEEDS_EVIDENCE
+  ARCHIVED
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  UNKNOWN
+}
+
+enum DecisionValue {
+  APPROVED
+  MODIFIED
+  REJECTED
+  NEEDS_EVIDENCE
+}
+
+enum ContentSource {
+  MANUAL_PASTE
+  UPLOAD
+  FETCH
+}
+
+/// A versioned system prompt.
+///
+/// Editing an ACTIVE template is refused; a change creates a new version. The
+/// alternative is a diagnosis whose prompt no longer exists, which is
+/// unexplainable in exactly the way P2's scoring rule was written to prevent.
+model PromptTemplate {
+  id                  String       @id @default(uuid()) @db.Uuid
+  name                String
+  agentType           AgentType    @map("agent_type")
+  taskType            AiTaskType   @map("task_type")
+  version             Int
+  systemInstructions  String       @map("system_instructions")
+  outputSchemaVersion String       @map("output_schema_version")
+  status              PromptStatus @default(DRAFT)
+  createdAt           DateTime     @default(now()) @map("created_at")
+  activatedAt         DateTime?    @map("activated_at")
+  retiredAt           DateTime?    @map("retired_at")
+
+  runs AiRun[]
+
+  @@unique([agentType, taskType, version])
+  @@index([agentType, taskType, status])
+  @@map("prompt_template")
+}
+
+/// What was asked of a model, and of whom.
+///
+/// Provider and model are recorded on every run so a diagnosis stays explicable
+/// after either changes. Never holds a credential: P3_SPEC §7 says so and the
+/// redaction denylist enforces it on the way to the audit trail.
+model AiRun {
+  id                    String      @id @default(uuid()) @db.Uuid
+  organizationId        String      @map("organization_id") @db.Uuid
+  workspaceId           String      @map("workspace_id") @db.Uuid
+  websiteId             String      @map("website_id") @db.Uuid
+  agentType             AgentType   @map("agent_type")
+  taskType              AiTaskType  @map("task_type")
+  provider              String
+  model                 String
+  promptTemplateId      String?     @map("prompt_template_id") @db.Uuid
+  promptTemplateVersion Int?        @map("prompt_template_version")
+  outputSchemaVersion   String      @map("output_schema_version")
+  evidencePackageId     String?     @map("evidence_package_id") @db.Uuid
+  status                AiRunStatus @default(QUEUED)
+  startedAt             DateTime?   @map("started_at")
+  finishedAt            DateTime?   @map("finished_at")
+  inputTokens           Int?        @map("input_tokens")
+  outputTokens          Int?        @map("output_tokens")
+  estimatedCost         Decimal?    @map("estimated_cost") @db.Decimal(12, 6)
+  /// A code from our own vocabulary. The provider's message can echo the request,
+  /// which contains the evidence.
+  errorCode             String?     @map("error_code")
+  errorSummary          String?     @map("error_summary")
+  createdByUserId       String?     @map("created_by_user_id") @db.Uuid
+  createdAt             DateTime    @default(now()) @map("created_at")
+
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspace       Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  website         Website          @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  promptTemplate  PromptTemplate?  @relation(fields: [promptTemplateId], references: [id], onDelete: SetNull)
+  evidencePackage EvidencePackage? @relation(fields: [evidencePackageId], references: [id], onDelete: SetNull)
+  createdBy       User?            @relation("AiRunCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  diagnosisRequests DiagnosisRequest[]
+  diagnoses         Diagnosis[]
+  recommendations   Recommendation[]
+
+  @@index([websiteId, createdAt])
+  @@index([status])
+  @@map("ai_run")
+}
+
+/// What gets retrieved, as data rather than as a constant.
+///
+/// P3_SPEC §13 requires the policy to be named, versioned and inspectable. A
+/// constant in source is none of those from the outside, and a diagnosis has to
+/// be re-readable against the rules that produced it.
+model RetrievalPolicy {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  version     Int
+  description String?
+  /// The retrieval rules themselves, so a run records what it was told to gather.
+  policyJson  Json     @map("policy_json")
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  packages EvidencePackage[]
+
+  @@unique([name, version])
+  @@map("retrieval_policy")
+}
+
+/// The bounded, immutable set of evidence one AI run was given.
+///
+/// Immutable once its run completes. The content hash is over the frozen evidence
+/// id list, so a package can be shown to be the same package later — which is what
+/// makes a diagnosis reproducible rather than merely recorded.
+model EvidencePackage {
+  id                     String    @id @default(uuid()) @db.Uuid
+  websiteId              String    @map("website_id") @db.Uuid
+  targetType             String    @map("target_type")
+  targetId               String    @map("target_id") @db.Uuid
+  purpose                String
+  assembledAt            DateTime  @default(now()) @map("assembled_at")
+  contextVersionId       String?   @map("context_version_id") @db.Uuid
+  periodStart            DateTime? @map("period_start") @db.Date
+  periodEnd              DateTime? @map("period_end") @db.Date
+  evidenceCount          Int       @default(0) @map("evidence_count")
+  retrievalPolicyId      String?   @map("retrieval_policy_id") @db.Uuid
+  retrievalPolicyVersion Int?      @map("retrieval_policy_version")
+  /// What was gathered, and what was left out and why. Capping without disclosure
+  /// would let a diagnosis be confidently wrong because the contradicting figure
+  /// did not fit the budget.
+  retrievalManifestJson  Json?     @map("retrieval_manifest_json")
+  contentHash            String    @map("content_hash")
+  /// Set when the run using this package finishes. Nothing may modify a sealed
+  /// package.
+  sealedAt               DateTime? @map("sealed_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+
+  website         Website                 @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  contextVersion  BusinessContextVersion? @relation(fields: [contextVersionId], references: [id], onDelete: SetNull)
+  retrievalPolicy RetrievalPolicy?        @relation(fields: [retrievalPolicyId], references: [id], onDelete: SetNull)
+
+  refs              EvidenceRef[]
+  runs              AiRun[]
+  diagnosisRequests DiagnosisRequest[]
+  diagnoses         Diagnosis[]
+
+  @@index([websiteId, assembledAt])
+  @@index([websiteId, targetType, targetId])
+  @@map("evidence_package")
+}
+
+/// One evidence id, frozen into a package.
+///
+/// This is the set a model-returned id is checked against. Storing the resolved
+/// values alongside means a package can be re-read even after the underlying row
+/// changes — and a difference between then and now is surfaced rather than hidden.
+model EvidenceRef {
+  id               String              @id @default(uuid()) @db.Uuid
+  packageId        String              @map("package_id") @db.Uuid
+  /// The deterministic identity from lib/evidence/id.
+  evidenceId       String              @map("evidence_id")
+  evidenceType     EvidenceCategory    @map("evidence_type")
+  reliability      EvidenceReliability
+  sourceEntityType String              @map("source_entity_type")
+  sourceEntityId   String?             @map("source_entity_id")
+  capturedAt       DateTime?           @map("captured_at")
+  asOfDate         DateTime?           @map("as_of_date") @db.Date
+  metricKey        String?             @map("metric_key")
+  numericValue     Decimal?            @map("numeric_value") @db.Decimal(18, 4)
+  textValue        String?             @map("text_value")
+  contextJson      Json?               @map("context_json")
+  createdAt        DateTime            @default(now()) @map("created_at")
+
+  package EvidencePackage @relation(fields: [packageId], references: [id], onDelete: Cascade)
+
+  @@unique([packageId, evidenceId])
+  @@index([packageId, evidenceType])
+  @@map("evidence_ref")
+}
+
+/// Somebody asked for a diagnosis, and what happened next.
+model DiagnosisRequest {
+  id                String                 @id @default(uuid()) @db.Uuid
+  websiteId         String                 @map("website_id") @db.Uuid
+  targetType        String                 @map("target_type")
+  targetId          String                 @map("target_id") @db.Uuid
+  signalId          String?                @map("signal_id") @db.Uuid
+  opportunityId     String?                @map("opportunity_id") @db.Uuid
+  requestedByUserId String?                @map("requested_by_user_id") @db.Uuid
+  status            DiagnosisRequestStatus @default(REQUESTED)
+  evidencePackageId String?                @map("evidence_package_id") @db.Uuid
+  aiRunId           String?                @map("ai_run_id") @db.Uuid
+  errorCode         String?                @map("error_code")
+  errorSummary      String?                @map("error_summary")
+  createdAt         DateTime               @default(now()) @map("created_at")
+  startedAt         DateTime?              @map("started_at")
+  completedAt       DateTime?              @map("completed_at")
+
+  website         Website          @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  signal          Signal?          @relation(fields: [signalId], references: [id], onDelete: SetNull)
+  opportunity     Opportunity?     @relation(fields: [opportunityId], references: [id], onDelete: SetNull)
+  requestedBy     User?            @relation("DiagnosisRequester", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  evidencePackage EvidencePackage? @relation(fields: [evidencePackageId], references: [id], onDelete: SetNull)
+  aiRun           AiRun?           @relation(fields: [aiRunId], references: [id], onDelete: SetNull)
+
+  diagnoses Diagnosis[]
+
+  @@index([websiteId, createdAt])
+  @@index([websiteId, status])
+  @@map("diagnosis_request")
+}
+
+/// An answer, with everything needed to check it.
+///
+/// Never overwritten. A newer diagnosis supersedes an older one and both remain,
+/// because what was believed at the time is part of the record — the same rule as
+/// approved Business Context in P0.
+model Diagnosis {
+  id                String          @id @default(uuid()) @db.Uuid
+  websiteId         String          @map("website_id") @db.Uuid
+  requestId         String?         @map("request_id") @db.Uuid
+  targetType        String          @map("target_type")
+  targetId          String          @map("target_id") @db.Uuid
+  signalId          String?         @map("signal_id") @db.Uuid
+  opportunityId     String?         @map("opportunity_id") @db.Uuid
+  status            DiagnosisStatus @default(DRAFT)
+  executiveSummary  String          @map("executive_summary")
+  primaryFindingId  String?         @map("primary_finding_id") @db.Uuid
+  overallConfidence ConfidenceLevel @default(UNKNOWN) @map("overall_confidence")
+  evidencePackageId String?         @map("evidence_package_id") @db.Uuid
+  aiRunId           String?         @map("ai_run_id") @db.Uuid
+  /// The diagnosis this one replaces, if any. History is a chain, not an edit.
+  supersedesId      String?         @unique @map("supersedes_id") @db.Uuid
+  createdByUserId   String?         @map("created_by_user_id") @db.Uuid
+  reviewedByUserId  String?         @map("reviewed_by_user_id") @db.Uuid
+  createdAt         DateTime        @default(now()) @map("created_at")
+  reviewedAt        DateTime?       @map("reviewed_at")
+  archivedAt        DateTime?       @map("archived_at")
+
+  website         Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  request         DiagnosisRequest? @relation(fields: [requestId], references: [id], onDelete: SetNull)
+  signal          Signal?           @relation(fields: [signalId], references: [id], onDelete: SetNull)
+  opportunity     Opportunity?      @relation(fields: [opportunityId], references: [id], onDelete: SetNull)
+  evidencePackage EvidencePackage?  @relation(fields: [evidencePackageId], references: [id], onDelete: SetNull)
+  aiRun           AiRun?            @relation(fields: [aiRunId], references: [id], onDelete: SetNull)
+  supersedes      Diagnosis?        @relation("DiagnosisHistory", fields: [supersedesId], references: [id], onDelete: SetNull)
+  supersededBy    Diagnosis?        @relation("DiagnosisHistory")
+  createdBy       User?             @relation("DiagnosisCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  reviewedBy      User?             @relation("DiagnosisReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+
+  findings        DiagnosisFinding[]
+  recommendations Recommendation[]
+
+  @@index([websiteId, createdAt])
+  @@index([websiteId, targetType, targetId])
+  @@map("diagnosis")
+}
+
+/// One assessed cause.
+model DiagnosisFinding {
+  id                         String             @id @default(uuid()) @db.Uuid
+  diagnosisId                String             @map("diagnosis_id") @db.Uuid
+  category                   DiagnosticCategory
+  verdict                    FindingVerdict
+  confidence                 ConfidenceLevel    @default(UNKNOWN)
+  title                      String
+  summary                    String
+  supportingEvidenceCount    Int                @default(0) @map("supporting_evidence_count")
+  contradictingEvidenceCount Int                @default(0) @map("contradicting_evidence_count")
+  /// What would have to be known to say more. Given equal weight on screen: an
+  /// unstated unknown becomes an assumption.
+  missingEvidenceJson        Json?              @map("missing_evidence_json")
+  /// Set when the server lowered the model's verdict, with the reason. The reader
+  /// sees that it was changed rather than only the result.
+  downgradedFrom             FindingVerdict?    @map("downgraded_from")
+  downgradeReason            String?            @map("downgrade_reason")
+  createdAt                  DateTime           @default(now()) @map("created_at")
+
+  diagnosis Diagnosis                  @relation(fields: [diagnosisId], references: [id], onDelete: Cascade)
+  evidence  DiagnosisFindingEvidence[]
+
+  @@unique([diagnosisId, category])
+  @@index([diagnosisId])
+  @@map("diagnosis_finding")
+}
+
+/// What a finding rests on, and what argues against it.
+model DiagnosisFindingEvidence {
+  id           String               @id @default(uuid()) @db.Uuid
+  findingId    String               @map("finding_id") @db.Uuid
+  /// The deterministic evidence id, validated against the sealed package.
+  evidenceId   String               @map("evidence_id")
+  relationship EvidenceRelationship
+  createdAt    DateTime             @default(now()) @map("created_at")
+
+  finding DiagnosisFinding @relation(fields: [findingId], references: [id], onDelete: Cascade)
+
+  @@unique([findingId, evidenceId, relationship])
+  @@index([findingId])
+  @@map("diagnosis_finding_evidence")
+}
+
+/// Proposed work. P3 proposes; nothing in this phase executes.
+model Recommendation {
+  id                        String               @id @default(uuid()) @db.Uuid
+  websiteId                 String               @map("website_id") @db.Uuid
+  diagnosisId               String?              @map("diagnosis_id") @db.Uuid
+  opportunityId             String?              @map("opportunity_id") @db.Uuid
+  type                      RecommendationType
+  status                    RecommendationStatus @default(AWAITING_REVIEW)
+  priority                  OpportunityPriority  @default(MEDIUM)
+  title                     String
+  summary                   String
+  rationale                 String
+  pageId                    String?              @map("page_id") @db.Uuid
+  keywordId                 String?              @map("keyword_id") @db.Uuid
+  topicId                   String?              @map("topic_id") @db.Uuid
+  /// Descriptive only. A numeric forecast is forbidden and has nowhere to live.
+  expectedEffectDescription String?              @map("expected_effect_description")
+  confidence                ConfidenceLevel      @default(UNKNOWN)
+  effort                    EffortLevel          @default(UNKNOWN)
+  risk                      RiskLevel            @default(UNKNOWN)
+  /// Set when an active BLOCKING SEO Rule applies. Approval then requires an
+  /// explicit override naming the rule and the person.
+  blockedByRuleId           String?              @map("blocked_by_rule_id") @db.Uuid
+  blockedReason             String?              @map("blocked_reason")
+  ownerUserId               String?              @map("owner_user_id") @db.Uuid
+  createdByAiRunId          String?              @map("created_by_ai_run_id") @db.Uuid
+  createdByUserId           String?              @map("created_by_user_id") @db.Uuid
+  createdAt                 DateTime             @default(now()) @map("created_at")
+  updatedAt                 DateTime             @updatedAt @map("updated_at")
+  implementedAt             DateTime?            @map("implemented_at")
+  archivedAt                DateTime?            @map("archived_at")
+
+  website        Website      @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  diagnosis      Diagnosis?   @relation(fields: [diagnosisId], references: [id], onDelete: SetNull)
+  opportunity    Opportunity? @relation(fields: [opportunityId], references: [id], onDelete: SetNull)
+  page           Page?        @relation(fields: [pageId], references: [id], onDelete: SetNull)
+  keyword        Keyword?     @relation(fields: [keywordId], references: [id], onDelete: SetNull)
+  topic          Topic?       @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  blockedByRule  SeoRule?     @relation(fields: [blockedByRuleId], references: [id], onDelete: SetNull)
+  owner          User?        @relation("RecommendationOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  createdByAiRun AiRun?       @relation(fields: [createdByAiRunId], references: [id], onDelete: SetNull)
+  createdBy      User?        @relation("RecommendationCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  evidence  RecommendationEvidence[]
+  decisions Decision[]
+
+  @@index([websiteId, status])
+  @@index([diagnosisId])
+  @@map("recommendation")
+}
+
+/// What a recommendation cites. Without at least one, it is an opinion.
+model RecommendationEvidence {
+  id               String   @id @default(uuid()) @db.Uuid
+  recommendationId String   @map("recommendation_id") @db.Uuid
+  evidenceId       String   @map("evidence_id")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  recommendation Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+
+  @@unique([recommendationId, evidenceId])
+  @@map("recommendation_evidence")
+}
+
+/// A person's decision on a recommendation.
+///
+/// decidedByUserId is a non-null foreign key to User, which is how "AI cannot
+/// approve its own recommendation" is enforced: there is no column an AiRun could
+/// occupy, so the rule holds in the schema rather than in a check somebody could
+/// forget to write.
+model Decision {
+  id                         String        @id @default(uuid()) @db.Uuid
+  websiteId                  String        @map("website_id") @db.Uuid
+  recommendationId           String        @map("recommendation_id") @db.Uuid
+  decision                   DecisionValue
+  reason                     String?
+  /// For MODIFIED: what the reviewer changed, kept as a diff rather than an
+  /// overwrite, so the proposal and the decision both survive.
+  modifiedRecommendationJson Json?         @map("modified_recommendation_json")
+  /// Set when a reviewer approved despite a BLOCKING rule. Records the rule.
+  overriddenRuleId           String?       @map("overridden_rule_id") @db.Uuid
+  overrideReason             String?       @map("override_reason")
+  decidedByUserId            String        @map("decided_by_user_id") @db.Uuid
+  decidedAt                  DateTime      @default(now()) @map("decided_at")
+  createdAt                  DateTime      @default(now()) @map("created_at")
+
+  website        Website        @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  recommendation Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  overriddenRule SeoRule?       @relation("DecisionRuleOverride", fields: [overriddenRuleId], references: [id], onDelete: SetNull)
+  decidedBy      User           @relation("DecisionMaker", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([websiteId, decidedAt])
+  @@index([recommendationId])
+  @@map("decision")
+}
+
+/// What a page said when it was diagnosed.
+///
+/// There is no crawler in SEO OS. Content arrives by paste, upload, or a
+/// single-URL fetch through the sitemap fetcher's existing SSRF guards — never by
+/// crawling, which is out of scope for every phase so far.
+model PageContentSnapshot {
+  id               String        @id @default(uuid()) @db.Uuid
+  websiteId        String        @map("website_id") @db.Uuid
+  pageId           String        @map("page_id") @db.Uuid
+  capturedAt       DateTime      @default(now()) @map("captured_at")
+  contentHash      String        @map("content_hash")
+  title            String?
+  metaDescription  String?       @map("meta_description")
+  headingsJson     Json?         @map("headings_json")
+  bodyText         String?       @map("body_text")
+  wordCount        Int?          @map("word_count")
+  source           ContentSource
+  objectStorageKey String?       @map("object_storage_key")
+  capturedByUserId String?       @map("captured_by_user_id") @db.Uuid
+  createdAt        DateTime      @default(now()) @map("created_at")
+
+  website    Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  page       Page    @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  capturedBy User?   @relation("ContentCapturer", fields: [capturedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([pageId, contentHash])
+  @@index([websiteId, capturedAt])
+  @@map("page_content_snapshot")
 }

@@ -334,3 +334,204 @@ describe("intent provenance is its own vocabulary", () => {
     }
   });
 });
+
+/**
+ * P3 schema invariants.
+ *
+ * Each of these would fail silently if it regressed: an approval attributed to a
+ * model, a diagnosis that overwrote its predecessor, a package that could be
+ * edited after the run that used it. The database is where they hold.
+ */
+describe("AI cannot approve its own work", () => {
+  it("makes a Decision's actor a User, with no column an AiRun could occupy", () => {
+    const model = schema.match(/model Decision \{([\s\S]*?)\n\}/)?.[1] ?? "";
+
+    // Non-null and a User foreign key. The rule holds in the schema rather than
+    // in a check somebody could forget to write.
+    expect(model).toMatch(/decidedByUserId\s+String\s+@map/);
+    expect(model).not.toMatch(/decidedByUserId\s+String\?/);
+    expect(model).toMatch(/decidedBy\s+User\s+@relation\("DecisionMaker"/);
+
+    for (const forbidden of ["aiRunId", "createdByAiRun", "decidedByAiRun"]) {
+      expect(model).not.toContain(forbidden);
+    }
+  });
+
+  it("restricts deleting a user who has decided something", () => {
+    // A decision with no decider is an unattributed approval, which is worse
+    // than no record at all.
+    const model = schema.match(/model Decision \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(model).toMatch(/DecisionMaker[^\n]*onDelete: Restrict/);
+  });
+});
+
+describe("diagnosis history", () => {
+  it("supersedes rather than overwrites", () => {
+    const model = schema.match(/model Diagnosis \{([\s\S]*?)\n\}/)?.[1] ?? "";
+
+    // What was believed at the time is part of the record — the same rule as
+    // approved Business Context in P0.
+    expect(model).toMatch(/supersedesId\s+String\?\s+@unique/);
+    expect(model).toMatch(/supersededBy\s+Diagnosis\?/);
+
+    // The status the superseded row moves to lives in the enum, not the model.
+    const status = schema.match(/enum DiagnosisStatus \{([\s\S]*?)\}/)?.[1] ?? "";
+    expect(status).toContain("SUPERSEDED");
+  });
+
+  it("keeps a finding's downgrade visible", () => {
+    // When the server lowers a model's verdict, the reader sees that it was
+    // changed and why, not just the result.
+    const model = schema.match(/model DiagnosisFinding \{([\s\S]*?)\n\}/)?.[1] ?? "";
+
+    expect(model).toMatch(/downgradedFrom\s+FindingVerdict\?/);
+    expect(model).toMatch(/downgradeReason\s+String\?/);
+  });
+
+  it("allows one finding per category per diagnosis", () => {
+    expect(schema).toContain("@@unique([diagnosisId, category])");
+  });
+});
+
+describe("evidence packages", () => {
+  it("carries a content hash and a seal", () => {
+    const model = schema.match(/model EvidencePackage \{([\s\S]*?)\n\}/)?.[1] ?? "";
+
+    // The hash is what lets a package be shown to be the same package later,
+    // which is what makes a diagnosis reproducible rather than merely recorded.
+    expect(model).toMatch(/contentHash\s+String\s+@map/);
+    expect(model).toMatch(/sealedAt\s+DateTime\?/);
+  });
+
+  it("records the retrieval policy version it used", () => {
+    const model = schema.match(/model EvidencePackage \{([\s\S]*?)\n\}/)?.[1] ?? "";
+
+    expect(model).toContain("retrievalPolicyId");
+    expect(model).toContain("retrievalPolicyVersion");
+    expect(model).toContain("retrievalManifestJson");
+  });
+
+  it("records which approved context version it reasoned from", () => {
+    const model = schema.match(/model EvidencePackage \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(model).toMatch(/contextVersionId\s+String\?/);
+  });
+
+  it("holds each evidence id once", () => {
+    expect(schema).toContain("@@unique([packageId, evidenceId])");
+  });
+});
+
+describe("prompts and runs keep their provenance", () => {
+  it("versions a prompt per agent and task", () => {
+    // A change creates a version. The alternative is a diagnosis whose prompt no
+    // longer exists.
+    expect(schema).toContain("@@unique([agentType, taskType, version])");
+  });
+
+  it("records provider, model and both versions on every run", () => {
+    const model = schema.match(/model AiRun \{([\s\S]*?)\n\}/)?.[1] ?? "";
+
+    for (const field of [
+      "provider",
+      "model",
+      "promptTemplateVersion",
+      "outputSchemaVersion",
+      "evidencePackageId",
+    ]) {
+      expect(model).toContain(field);
+    }
+  });
+
+  it("holds no credential columns", () => {
+    const model = withoutPrismaDocComments(
+      schema.match(/model AiRun \{([\s\S]*?)\n\}/)?.[1] ?? "",
+    );
+
+    // Credential-shaped names, not the bare word "token": inputTokens and
+    // outputTokens are counts, and forbidding the substring would fail on an
+    // honest field while catching nothing real.
+    for (const forbidden of [
+      "apiKey",
+      "api_key",
+      "accessToken",
+      "refreshToken",
+      "bearer",
+      "secret",
+      "password",
+      "privateKey",
+    ]) {
+      expect(model.toLowerCase()).not.toContain(forbidden.toLowerCase());
+    }
+
+    // The counts that are legitimately there.
+    expect(model).toContain("inputTokens");
+    expect(model).toContain("outputTokens");
+  });
+});
+
+describe("recommendations", () => {
+  it("has no column for a numeric forecast", () => {
+    // Same rule as P2's opportunities: the cheapest way to keep a forbidden
+    // fabrication out is to give it nowhere to live.
+    const model = withoutPrismaDocComments(
+      schema.match(/model Recommendation \{([\s\S]*?)\n\}/)?.[1] ?? "",
+    );
+
+    expect(model).toContain("expectedEffectDescription");
+    for (const forbidden of ["forecast", "projectedTraffic", "estimatedRevenue"]) {
+      expect(model.toLowerCase()).not.toContain(forbidden.toLowerCase());
+    }
+  });
+
+  it("records the blocking rule rather than only the fact of blocking", () => {
+    const model = schema.match(/model Recommendation \{([\s\S]*?)\n\}/)?.[1] ?? "";
+
+    expect(model).toMatch(/blockedByRuleId\s+String\?/);
+    expect(model).toContain("blockedReason");
+  });
+
+  it("records which rule an approval overrode", () => {
+    const model = schema.match(/model Decision \{([\s\S]*?)\n\}/)?.[1] ?? "";
+
+    expect(model).toContain("overriddenRuleId");
+    expect(model).toContain("overrideReason");
+  });
+
+  it("starts awaiting review", () => {
+    const model = schema.match(/model Recommendation \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(model).toMatch(/status\s+RecommendationStatus\s+@default\(AWAITING_REVIEW\)/);
+  });
+});
+
+describe("the vocabularies P3 must not weaken", () => {
+  it("keeps UNKNOWN a first-class verdict", () => {
+    const block = schema.match(/enum FindingVerdict \{([\s\S]*?)\}/)?.[1] ?? "";
+
+    // A valid, expected result rather than a failure to answer.
+    expect(block).toContain("UNKNOWN");
+    expect(block).toContain("CONFIRMED");
+  });
+
+  it("distinguishes AI-inferred evidence from measured evidence", () => {
+    const block = schema.match(/enum EvidenceReliability \{([\s\S]*?)\}/)?.[1] ?? "";
+
+    for (const value of ["DIRECT_FIRST_PARTY", "DIRECT_PROVIDER", "AI_INFERRED"]) {
+      expect(block).toContain(value);
+    }
+  });
+
+  it("names the technical categories it cannot answer", () => {
+    // They stay in the taxonomy so the agent can return UNKNOWN against a named
+    // category rather than omitting the question.
+    const block = schema.match(/enum DiagnosticCategory \{([\s\S]*?)\}/)?.[1] ?? "";
+
+    for (const value of [
+      "TECHNICAL_INDEXATION",
+      "TECHNICAL_RENDERING",
+      "TECHNICAL_CANONICALIZATION",
+      "INSUFFICIENT_EVIDENCE",
+    ]) {
+      expect(block).toContain(value);
+    }
+  });
+});
