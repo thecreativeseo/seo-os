@@ -100,15 +100,21 @@ describe("provider registry", () => {
     const byProvider = new Map(cards.map((card) => [card.provider, card]));
 
     // The ones that actually connect say so plainly: the two Google providers by
-    // OAuth, Semrush by API key.
+    // OAuth, Semrush and Ahrefs by API key.
     expect(byProvider.get("GOOGLE_SEARCH_CONSOLE")?.availability).toBe("Available");
     expect(byProvider.get("GOOGLE_ANALYTICS")?.availability).toBe("Available");
     expect(byProvider.get("SEMRUSH")?.availability).toBe("Available");
+    expect(byProvider.get("AHREFS")?.availability).toBe("Available");
 
     // And nothing else does. This is the assertion that matters: the page offers
     // a connect control for exactly these, so any other card reading "Available"
     // would be promising an action that is not on the screen.
-    const connectable = new Set(["GOOGLE_SEARCH_CONSOLE", "GOOGLE_ANALYTICS", "SEMRUSH"]);
+    const connectable = new Set([
+      "GOOGLE_SEARCH_CONSOLE",
+      "GOOGLE_ANALYTICS",
+      "SEMRUSH",
+      "AHREFS",
+    ]);
 
     for (const card of cards) {
       if (connectable.has(card.provider)) continue;

@@ -27,6 +27,12 @@ import {
   databaseForMarket,
   fetchOrganicPositions,
 } from "@/server/connectors/semrush/client";
+import {
+  AhrefsError,
+  DEFAULT_LIMIT as AHREFS_DEFAULT_LIMIT,
+  countryForMarket,
+  fetchOrganicKeywords,
+} from "@/server/connectors/ahrefs/client";
 import { getApiKey } from "@/server/services/connection-auth";
 import { persistMarketRows } from "@/server/services/market-data";
 
@@ -159,7 +165,8 @@ function errorCodeFor(error: unknown): SyncErrorCode {
   if (
     error instanceof SearchConsoleError ||
     error instanceof AnalyticsError ||
-    error instanceof SemrushError
+    error instanceof SemrushError ||
+    error instanceof AhrefsError
   ) {
     // Each connector's codes are a subset of ours by construction, so the union
     // above stays exhaustive rather than needing a mapping table per vendor.
@@ -1054,6 +1061,124 @@ export async function runSemrushSync(
       // Hitting our own row ceiling is a partial answer, and saying so is the
       // difference between "this is the whole picture" and "this is what we paid
       // for".
+      partial: result.truncated,
+      seen: result.rows.length,
+    });
+  } catch (error) {
+    const failed = await failRun(run, error);
+
+    return {
+      run: failed,
+      status: "FAILED",
+      window,
+      received: 0,
+      written: 0,
+      skipped: 0,
+      reused: false,
+    };
+  }
+}
+
+export type AhrefsSyncOptions = {
+  now?: Date;
+  /** Row ceiling for one run. Rows consume API units, so this is money. */
+  limit?: number;
+  fetchImpl?: typeof fetch;
+};
+
+/**
+ * Pulls this website's organic keywords from Ahrefs (P2_SPEC §7, second provider).
+ *
+ * Structurally the twin of the Semrush sync — point-in-time report, one-day
+ * window, same idempotency key shape, same shared write path — and deliberately
+ * so: the two vendors disagree about volumes and difficulty, and the product's
+ * answer to that is to store both readings side by side under their own provider
+ * and let `provider-precedence` decide what to show. That only works if both
+ * arrive through identical machinery.
+ *
+ * What it does not do is reconcile them. Neither snapshot overwrites the other,
+ * because their disagreement is a fact rather than a conflict to resolve.
+ */
+export async function runAhrefsSync(
+  context: TenantContext,
+  options: AhrefsSyncOptions = {},
+): Promise<SyncOutcome> {
+  const now = options.now ?? new Date();
+  const today = isoDate(now);
+
+  const window: SyncWindow = { startDate: today, endDate: today };
+
+  const connection = await prisma.connection.findFirst({
+    where: { provider: "AHREFS", ...websiteScope(context) },
+  });
+
+  if (!connection || connection.status === "NOT_CONNECTED") {
+    throw new SyncError("Ahrefs is not connected.", "not_connected");
+  }
+
+  const { run, alreadyDone } = await claimRun(context, connection, "AHREFS_ORGANIC", window, now);
+
+  if (alreadyDone) {
+    return {
+      run,
+      status: run.status,
+      window,
+      received: run.recordsReceived,
+      written: run.recordsWritten,
+      skipped: run.recordsSkipped,
+      reused: true,
+    };
+  }
+
+  try {
+    const country = countryForMarket(context.website.primaryMarket);
+
+    if (!country) {
+      throw new SyncError("This website has no primary market set.", "no_market");
+    }
+
+    const apiKey = await getApiKey(connection.id);
+
+    const result = await fetchOrganicKeywords({
+      apiKey,
+      target: context.website.normalizedDomain,
+      country,
+      // The API requires a date and reports as of it.
+      date: today,
+      limit: options.limit ?? AHREFS_DEFAULT_LIMIT,
+      fetchImpl: options.fetchImpl,
+    });
+
+    const snapshotId = await recordSnapshot(context, connection, window, {
+      rowsReceived: result.rows.length,
+      checksumSource: result.rows
+        .map((row) => `${row.normalizedKeyword}:${row.position}`)
+        .join("\n"),
+      extra: {
+        country,
+        truncated: result.truncated,
+        malformedRows: result.malformed,
+        // A field the vendor stopped returning shows here, rather than as a
+        // column that is empty for reasons nobody can explain.
+        missingFields: result.missingFields,
+      },
+    });
+
+    const written = await persistMarketRows(context, result.rows, {
+      provider: "AHREFS",
+      attribution: { kind: "connection", connectionId: connection.id, snapshotId },
+      // This endpoint dates the report rather than each row, so every row in the
+      // batch is as of the date we asked for.
+      fallbackCapturedAt: today,
+      mode: "keywords",
+    });
+
+    return completeRun(context, connection, run, {
+      window,
+      received: result.rows.length,
+      written: written.rankingsWritten + written.metricsWritten,
+      skipped: result.malformed,
+      latestDate: result.rows.length > 0 ? today : null,
       partial: result.truncated,
       seen: result.rows.length,
     });

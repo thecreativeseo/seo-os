@@ -41,18 +41,14 @@ const ERRORS: Record<string, string> = {
 /** Providers connected by OAuth, which then require choosing a property. */
 const CONNECTABLE = new Set(["GOOGLE_SEARCH_CONSOLE", "GOOGLE_ANALYTICS"]);
 
-/**
- * Providers connected by pasting a key.
- *
- * Only Semrush for now: the credential path is provider-agnostic, but a key is
- * only worth storing where a connector exists to spend it. Ahrefs stays on the
- * import route until its connector is written.
- */
-const KEY_CONNECTABLE = new Set(["SEMRUSH"]);
+/** Providers connected by pasting a key. */
+const KEY_CONNECTABLE = new Set(["SEMRUSH", "AHREFS"]);
 
 const KEY_HELP: Record<string, string> = {
   SEMRUSH:
     "Found under Subscription info → API units in your Semrush account. Stored encrypted, never shown again, and verified with a single-row request before it is saved. Rows are billed as API units.",
+  AHREFS:
+    "An API key from your Ahrefs account's API settings. Stored encrypted, never shown again, and verified with a single-row request before it is saved. Rows consume API units.",
 };
 
 export default async function ConnectionsPage({

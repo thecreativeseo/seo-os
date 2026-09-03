@@ -13,6 +13,7 @@ import {
 } from "@/server/services/connection-auth";
 import { providerFromSlug } from "@/server/connectors/google/oauth";
 import { databaseForMarket, fetchOrganicPositions } from "@/server/connectors/semrush/client";
+import { countryForMarket, fetchOrganicKeywords } from "@/server/connectors/ahrefs/client";
 
 export type ConnectionActionState = { error?: string };
 
@@ -49,28 +50,40 @@ export async function connectApiKeyAction(
     throwOnDenied: true,
   });
 
-  if (provider === "AHREFS") {
-    // The credential path is provider-agnostic; the Ahrefs connector is not
-    // written yet. Saying so is better than storing a key nothing will read.
-    return { error: "Ahrefs API access is not implemented yet. Import an export instead." };
+  const region =
+    provider === "SEMRUSH"
+      ? databaseForMarket(context.website.primaryMarket)
+      : countryForMarket(context.website.primaryMarket);
+
+  if (!region) {
+    // Both providers need to be told which market to report on, and guessing one
+    // would attribute another country's numbers to this site.
+    return { error: `Set this website's primary market before connecting ${provider === "SEMRUSH" ? "Semrush" : "Ahrefs"}.` };
   }
 
-  const database = databaseForMarket(context.website.primaryMarket);
-
-  if (!database) {
-    return { error: "Set this website's primary market before connecting Semrush." };
-  }
+  // One row from each provider. Enough to prove the key, the plan and the
+  // regional database, and cheap — rows are billed by both.
+  const probe =
+    provider === "SEMRUSH"
+      ? (key: string) =>
+          fetchOrganicPositions({
+            apiKey: key,
+            domain: context.website.normalizedDomain,
+            database: region,
+            maxRows: 1,
+          })
+      : (key: string) =>
+          fetchOrganicKeywords({
+            apiKey: key,
+            target: context.website.normalizedDomain,
+            country: region,
+            date: new Date().toISOString().slice(0, 10),
+            limit: 1,
+          });
 
   try {
     await connectApiKey(context, provider, apiKey, async (key) => {
-      await fetchOrganicPositions({
-        apiKey: key,
-        domain: context.website.normalizedDomain,
-        database,
-        // One row. Enough to prove the key, the plan and the database, and
-        // cheap: rows are billed.
-        maxRows: 1,
-      });
+      await probe(key);
     });
   } catch (error) {
     if (error instanceof ConnectionAuthError) {

@@ -690,6 +690,9 @@ enum SyncType {
   /// report carries both rankings and keyword metrics, so it is one sync type
   /// rather than two.
   SEMRUSH_ORGANIC
+  /// The same for Ahrefs. A separate value because a run records which vendor
+  /// was asked; one shared type would make "did Ahrefs pull today" unanswerable.
+  AHREFS_ORGANIC
 }
 
 enum SearchType {

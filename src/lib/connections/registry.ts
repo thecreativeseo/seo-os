@@ -64,8 +64,8 @@ export const CONNECTION_PROVIDERS: readonly ProviderCard[] = [
     provider: "AHREFS",
     name: "Ahrefs",
     purpose: "Keywords + rankings + competitors",
-    availability: "By CSV import",
-    alternative: { label: "Import an Ahrefs export", href: importsHref },
+    availability: "Available",
+    alternative: { label: "Or import an Ahrefs export", href: importsHref },
   },
   {
     provider: "SIMILARWEB",
