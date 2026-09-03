@@ -305,11 +305,27 @@ export function buildDemoKeywords(): DemoKeyword[] {
     const ranks = random() > 0.32;
     const position = ranks ? Math.round(2 + random() * 38) : null;
 
-    // Activation keeps its pages thin on purpose — that is story 6.
+    /*
+     * Most keywords have a nominated owner, because Northwind is meant to read
+     * as a site somebody has been running for a while rather than one nobody has
+     * touched. The first version left almost everything unowned, and detection
+     * duly produced fifty-two "no page owns this" findings — technically correct
+     * and useless as a demo, because a queue where one type drowns the rest is
+     * the failure the Command Center copy warns about.
+     *
+     * Activation keeps its pages thin on purpose. That is story 6.
+     */
+    const preferred = commercial
+      ? topic.commercialPath
+      : (topic.pillarPath ?? topic.supportingPaths[0] ?? null);
+
     const ownerPath =
-      commercial && topic.commercialPath && topic.slug !== "activation-onboarding"
-        ? topic.commercialPath
-        : null;
+      topic.slug === "activation-onboarding" || !preferred
+        ? null
+        : // A few stay unowned so the gap is a real finding somewhere.
+          random() > 0.15
+          ? preferred
+          : null;
 
     keywords.push({
       keyword: filler.term,

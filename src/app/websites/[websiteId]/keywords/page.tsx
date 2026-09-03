@@ -1,10 +1,17 @@
 import Link from "next/link";
 
+import { prisma } from "@/server/db/prisma";
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { countKeywords, listKeywords } from "@/server/services/keyword";
 import { getOwnershipCounts } from "@/server/services/ownership";
+import { listOpportunities } from "@/server/services/opportunity";
 import { EmptyState, PageHeader } from "@/components/governance/primitives";
-import { DisagreementFlag, ProviderTag } from "@/components/opportunity/primitives";
+import { DemoBadge } from "@/components/metrics/primitives";
+import {
+  DisagreementFlag,
+  PriorityBadge,
+  ProviderTag,
+} from "@/components/opportunity/primitives";
 import type { KeywordIntent } from "@/generated/prisma/client";
 
 export const metadata = { title: "Keywords · SEO OS" };
@@ -42,7 +49,7 @@ export default async function KeywordsPage({
   const pageNumber = Math.max(1, Number.parseInt(pageParam ?? "1", 10) || 1);
   const intent = INTENTS.find((value) => value === intentParam);
 
-  const [rows, total, ownershipCounts] = await Promise.all([
+  const [rows, total, ownershipCounts, opportunities, topicMap] = await Promise.all([
     listKeywords(context, {
       search: q,
       intent,
@@ -51,7 +58,22 @@ export default async function KeywordsPage({
     }),
     countKeywords(context, { search: q, intent }),
     getOwnershipCounts(context),
+    // Which keywords already have work queued against them. Shown as a marker
+    // rather than a count: the explorer answers "what is here", the queue
+    // answers "what should I do".
+    listOpportunities(context, { limit: 500 }),
+    prisma.topicKeyword.findMany({
+      where: { topic: { websiteId: context.website.id, status: "ACTIVE" } },
+      select: { keywordId: true, topic: { select: { id: true, name: true } } },
+    }),
   ]);
+
+  const opportunityByKeyword = new Map(
+    opportunities
+      .filter((row) => row.keywordId !== null)
+      .map((row) => [row.keywordId!, row]),
+  );
+  const topicByKeyword = new Map(topicMap.map((row) => [row.keywordId, row.topic]));
 
   const hasNext = rows.length > PAGE_SIZE;
   const visible = rows.slice(0, PAGE_SIZE);
@@ -59,10 +81,15 @@ export default async function KeywordsPage({
 
   return (
     <main className="space-y-6">
-      <PageHeader
-        title="Keywords"
-        description="What the market searches for, what this site ranks for, and which page was meant to."
-      />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <PageHeader
+          title="Keywords"
+          description="What the market searches for, what this site ranks for, and which page was meant to."
+        />
+        {/* Synthetic market data must be recognisable as synthetic on every
+            screen that shows it, not only the ones built first. */}
+        {context.website.isDemo ? <DemoBadge /> : null}
+      </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-muted-foreground text-sm">
@@ -130,9 +157,12 @@ export default async function KeywordsPage({
                 <th className="px-3 py-2 text-right font-medium">Volume</th>
                 <th className="px-3 py-2 text-right font-medium">KD</th>
                 <th className="px-3 py-2 text-right font-medium">Position</th>
+                <th className="px-3 py-2 text-right font-medium">Previous</th>
                 <th className="px-3 py-2 font-medium">Intended owner</th>
                 <th className="px-3 py-2 font-medium">Ranking page</th>
+                <th className="px-3 py-2 font-medium">Topic</th>
                 <th className="px-3 py-2 text-right font-medium">Relevance</th>
+                <th className="px-3 py-2 font-medium">Opportunity</th>
               </tr>
             </thead>
             <tbody className="divide-border divide-y">
@@ -173,6 +203,11 @@ export default async function KeywordsPage({
                     <td className="px-3 py-3 text-right tabular-nums">
                       {row.position === null ? "—" : row.position}
                     </td>
+                    <td className="text-muted-foreground px-3 py-3 text-right text-xs tabular-nums">
+                      {/* Only when the provider supplied it. Deriving it from our
+                          own history would mix two different claims. */}
+                      {row.previousPosition === null ? "—" : row.previousPosition}
+                    </td>
                     <td className="text-muted-foreground max-w-[12rem] truncate px-3 py-3 text-xs">
                       {row.ownerPath ?? (
                         <span className="italic">not nominated</span>
@@ -192,8 +227,27 @@ export default async function KeywordsPage({
                     >
                       {row.rankingPagePath ?? row.rankingUrl ?? "—"}
                     </td>
+                    <td className="text-muted-foreground max-w-[9rem] truncate px-3 py-3 text-xs">
+                      {topicByKeyword.get(row.id)?.name ?? "—"}
+                    </td>
                     <td className="px-3 py-3 text-right tabular-nums">
-                      {row.businessRelevance ?? "—"}
+                      {row.businessRelevance ?? (
+                        <span className="text-muted-foreground text-xs">not set</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-3 text-xs">
+                      {opportunityByKeyword.has(row.id) ? (
+                        <Link
+                          href={`/websites/${websiteId}/opportunities/${opportunityByKeyword.get(row.id)!.id}`}
+                          className="underline underline-offset-4"
+                        >
+                          <PriorityBadge
+                            priority={opportunityByKeyword.get(row.id)!.priority}
+                          />
+                        </Link>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
                     </td>
                   </tr>
                 );

@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { prisma } from "@/server/db/prisma";
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { hasRole } from "@/server/auth/roles";
 import {
@@ -8,6 +9,7 @@ import {
   type QueueFilters,
 } from "@/server/services/opportunity";
 import { EmptyState, PageHeader } from "@/components/governance/primitives";
+import { DemoBadge } from "@/components/metrics/primitives";
 import {
   PriorityBadge,
   ScorePill,
@@ -73,6 +75,9 @@ export default async function OpportunitiesPage({
     type?: string;
     status?: string;
     priority?: string;
+    goalId?: string;
+    ownerId?: string;
+    topicId?: string;
     page?: string;
   }>;
 }) {
@@ -84,10 +89,32 @@ export default async function OpportunitiesPage({
 
   // Filters are matched against our own lists rather than passed through: a query
   // string is somebody's input, whatever the links on this page offer.
+  const [goals, owners, topics] = await Promise.all([
+    prisma.businessGoal.findMany({
+      where: { websiteId: context.website.id, status: { not: "RETIRED" } },
+      select: { id: true, title: true },
+      orderBy: { title: "asc" },
+    }),
+    prisma.organizationMembership.findMany({
+      where: { organizationId: context.organization.id, status: "ACTIVE" },
+      include: { user: { select: { id: true, email: true, displayName: true } } },
+    }),
+    prisma.topic.findMany({
+      where: { websiteId: context.website.id, status: "ACTIVE" },
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    }),
+  ]);
+
+  // Every filter is matched against a list we hold. A query string is somebody's
+  // input, whatever the links on this page happen to offer.
   const filters: QueueFilters = {
     type: TYPES.find((value) => value === query.type),
     status: STATUSES.find((value) => value === query.status),
     priority: PRIORITIES.find((value) => value === query.priority),
+    businessGoalId: goals.find((goal) => goal.id === query.goalId)?.id,
+    ownerUserId: owners.find((member) => member.user.id === query.ownerId)?.user.id,
+    topicId: topics.find((topic) => topic.id === query.topicId)?.id,
     limit: PAGE_SIZE + 1,
     offset: (pageNumber - 1) * PAGE_SIZE,
   };
@@ -113,10 +140,13 @@ export default async function OpportunitiesPage({
 
   return (
     <main className="space-y-6">
-      <PageHeader
-        title="Opportunity Queue"
-        description="Work ranked by business relevance, intent, demand, visibility, competitive gap, confidence and effort. Every score opens to show its reasoning."
-      />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <PageHeader
+          title="Opportunity Queue"
+          description="Work ranked by business relevance, intent, demand, visibility, competitive gap, confidence and effort. Every score opens to show its reasoning."
+        />
+        {context.website.isDemo ? <DemoBadge /> : null}
+      </div>
 
       <div className="flex flex-wrap items-start justify-between gap-4">
         <dl className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
@@ -179,6 +209,65 @@ export default async function OpportunitiesPage({
             </Link>
           ))}
         </div>
+
+        {/* Goal, owner and topic get a select rather than a row of chips: these
+            lists grow, and thirty links is not a filter. */}
+        <form method="get" className="flex flex-wrap items-end gap-3">
+          {query.type ? <input type="hidden" name="type" value={query.type} /> : null}
+          {query.status ? <input type="hidden" name="status" value={query.status} /> : null}
+
+          {[
+            {
+              name: "goalId",
+              label: "Business goal",
+              value: query.goalId,
+              options: goals.map((goal) => ({ id: goal.id, label: goal.title })),
+            },
+            {
+              name: "ownerId",
+              label: "Owner",
+              value: query.ownerId,
+              options: owners.map((member) => ({
+                id: member.user.id,
+                label: member.user.displayName ?? member.user.email,
+              })),
+            },
+            {
+              name: "topicId",
+              label: "Topic",
+              value: query.topicId,
+              options: topics.map((topic) => ({ id: topic.id, label: topic.name })),
+            },
+          ]
+            .filter((field) => field.options.length > 0)
+            .map((field) => (
+              <div key={field.name} className="space-y-1">
+                <label htmlFor={field.name} className="text-muted-foreground block text-xs">
+                  {field.label}
+                </label>
+                <select
+                  id={field.name}
+                  name={field.name}
+                  defaultValue={field.value ?? ""}
+                  className="border-border h-8 rounded-md border px-2 text-xs"
+                >
+                  <option value="">Any</option>
+                  {field.options.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
+
+          <button
+            type="submit"
+            className="border-border hover:bg-accent inline-flex h-8 items-center rounded-md border px-3 text-xs"
+          >
+            Filter
+          </button>
+        </form>
       </div>
 
       {visible.length === 0 ? (
@@ -196,6 +285,7 @@ export default async function OpportunitiesPage({
                 <th className="px-3 py-2 font-medium">Type</th>
                 <th className="px-3 py-2 font-medium">Priority</th>
                 <th className="px-3 py-2 text-right font-medium">Score</th>
+                <th className="px-3 py-2 font-medium">Evidence</th>
                 <th className="px-3 py-2 font-medium">Goal</th>
                 <th className="px-3 py-2 font-medium">Effort</th>
                 <th className="px-3 py-2 font-medium">Confidence</th>
@@ -225,6 +315,23 @@ export default async function OpportunitiesPage({
                   </td>
                   <td className="px-3 py-3 text-right">
                     <ScorePill score={row.score === null ? null : Number(row.score)} />
+                  </td>
+                  <td className="text-muted-foreground max-w-[14rem] px-3 py-3 text-xs">
+                    {/* What the judgement rests on, in the row. The detail screen
+                        carries the values; this says how much there is. */}
+                    {row.evidence.length === 0 ? (
+                      "none"
+                    ) : (
+                      <>
+                        {row.evidence.length} piece
+                        {row.evidence.length === 1 ? "" : "s"}
+                        <span className="block truncate">
+                          {[...new Set(row.evidence.map((entry) => entry.metricKey))]
+                            .slice(0, 3)
+                            .join(", ")}
+                        </span>
+                      </>
+                    )}
                   </td>
                   <td className="text-muted-foreground max-w-[12rem] truncate px-3 py-3 text-xs">
                     {row.businessGoal?.title ?? "—"}
