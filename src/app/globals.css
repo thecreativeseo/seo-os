@@ -1,6 +1,8 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+/* Hand-written styles. Kept apart from the theme so the two never share a diff. */
+@import "./custom.css";
 
 @custom-variant dark (&:is(.dark *));
 

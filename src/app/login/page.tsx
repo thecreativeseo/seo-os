@@ -16,8 +16,8 @@ export default async function LoginPage() {
   return (
     <main className="flex flex-1 items-center justify-center px-6 py-16">
       <div className="w-full max-w-sm">
-        <h1 className="text-2xl font-semibold tracking-tight">SEO OS</h1>
-        <p className="text-muted-foreground mt-2 text-sm leading-relaxed">
+        <h1 className="text-2xl font-semibold tracking-tight text-center">seoirse_logo</h1>
+        <p className="text-muted-foreground mt-2 text-sm leading-relaxed text-center">
           Build the context your SEO team operates from.
         </p>
 
@@ -31,7 +31,7 @@ export default async function LoginPage() {
           </button>
         </form>
 
-        <p className="text-muted-foreground mt-6 text-xs leading-relaxed">
+        <p className="text-muted-foreground mt-6 text-xs leading-relaxed text-center">
           Signing in proves who you are. Access to a workspace is granted separately,
           by an invitation from that organization.
         </p>

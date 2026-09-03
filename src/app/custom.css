@@ -1,0 +1,54 @@
+/*
+ * Hand-written styles for SEO OS.
+ *
+ * Imported from globals.css, which stays as the foundation — the Tailwind
+ * imports, the design tokens, and the light and dark palettes. Anything written
+ * by hand lives here instead, so a change to the theme and a change to your own
+ * styles never land in the same diff.
+ *
+ * Three sections, matching what Tailwind v4 expects:
+ *
+ *   @layer base        global element styles — headings, links, tables
+ *   @layer components  reusable classes built from utilities with @apply
+ *   @utility           new single-purpose utilities, usable with every variant
+ *
+ * Colors: use the variables globals.css defines (--foreground, --muted, --card,
+ * --border, …) rather than literal values. They already flip between light and
+ * dark, so a style written against them needs no dark-mode counterpart.
+ */
+
+/* ---- Base ---------------------------------------------------------------- */
+
+@layer base {
+  /* Global element styles. Example:
+
+     h1 {
+       @apply text-2xl font-semibold tracking-tight;
+     }
+  */
+}
+
+/* ---- Components ---------------------------------------------------------- */
+
+@layer components {
+  /* Reusable classes. Example:
+
+     .card-elevated {
+       @apply bg-card border-border rounded-lg border shadow-sm;
+     }
+  */
+}
+
+/* ---- Utilities ----------------------------------------------------------- */
+
+/* Tailwind v4 defines utilities with @utility, not @layer utilities. Each one
+   picks up every variant (hover:, md:, dark:) without further work. This first
+   one is real and in use as an example: `no-scrollbar` hides the scrollbar on an
+   element that still scrolls, which Tailwind does not ship. */
+@utility no-scrollbar {
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
