@@ -672,8 +672,8 @@ function ConnectionsStep() {
   return (
     <div className="space-y-3">
       <p className="text-muted-foreground text-sm">
-        Nothing connects in this phase. These are the systems SEO OS is built to
-        operate with, and when each becomes available.
+        The systems SEO OS is built to operate with. You can connect them after
+        onboarding, from Data &amp; Publishing.
       </p>
       <ul className="divide-border border-border divide-y rounded-md border">
         {CONNECTION_PROVIDERS.map((provider) => (

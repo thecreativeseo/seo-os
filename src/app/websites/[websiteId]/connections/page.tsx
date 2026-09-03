@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { hasRole } from "@/server/auth/roles";
 import { PROVIDER_COUNT, listConnectionCards } from "@/server/services/connections";
@@ -15,9 +17,14 @@ export const metadata = { title: "Connections · SEO OS" };
 /**
  * Data & Publishing.
  *
- * Search Console and Analytics can now be connected. The others still state when
- * they become available and offer no button, because a button that did nothing —
- * or appeared to succeed — is the dishonesty CLAUDE.md rules out.
+ * Search Console and Analytics can be connected. The others state what is
+ * available and offer no connect button, because a button that did nothing — or
+ * appeared to succeed — is the dishonesty CLAUDE.md rules out.
+ *
+ * Semrush and Ahrefs are the awkward middle case: their data does arrive, just
+ * not by connecting (P2_SPEC §7 IMPORT MODE). Saying only "not connected" would
+ * be true and would still send somebody away believing the product cannot read
+ * their Semrush export, so those cards link to the flow that can.
  */
 const ERRORS: Record<string, string> = {
   access_denied: "Authorization was cancelled, or Google refused the request.",
@@ -67,7 +74,7 @@ export default async function ConnectionsPage({
     <main className="space-y-8">
       <PageHeader
         title="Data & Publishing"
-        description="The systems SEO OS is built to operate with. Search Console and Analytics can be connected; the rest state when they become available."
+        description="The systems SEO OS is built to operate with. Search Console and Analytics connect directly; Semrush and Ahrefs arrive by CSV import; the rest are not available yet."
       />
 
       {error ? (
@@ -150,6 +157,17 @@ export default async function ConnectionsPage({
               {connectable && !canManage ? (
                 <p className="text-muted-foreground text-sm">
                   An owner or admin connects data sources.
+                </p>
+              ) : null}
+
+              {card.alternative ? (
+                <p className="text-sm">
+                  <Link
+                    href={card.alternative.href(websiteId)}
+                    className="underline underline-offset-4"
+                  >
+                    {card.alternative.label}
+                  </Link>
                 </p>
               ) : null}
             </li>

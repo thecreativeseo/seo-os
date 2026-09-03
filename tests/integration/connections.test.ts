@@ -98,12 +98,40 @@ describe("provider registry", () => {
     }
 
     const byProvider = new Map(cards.map((card) => [card.provider, card]));
-    // The two P1 providers are named as such; nothing claims to be available now.
-    expect(byProvider.get("GOOGLE_SEARCH_CONSOLE")?.availability).toBe("Coming in P1");
-    expect(byProvider.get("GOOGLE_ANALYTICS")?.availability).toBe("Coming in P1");
-    expect(
-      cards.some((card) => /available now|connected/i.test(card.availability)),
-    ).toBe(false);
+
+    // The two that actually connect say so plainly.
+    expect(byProvider.get("GOOGLE_SEARCH_CONSOLE")?.availability).toBe("Available");
+    expect(byProvider.get("GOOGLE_ANALYTICS")?.availability).toBe("Available");
+
+    // And nothing else does. This is the assertion that matters: the page offers
+    // a connect button for exactly these two, so any other card reading
+    // "Available" would be promising an action that is not on the screen.
+    const connectable = new Set(["GOOGLE_SEARCH_CONSOLE", "GOOGLE_ANALYTICS"]);
+
+    for (const card of cards) {
+      if (connectable.has(card.provider)) continue;
+      expect(card.availability).not.toMatch(/^available$/i);
+    }
+  });
+
+  it("points Semrush and Ahrefs at the import flow that carries their data", async () => {
+    // P2 delivered these through CSV import rather than a live connection
+    // (P2_SPEC §7). A card saying only "not connected" would be accurate and
+    // would still hide a working feature.
+    const context = await makeContext("alternative");
+    const cards = await listConnectionCards(context);
+    const byProvider = new Map(cards.map((card) => [card.provider, card]));
+
+    for (const provider of ["SEMRUSH", "AHREFS"] as const) {
+      const card = byProvider.get(provider);
+      expect(card?.alternative).toBeDefined();
+      expect(card?.alternative?.href(context.website.id)).toBe(
+        `/websites/${context.website.id}/imports`,
+      );
+    }
+
+    // A provider with no other route offers no link, rather than a dead one.
+    expect(byProvider.get("SIMILARWEB")?.alternative).toBeUndefined();
   });
 
   it("keeps the registry and the database enum in agreement", async () => {
