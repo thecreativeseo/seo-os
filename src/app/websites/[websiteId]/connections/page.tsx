@@ -7,6 +7,7 @@ import { listAvailableProperties } from "@/server/services/connection-auth";
 import { isGoogleProvider, slugForProvider } from "@/server/connectors/google/oauth";
 import { Badge, PageHeader } from "@/components/governance/primitives";
 import {
+  ApiKeyForm,
   ConnectButton,
   DisconnectButton,
   PropertyPicker,
@@ -37,7 +38,22 @@ const ERRORS: Record<string, string> = {
     "Google OAuth is not configured for this deployment yet, so connecting is unavailable.",
 };
 
+/** Providers connected by OAuth, which then require choosing a property. */
 const CONNECTABLE = new Set(["GOOGLE_SEARCH_CONSOLE", "GOOGLE_ANALYTICS"]);
+
+/**
+ * Providers connected by pasting a key.
+ *
+ * Only Semrush for now: the credential path is provider-agnostic, but a key is
+ * only worth storing where a connector exists to spend it. Ahrefs stays on the
+ * import route until its connector is written.
+ */
+const KEY_CONNECTABLE = new Set(["SEMRUSH"]);
+
+const KEY_HELP: Record<string, string> = {
+  SEMRUSH:
+    "Found under Subscription info → API units in your Semrush account. Stored encrypted, never shown again, and verified with a single-row request before it is saved. Rows are billed as API units.",
+};
 
 export default async function ConnectionsPage({
   params,
@@ -94,6 +110,7 @@ export default async function ConnectionsPage({
         {cards.map((card) => {
           const slug = slugForProvider(card.provider);
           const connectable = CONNECTABLE.has(card.provider);
+          const keyConnectable = KEY_CONNECTABLE.has(card.provider);
           const isSelecting = selectingProvider === card.provider;
 
           return (
@@ -154,7 +171,23 @@ export default async function ConnectionsPage({
                 </div>
               ) : null}
 
-              {connectable && !canManage ? (
+              {keyConnectable && canManage ? (
+                <div className="space-y-3">
+                  <ApiKeyForm
+                    websiteId={websiteId}
+                    provider={card.provider}
+                    providerName={card.name}
+                    connected={card.status === "CONNECTED"}
+                    helpText={KEY_HELP[card.provider] ?? ""}
+                  />
+
+                  {card.status !== "NOT_CONNECTED" ? (
+                    <DisconnectButton websiteId={websiteId} slug={card.provider} />
+                  ) : null}
+                </div>
+              ) : null}
+
+              {(connectable || keyConnectable) && !canManage ? (
                 <p className="text-muted-foreground text-sm">
                   An owner or admin connects data sources.
                 </p>

@@ -21,6 +21,14 @@ import {
   type Ga4MetricName,
   type Ga4Result,
 } from "@/server/connectors/google/analytics";
+import {
+  DEFAULT_MAX_ROWS,
+  SemrushError,
+  databaseForMarket,
+  fetchOrganicPositions,
+} from "@/server/connectors/semrush/client";
+import { getApiKey } from "@/server/services/connection-auth";
+import { persistMarketRows } from "@/server/services/market-data";
 
 /**
  * Sync orchestration (docs/P1_SPEC.md §11, §23).
@@ -56,7 +64,15 @@ export type SyncErrorCode =
   | "rate_limited"
   | "request_failed"
   | "invalid_response"
-  | "unknown";
+  | "unknown"
+  // P2 LIVE API MODE. A metered third-party API fails in ways an OAuth provider
+  // does not — the key can be valid while the account has nothing left to spend —
+  // and "upstream_error" would tell an operator nothing they could act on.
+  | "invalid_key"
+  | "quota_exhausted"
+  | "unknown_database"
+  | "not_subscribed"
+  | "no_market";
 
 export class SyncError extends Error {
   constructor(
@@ -140,7 +156,13 @@ export function idempotencyKeyFor(syncType: SyncType, window: SyncWindow): strin
 function errorCodeFor(error: unknown): SyncErrorCode {
   if (error instanceof SyncError) return error.code;
 
-  if (error instanceof SearchConsoleError || error instanceof AnalyticsError) {
+  if (
+    error instanceof SearchConsoleError ||
+    error instanceof AnalyticsError ||
+    error instanceof SemrushError
+  ) {
+    // Each connector's codes are a subset of ours by construction, so the union
+    // above stays exhaustive rather than needing a mapping table per vendor.
     return error.code as SyncErrorCode;
   }
 
@@ -172,6 +194,11 @@ const ERROR_SUMMARIES: Record<SyncErrorCode, string> = {
   request_failed: "The provider rejected the request.",
   invalid_response: "The provider returned data that could not be read.",
   unknown: "The sync did not complete.",
+  invalid_key: "The stored API key was rejected. Reconnect with a valid key.",
+  quota_exhausted: "This provider account has no API quota left.",
+  unknown_database: "The provider has no regional database for this website's market.",
+  not_subscribed: "This provider plan does not include API access to that report.",
+  no_market: "Set the website's primary market before syncing this provider.",
 };
 
 export type SyncOutcome = {
@@ -909,6 +936,140 @@ async function completeRun(
     skipped: result.skipped,
     reused: false,
   };
+}
+
+export type SemrushSyncOptions = {
+  now?: Date;
+  /** Cost ceiling for one run. Rows are billed, so this is money, not throughput. */
+  maxRows?: number;
+  /** Injected in tests so parsing and error mapping run without a network. */
+  fetchImpl?: typeof fetch;
+  sleepImpl?: (ms: number) => Promise<void>;
+};
+
+/**
+ * Pulls this website's organic positions from Semrush (P2_SPEC §7 LIVE API MODE).
+ *
+ * Two things differ from the Google syncs, and both come from what the report
+ * actually is.
+ *
+ * It has no date range. `domain_organic` answers "where does this domain rank
+ * now", so the period is a single day — today — and the idempotency key follows.
+ * Asking twice in one day is therefore free rather than merely safe, which
+ * matters more here than for Search Console because every row costs API units.
+ *
+ * And it is not first-party. Search Console reports what Google recorded about
+ * traffic that really happened; Semrush reports its own crawl of the SERP, on its
+ * own cadence. So rows land in the P2 snapshot tables with `sourceProvider` set
+ * and go through the same `persistMarketRows` path as an uploaded export — never
+ * into the GSC tables, and never presented as a measurement of this site.
+ */
+export async function runSemrushSync(
+  context: TenantContext,
+  options: SemrushSyncOptions = {},
+): Promise<SyncOutcome> {
+  const now = options.now ?? new Date();
+  const today = isoDate(now);
+
+  // A point-in-time report, so the window is one day rather than a range.
+  const window: SyncWindow = { startDate: today, endDate: today };
+
+  const connection = await prisma.connection.findFirst({
+    where: { provider: "SEMRUSH", ...websiteScope(context) },
+  });
+
+  if (!connection || connection.status === "NOT_CONNECTED") {
+    throw new SyncError("Semrush is not connected.", "not_connected");
+  }
+
+  const { run, alreadyDone } = await claimRun(
+    context,
+    connection,
+    "SEMRUSH_ORGANIC",
+    window,
+    now,
+  );
+
+  if (alreadyDone) {
+    return {
+      run,
+      status: run.status,
+      window,
+      received: run.recordsReceived,
+      written: run.recordsWritten,
+      skipped: run.recordsSkipped,
+      reused: true,
+    };
+  }
+
+  try {
+    const database = databaseForMarket(context.website.primaryMarket);
+
+    if (!database) {
+      // Guessing a database would attribute another country's search volumes to
+      // this site, which is worse than refusing to run.
+      throw new SyncError("This website has no primary market set.", "no_market");
+    }
+
+    const apiKey = await getApiKey(connection.id);
+
+    const result = await fetchOrganicPositions({
+      apiKey,
+      domain: context.website.normalizedDomain,
+      database,
+      maxRows: options.maxRows ?? DEFAULT_MAX_ROWS,
+      fetchImpl: options.fetchImpl,
+      sleepImpl: options.sleepImpl,
+    });
+
+    const snapshotId = await recordSnapshot(context, connection, window, {
+      rowsReceived: result.rows.length,
+      // Hashed over the identities returned, not the response body: the body is
+      // large and the point is only to tell one pull from another.
+      checksumSource: result.rows.map((row) => `${row.normalizedKeyword}:${row.position}`).join("\n"),
+      extra: {
+        database,
+        truncated: result.truncated,
+        malformedRows: result.malformed,
+        // Named so a silently dropped provider column is visible in the record
+        // rather than showing up as every row having no difficulty score.
+        missingColumns: result.missingColumns,
+      },
+    });
+
+    const written = await persistMarketRows(context, result.rows, {
+      provider: "SEMRUSH",
+      attribution: { kind: "connection", connectionId: connection.id, snapshotId },
+      // Semrush stamps each row; this covers a row whose timestamp was unreadable.
+      fallbackCapturedAt: today,
+      mode: "keywords",
+    });
+
+    return completeRun(context, connection, run, {
+      window,
+      received: result.rows.length,
+      written: written.rankingsWritten + written.metricsWritten,
+      skipped: result.malformed,
+      latestDate: result.rows.length > 0 ? today : null,
+      // Hitting our own row ceiling is a partial answer, and saying so is the
+      // difference between "this is the whole picture" and "this is what we paid
+      // for".
+      partial: result.truncated,
+      seen: result.rows.length,
+    });
+  } catch (error) {
+    const failed = await failRun(run, error);
+
+    return {
+      run: failed,
+      status: "FAILED",
+      window,
+      received: 0,
+      written: 0,
+      skipped: 0,
+      reused: false,
+    };
+  }
 }
 
 /** Recent runs for a website, newest first. */

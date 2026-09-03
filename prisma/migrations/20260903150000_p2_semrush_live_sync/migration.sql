@@ -1,0 +1,11 @@
+-- Semrush live API sync (P2_SPEC §7 LIVE API MODE).
+--
+-- P2 shipped IMPORT MODE, which the spec allowed for the prototype. This adds the
+-- other half: the same normalized rows, fetched rather than uploaded.
+--
+-- Only a sync type is needed. Every destination already exists — ranking_snapshot
+-- and keyword_metrics_snapshot have carried both source_import_id and
+-- source_connection_id since P2, because a measurement's provenance was always
+-- going to be one or the other. A live row fills the connection column and leaves
+-- the import column null, and nothing downstream has to learn a new shape.
+ALTER TYPE "SyncType" ADD VALUE IF NOT EXISTS 'SEMRUSH_ORGANIC';

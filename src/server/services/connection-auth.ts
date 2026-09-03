@@ -159,6 +159,144 @@ export async function getAccessToken(connectionId: string): Promise<string> {
   }
 }
 
+/**
+ * Providers authenticated by a key the customer pastes in, not by OAuth.
+ *
+ * A separate flow because the trust model is different. An OAuth grant is scoped,
+ * revocable from the provider's side, and never seen by us in plaintext after the
+ * exchange; a vendor API key is a bearer secret with, typically, full account
+ * access and no scoping. So there is no property-selection second step — there is
+ * nothing to choose — and the key is verified against the provider before the
+ * connection is allowed to read CONNECTED.
+ */
+export type ApiKeyProvider = "SEMRUSH" | "AHREFS";
+
+export function isApiKeyProvider(value: string): value is ApiKeyProvider {
+  return value === "SEMRUSH" || value === "AHREFS";
+}
+
+/**
+ * Stores an API key and marks the connection connected.
+ *
+ * `verify` is the caller's chance to prove the key works before we claim it does.
+ * A connection that went CONNECTED on an unverified key would be the "do not fake
+ * a successful connection" rule broken in the most literal way: every screen
+ * would say connected and every sync would fail.
+ */
+export async function connectApiKey(
+  context: TenantContext,
+  provider: ApiKeyProvider,
+  apiKey: string,
+  verify?: (apiKey: string) => Promise<void>,
+): Promise<Connection> {
+  const trimmed = apiKey.trim();
+
+  if (!trimmed) {
+    throw new ConnectionAuthError("Enter the API key.", "missing_key");
+  }
+
+  if (verify) {
+    try {
+      await verify(trimmed);
+    } catch (error) {
+      // The provider's own message is not passed on: for Semrush the key travels
+      // in the query string, so an upstream error body can contain the secret.
+      throw new ConnectionAuthError(
+        error instanceof Error && "code" in error && typeof error.code === "string"
+          ? messageForVerifyFailure(error.code)
+          : "That key could not be verified with the provider.",
+        "key_rejected",
+      );
+    }
+  }
+
+  const encrypted = encryptCredential(JSON.stringify({ apiKey: trimmed }));
+
+  return prisma.$transaction(async (tx) => {
+    const record = await tx.connection.upsert({
+      where: { websiteId_provider: { websiteId: context.website.id, provider } },
+      update: { status: "CONNECTED", connectedAt: new Date(), lastError: null },
+      create: {
+        websiteId: context.website.id,
+        workspaceId: context.workspace.id,
+        provider,
+        status: "CONNECTED",
+        connectedAt: new Date(),
+      },
+    });
+
+    await tx.credential.upsert({
+      where: { connectionId: record.id },
+      update: {
+        encryptedPayload: encrypted.ciphertext,
+        keyVersion: encrypted.keyVersion,
+        scopes: [],
+        rotatedAt: new Date(),
+      },
+      create: {
+        connectionId: record.id,
+        provider,
+        encryptedPayload: encrypted.ciphertext,
+        keyVersion: encrypted.keyVersion,
+        scopes: [],
+      },
+    });
+
+    await recordAudit(tx, context, {
+      entityType: "Connection",
+      entityId: record.id,
+      action: "UPDATE",
+      // That a key was stored, never any part of the key itself. Redaction would
+      // catch it even if a future edit tried to add it.
+      after: { provider, status: "CONNECTED", credentialStored: true },
+    });
+
+    return record;
+  });
+}
+
+function messageForVerifyFailure(code: string): string {
+  switch (code) {
+    case "invalid_key":
+      return "The provider rejected that key.";
+    case "quota_exhausted":
+      return "That key is valid but the account has no API units left.";
+    case "not_subscribed":
+      return "That account's plan does not include API access.";
+    case "unknown_database":
+      return "The provider has no database for this website's market.";
+    default:
+      return "That key could not be verified with the provider.";
+  }
+}
+
+/**
+ * The stored API key for a connection.
+ *
+ * Returned in plaintext because a request cannot be signed without it, and
+ * deliberately nowhere near the view models: nothing that reaches a page or a
+ * client component calls this.
+ */
+export async function getApiKey(connectionId: string): Promise<string> {
+  const credential = await prisma.credential.findUnique({
+    where: { connectionId },
+  });
+
+  if (!credential) {
+    throw new ConnectionAuthError("This connection has no stored credential.", "no_credential");
+  }
+
+  const payload = JSON.parse(decryptCredential(credential.encryptedPayload)) as {
+    apiKey?: string;
+  };
+
+  if (!payload.apiKey) {
+    throw new ConnectionAuthError("This connection has no stored API key.", "no_credential");
+  }
+
+  return payload.apiKey;
+}
+
 export async function listAvailableProperties(
   context: TenantContext,
   provider: GoogleProvider,
@@ -218,7 +356,7 @@ export async function selectProperty(
 /** Removes the stored credential and returns the connection to NOT_CONNECTED. */
 export async function disconnectProvider(
   context: TenantContext,
-  provider: GoogleProvider,
+  provider: GoogleProvider | ApiKeyProvider,
 ): Promise<void> {
   const existing = await prisma.connection.findFirst({
     where: { websiteId: context.website.id, provider },

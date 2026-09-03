@@ -53,8 +53,12 @@ export const CONNECTION_PROVIDERS: readonly ProviderCard[] = [
     provider: "SEMRUSH",
     name: "Semrush",
     purpose: "Keywords + rankings + competitors",
-    availability: "By CSV import",
-    alternative: { label: "Import a Semrush export", href: importsHref },
+    availability: "Available",
+    // Kept alongside the live connection rather than replaced by it. An export
+    // covers what the API does not — a competitor report, a keyword list from a
+    // colleague, a period predating the connection — and it is the route when a
+    // plan has no API units. Both write identical rows.
+    alternative: { label: "Or import a Semrush export", href: importsHref },
   },
   {
     provider: "AHREFS",

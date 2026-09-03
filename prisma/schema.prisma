@@ -686,6 +686,10 @@ enum SyncType {
   GSC_METRICS
   GA4_METRICS
   SITEMAP_FETCH
+  /// Semrush organic positions, fetched live (P2_SPEC §7 LIVE API MODE). One
+  /// report carries both rankings and keyword metrics, so it is one sync type
+  /// rather than two.
+  SEMRUSH_ORGANIC
 }
 
 enum SearchType {

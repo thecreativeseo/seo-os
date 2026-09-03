@@ -3,12 +3,77 @@
 import { useActionState } from "react";
 
 import {
+  connectApiKeyAction,
   disconnectProviderAction,
   selectPropertyAction,
   type ConnectionActionState,
 } from "@/server/actions/connections";
 
 const initial: ConnectionActionState = {};
+
+/**
+ * Entering a vendor API key.
+ *
+ * `type="password"` and `autoComplete="off"` because this is a bearer secret with
+ * account-wide access, and a browser that remembered it or a shoulder that read
+ * it are both real. The field is never populated back from the server: once
+ * stored, the key is write-only as far as the interface is concerned, and the
+ * only offered operation is replacing it.
+ */
+export function ApiKeyForm({
+  websiteId,
+  provider,
+  providerName,
+  connected,
+  helpText,
+}: {
+  websiteId: string;
+  provider: string;
+  providerName: string;
+  connected: boolean;
+  helpText: string;
+}) {
+  const [state, action, pending] = useActionState(connectApiKeyAction, initial);
+
+  return (
+    <form action={action} className="space-y-3">
+      <input type="hidden" name="__websiteId" value={websiteId} />
+      <input type="hidden" name="__provider" value={provider} />
+
+      <div className="space-y-1.5">
+        <label htmlFor={`api-key-${provider}`} className="block text-sm font-medium">
+          {connected ? `Replace ${providerName} API key` : `${providerName} API key`}
+        </label>
+        <input
+          id={`api-key-${provider}`}
+          name="apiKey"
+          type="password"
+          autoComplete="off"
+          spellCheck={false}
+          required
+          placeholder={connected ? "Stored — enter a new key to replace" : "Paste the API key"}
+          className="border-border h-9 w-full max-w-md rounded-md border px-3 font-mono text-sm"
+        />
+        <p className="text-muted-foreground text-xs">{helpText}</p>
+      </div>
+
+      <div className="flex items-center gap-3">
+        <button
+          type="submit"
+          disabled={pending}
+          className="bg-foreground text-background inline-flex h-9 items-center rounded-md px-4 text-sm font-medium disabled:opacity-60"
+        >
+          {pending ? "Verifying…" : connected ? "Replace key" : `Connect ${providerName}`}
+        </button>
+        {state.error ? (
+          <p role="alert" className="text-sm text-red-600">
+            {state.error}
+          </p>
+        ) : null}
+      </div>
+    </form>
+  );
+}
 
 /**
  * Starting an authorization is a plain form POST to a route handler, not a Server

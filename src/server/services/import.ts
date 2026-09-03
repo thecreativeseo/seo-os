@@ -9,12 +9,11 @@ import { CSV_PARSE_ERROR_MESSAGES, MAX_CSV_ROWS, parseCsv } from "@/lib/import/c
 import {
   detectFormat,
   IMPORT_SOURCE_LABELS,
-  mapIntent,
   mapRow,
   providerForSource,
   type NormalizedImportRow,
 } from "@/lib/import/formats";
-import { normalizeUrl } from "@/lib/url/normalize-url";
+import { persistMarketRows } from "@/server/services/market-data";
 
 /**
  * The import pipeline (docs/P2_SPEC.md §28).
@@ -400,130 +399,14 @@ export async function commitImport(
       ? await prisma.competitor.findMany({ where: { websiteId: context.website.id } })
       : [];
 
-  let keywordsCreated = 0;
-  let metricsWritten = 0;
-  let rankingsWritten = 0;
-  let competitorRowsWritten = 0;
-  let skipped = 0;
-
-  for (const row of mapped) {
-    const keyword = await upsertKeyword(context, row);
-    if (keyword.created) keywordsCreated += 1;
-
-    // A hand-written list contributes keyword identities and stops there: with no
-    // provider to attribute them to, its numbers have nowhere honest to live.
-    if (provider === null) continue;
-
-    const capturedAt = new Date(`${row.capturedAt ?? fallbackCapturedAt}T00:00:00.000Z`);
-
-    if (record.source.endsWith("_COMPETITORS")) {
-      const competitor = matchCompetitor(competitors, row.domain);
-
-      if (!competitor) {
-        // A row about a domain nobody added as a competitor is not silently
-        // adopted: competitors are a deliberate P0 list, not an import artefact.
-        skipped += 1;
-        continue;
-      }
-
-      await prisma.competitorKeywordSnapshot.upsert({
-        where: {
-          competitorId_keywordId_capturedAt_sourceProvider: {
-            competitorId: competitor.id,
-            keywordId: keyword.id,
-            capturedAt,
-            sourceProvider: provider,
-          },
-        },
-        update: { position: row.position, rankingUrl: row.landingUrl, sourceImportId: record.id },
-        create: {
-          websiteId: context.website.id,
-          competitorId: competitor.id,
-          keywordId: keyword.id,
-          capturedAt,
-          position: row.position,
-          rankingUrl: row.landingUrl,
-          sourceProvider: provider,
-          sourceImportId: record.id,
-        },
-      });
-
-      competitorRowsWritten += 1;
-      continue;
-    }
-
-    if (row.searchVolume !== null || row.keywordDifficulty !== null || row.cpc !== null) {
-      await prisma.keywordMetricsSnapshot.upsert({
-        where: {
-          keywordId_capturedAt_sourceProvider: {
-            keywordId: keyword.id,
-            capturedAt,
-            sourceProvider: provider,
-          },
-        },
-        update: {
-          searchVolume: row.searchVolume,
-          keywordDifficulty: row.keywordDifficulty,
-          cpc: row.cpc,
-          sourceImportId: record.id,
-        },
-        create: {
-          websiteId: context.website.id,
-          keywordId: keyword.id,
-          capturedAt,
-          // Null where the export said nothing. A zero would be a measurement
-          // nobody took.
-          searchVolume: row.searchVolume,
-          keywordDifficulty: row.keywordDifficulty,
-          cpc: row.cpc,
-          sourceProvider: provider,
-          sourceImportId: record.id,
-        },
-      });
-
-      metricsWritten += 1;
-    }
-
-    if (row.position !== null) {
-      const pageId = await resolvePageId(context, row.landingUrl);
-
-      await prisma.rankingSnapshot.upsert({
-        where: {
-          keywordId_capturedAt_sourceProvider: {
-            keywordId: keyword.id,
-            capturedAt,
-            sourceProvider: provider,
-          },
-        },
-        update: {
-          position: row.position,
-          previousPosition: row.previousPosition,
-          rankingUrl: row.landingUrl,
-          rankingType: row.rankingType,
-          pageId,
-          sourceImportId: record.id,
-        },
-        create: {
-          websiteId: context.website.id,
-          keywordId: keyword.id,
-          // Null when the ranking URL is not in our Page inventory, and the raw
-          // URL is kept. That null is information: Google is ranking something we
-          // do not know about.
-          pageId,
-          capturedAt,
-          position: row.position,
-          previousPosition: row.previousPosition,
-          rankingUrl: row.landingUrl,
-          rankingType: row.rankingType,
-          serpFeaturesJson: row.serpFeatures.length > 0 ? row.serpFeatures : undefined,
-          sourceProvider: provider,
-          sourceImportId: record.id,
-        },
-      });
-
-      rankingsWritten += 1;
-    }
-  }
+  const { keywordsCreated, metricsWritten, rankingsWritten, competitorRowsWritten, skipped } =
+    await persistMarketRows(context, mapped, {
+      provider,
+      attribution: { kind: "import", importId: record.id },
+      fallbackCapturedAt,
+      competitors,
+      mode: record.source.endsWith("_COMPETITORS") ? "competitors" : "keywords",
+    });
 
   const committed = await prisma.$transaction(async (tx) => {
     const updated = await tx.import.update({
@@ -560,103 +443,6 @@ export async function commitImport(
     competitorRowsWritten,
     skipped,
   };
-}
-
-async function upsertKeyword(
-  context: TenantContext,
-  row: NormalizedImportRow,
-): Promise<{ id: string; created: boolean }> {
-  const language = (context.website.primaryLanguage ?? "en").toLowerCase();
-  const market = (context.website.primaryMarket ?? "PH").toUpperCase();
-  const locale = `${language}-${market}`;
-
-  const identity = {
-    websiteId: context.website.id,
-    normalizedKeyword: row.normalizedKeyword,
-    locale,
-    language,
-    market,
-  };
-
-  const existing = await prisma.keyword.findUnique({
-    where: { websiteId_normalizedKeyword_locale_language_market: identity },
-  });
-
-  if (existing) {
-    const intent = mapIntent(row.intent);
-
-    await prisma.keyword.update({
-      where: { id: existing.id },
-      data: {
-        lastSeenAt: new Date(),
-        // An intent a person set is never overwritten by an import: their
-        // judgement is the more expensive of the two to reproduce.
-        ...(existing.intentProvenance === "USER_PROVIDED" || intent === "UNKNOWN"
-          ? {}
-          : {
-              intent,
-              intentProvenance: "PROVIDER_PROVIDED",
-            }),
-      },
-    });
-
-    return { id: existing.id, created: false };
-  }
-
-  const intent = mapIntent(row.intent);
-
-  const created = await prisma.keyword.create({
-    data: {
-      ...identity,
-      keyword: row.keyword,
-      intent,
-      intentProvenance: intent === "UNKNOWN" ? "UNKNOWN" : "PROVIDER_PROVIDED",
-    },
-  });
-
-  return { id: created.id, created: true };
-}
-
-/**
- * Maps a ranking URL onto a Page we already know about.
- *
- * Deliberately does not create one. A Page is our inventory of this website; a
- * ranking URL is a third party's claim about what Google showed. Creating pages
- * from the second would let an import invent inventory.
- */
-async function resolvePageId(
-  context: TenantContext,
-  landingUrl: string | null,
-): Promise<string | null> {
-  if (!landingUrl) return null;
-
-  const normalized = normalizeUrl(landingUrl, context.website.normalizedDomain);
-  if (!normalized.ok) return null;
-
-  const page = await prisma.page.findFirst({
-    where: { websiteId: context.website.id, normalizedUrl: normalized.value.normalized },
-    select: { id: true },
-  });
-
-  return page?.id ?? null;
-}
-
-function matchCompetitor(
-  competitors: { id: string; normalizedDomain: string | null; domain: string | null }[],
-  domain: string | null,
-): { id: string } | null {
-  if (!domain) return null;
-
-  const candidate = domain.trim().toLowerCase().replace(/^www\./, "");
-
-  return (
-    competitors.find((competitor) => {
-      const known = (competitor.normalizedDomain ?? competitor.domain ?? "")
-        .toLowerCase()
-        .replace(/^www\./, "");
-      return known !== "" && known === candidate;
-    }) ?? null
-  );
 }
 
 async function requireImport(context: TenantContext, importId: string): Promise<Import> {

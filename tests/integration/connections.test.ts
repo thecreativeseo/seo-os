@@ -99,14 +99,16 @@ describe("provider registry", () => {
 
     const byProvider = new Map(cards.map((card) => [card.provider, card]));
 
-    // The two that actually connect say so plainly.
+    // The ones that actually connect say so plainly: the two Google providers by
+    // OAuth, Semrush by API key.
     expect(byProvider.get("GOOGLE_SEARCH_CONSOLE")?.availability).toBe("Available");
     expect(byProvider.get("GOOGLE_ANALYTICS")?.availability).toBe("Available");
+    expect(byProvider.get("SEMRUSH")?.availability).toBe("Available");
 
     // And nothing else does. This is the assertion that matters: the page offers
-    // a connect button for exactly these two, so any other card reading
-    // "Available" would be promising an action that is not on the screen.
-    const connectable = new Set(["GOOGLE_SEARCH_CONSOLE", "GOOGLE_ANALYTICS"]);
+    // a connect control for exactly these, so any other card reading "Available"
+    // would be promising an action that is not on the screen.
+    const connectable = new Set(["GOOGLE_SEARCH_CONSOLE", "GOOGLE_ANALYTICS", "SEMRUSH"]);
 
     for (const card of cards) {
       if (connectable.has(card.provider)) continue;
