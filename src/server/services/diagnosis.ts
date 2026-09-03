@@ -9,8 +9,9 @@ import {
   sealPackage,
   type RetrievalManifest,
 } from "@/server/services/evidence-assembler";
-import { resolveEvidenceId } from "@/server/services/evidence";
-import { parseEvidenceId } from "@/lib/evidence/id";
+import { validateCitations, type CitationAudit } from "@/server/services/citations";
+import { persistRecommendations, rulesInPackage } from "@/server/services/recommendation";
+import type { Evidence } from "@/lib/evidence/types";
 import {
   PAGE_DIAGNOSIS_SCHEMA_NAME,
   pageDiagnosisSchema,
@@ -25,7 +26,10 @@ import type {
   DiagnosisRequest,
   DiagnosticCategory,
   FindingVerdict,
+  Recommendation,
 } from "@/generated/prisma/client";
+
+export type { CitationAudit } from "@/server/services/citations";
 
 /**
  * DiagnosisService (docs/P3_SPEC.md §14–§20, §26, §27, §38).
@@ -46,8 +50,9 @@ import type {
  * `downgradeReason` make the repair visible, so a model that needed correcting
  * can be weighed as one.
  *
- * What this service does not do, in this phase: recommend anything, approve
- * anything, or execute anything (§15). It assesses, and it stops.
+ * Recommendations are written in the same transaction, each held to §23 by the
+ * recommendation service. What this service still does not do: approve anything
+ * or execute anything (§15). It assesses and proposes, and it stops.
  */
 
 export class DiagnosisError extends Error {
@@ -60,32 +65,13 @@ export class DiagnosisError extends Error {
   }
 }
 
-/**
- * What happened to the IDs the model cited.
- *
- * Kept as separate buckets rather than a count, because they mean different
- * things when something has gone wrong. An unparseable string suggests a model
- * improvising; a well-formed ID that was never in the package suggests one
- * reaching past what it was shown; an in-package ID that no longer resolves
- * means a row was deleted between assembly and now — nobody's fault, and it
- * still has to lower the finding that rested on it.
- */
-export type CitationAudit = {
-  accepted: number;
-  /** Not evidence IDs at all. */
-  malformed: string[];
-  /** Well-formed, but not among the records this package contained. */
-  outsidePackage: string[];
-  /** In the package, but the underlying row is no longer visible to this tenant. */
-  unresolved: string[];
-};
-
 export type DiagnosisOutcome =
   | {
       ok: true;
       request: DiagnosisRequest;
       diagnosis: Diagnosis;
       findings: DiagnosisFinding[];
+      recommendations: Recommendation[];
       citations: CitationAudit;
     }
   | {
@@ -201,6 +187,9 @@ export async function requestPageDiagnosis(
       request: completed,
       diagnosis: empty.diagnosis,
       findings: empty.findings,
+      // Nothing to reason from means nothing to propose. A recommendation built
+      // on an empty package would be advice about a page nobody has looked at.
+      recommendations: [],
       citations: { accepted: 0, malformed: [], outsidePackage: [], unresolved: [] },
     };
   }
@@ -241,6 +230,7 @@ export async function requestPageDiagnosis(
     packageId: assembled.package.id,
     aiRunId: result.run.id,
     output: result.value,
+    evidence: assembled.evidence,
     evidenceIds: new Set(assembled.evidence.map((record) => record.id)),
   });
 
@@ -255,6 +245,7 @@ export async function requestPageDiagnosis(
     request: completed,
     diagnosis: persisted.diagnosis,
     findings: persisted.findings,
+    recommendations: persisted.recommendations,
     citations: persisted.citations,
   };
 }
@@ -359,49 +350,6 @@ async function fail(
 // ---------------------------------------------------------------------------
 // Validating what the model said
 // ---------------------------------------------------------------------------
-
-/**
- * Decides which cited IDs are real.
- *
- * Two conditions, both required. The ID must be one of the records this package
- * actually contained, and it must still resolve to a row inside this tenant's
- * scope. Membership alone would treat the package as a capability; resolution
- * alone would let a finding cite something from this website that was never put
- * in front of the model, which is a quieter kind of fabrication.
- *
- * IDs failing the membership test are never looked up. Refusing them costs one
- * set lookup, and running a database query for an identifier a model invented is
- * not a habit worth acquiring.
- */
-async function validateCitations(
-  context: TenantContext,
-  raw: string[],
-  packageIds: Set<string>,
-  audit: CitationAudit,
-): Promise<string[]> {
-  const accepted: string[] = [];
-
-  for (const candidate of raw) {
-    if (!packageIds.has(candidate)) {
-      if (parseEvidenceId(candidate)) audit.outsidePackage.push(candidate);
-      else audit.malformed.push(candidate);
-      continue;
-    }
-
-    const evidence = await resolveEvidenceId(context, candidate);
-
-    if (!evidence) {
-      audit.unresolved.push(candidate);
-      continue;
-    }
-
-    accepted.push(candidate);
-    audit.accepted += 1;
-  }
-
-  // A model that cited the same record twice meant it once.
-  return [...new Set(accepted)];
-}
 
 const VERDICT_RANK: Record<FindingVerdict, number> = {
   CONFIRMED: 0,
@@ -527,13 +475,19 @@ async function persistDiagnosis(
   context: TenantContext,
   input: {
     request: DiagnosisRequest;
-    page: { id: string; url: string };
+    page: { id: string; url: string; path: string };
     packageId: string;
     aiRunId: string;
     output: PageDiagnosisOutput;
+    evidence: Evidence[];
     evidenceIds: Set<string>;
   },
-): Promise<{ diagnosis: Diagnosis; findings: DiagnosisFinding[]; citations: CitationAudit }> {
+): Promise<{
+  diagnosis: Diagnosis;
+  findings: DiagnosisFinding[];
+  recommendations: Recommendation[];
+  citations: CitationAudit;
+}> {
   const citations: CitationAudit = {
     accepted: 0,
     malformed: [],
@@ -658,6 +612,20 @@ async function persistDiagnosis(
       findings.push(row);
     }
 
+    // Proposals go in the same transaction as the findings they rest on: a
+    // diagnosis and its recommendations appear together or not at all. Every
+    // guardrail in §23 is applied inside persistRecommendations.
+    const recommended = await persistRecommendations(tx, context, {
+      diagnosisId: diagnosis.id,
+      aiRunId: input.aiRunId,
+      page: { id: input.page.id, path: input.page.path },
+      opportunityId: input.request.opportunityId,
+      proposals: input.output.recommendations,
+      packageIds: input.evidenceIds,
+      rules: rulesInPackage(input.evidence),
+      citations,
+    });
+
     const primary = leading
       ? (findings.find((row) => row.category === leading.category) ?? null)
       : null;
@@ -689,11 +657,15 @@ async function persistDiagnosis(
         citationsMalformed: citations.malformed.length,
         citationsOutsidePackage: citations.outsidePackage.length,
         citationsUnresolved: citations.unresolved.length,
+        recommendations: recommended.audit.created,
+        recommendationsNeedingEvidence: recommended.audit.needsEvidence,
+        recommendationsBlocked: recommended.audit.blocked,
+        forecastsRemoved: recommended.audit.forecastsRemoved,
         supersedes: previous?.id ?? null,
       },
     });
 
-    return { diagnosis: finalDiagnosis, findings, citations };
+    return { diagnosis: finalDiagnosis, findings, recommendations: recommended.rows, citations };
   });
 }
 

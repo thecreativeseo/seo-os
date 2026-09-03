@@ -17,11 +17,12 @@ import { z } from "zod";
  * model, made by editing this file and versioning the prompt — not a silent
  * widening of what a model may return.
  *
- * Versioned as "1", recorded on every AiRun. A stored answer is only readable if
- * we know which shape it was written in.
+ * Version 2 adds recommendations (§21–§23). Version 1 asked for findings only;
+ * runs recorded against it are read with the fields it had, which is why the
+ * recommendations array defaults to empty rather than being required.
  */
 
-export const PAGE_DIAGNOSIS_SCHEMA_VERSION = "1";
+export const PAGE_DIAGNOSIS_SCHEMA_VERSION = "2";
 export const PAGE_DIAGNOSIS_SCHEMA_NAME = "page_diagnosis";
 
 /** §16. Ordered as the spec lists them; INSUFFICIENT_EVIDENCE is a real answer. */
@@ -56,6 +57,30 @@ export const FINDING_VERDICTS = [
 
 export const CONFIDENCE_LEVELS = ["LOW", "MEDIUM", "HIGH", "UNKNOWN"] as const;
 
+/** §22. P3 proposes; P4 executes approved work. */
+export const RECOMMENDATION_TYPES = [
+  "CONTENT_REFRESH",
+  "CONTENT_CREATE",
+  "TITLE_META_UPDATE",
+  "INTENT_REALIGNMENT",
+  "KEYWORD_OWNERSHIP_FIX",
+  "INTERNAL_LINK_UPDATE",
+  "PAGE_CONSOLIDATION",
+  "PAGE_SPLIT",
+  "TECHNICAL_INVESTIGATION",
+  "TECHNICAL_FIX",
+  "SERP_REVIEW",
+  "CONVERSION_REVIEW",
+  "MONITOR_ONLY",
+  "REQUEST_MORE_EVIDENCE",
+  "OTHER",
+] as const;
+
+export const PRIORITY_LEVELS = ["LOW", "MEDIUM", "HIGH", "CRITICAL"] as const;
+
+/** Effort and risk share a scale (§21). UNKNOWN is honest, not a placeholder. */
+export const LEVELS = ["LOW", "MEDIUM", "HIGH", "UNKNOWN"] as const;
+
 /**
  * Evidence IDs as the model returns them.
  *
@@ -68,7 +93,7 @@ export const CONFIDENCE_LEVELS = ["LOW", "MEDIUM", "HIGH", "UNKNOWN"] as const;
 const evidenceId = z.string().min(1).max(200);
 
 /**
- * The cap on citations per finding.
+ * The cap on citations per finding or recommendation.
  *
  * Generous rather than tight — a finding that rests on thirty measurements is a
  * good finding — but present, because an unbounded array is an unbounded write.
@@ -95,6 +120,48 @@ export const findingSchema = z.object({
 
 export type FindingOutput = z.infer<typeof findingSchema>;
 
+/**
+ * One proposal (§21–§23).
+ *
+ * Every guardrail the spec lists is either a field here or a check the server
+ * runs on one: evidence is cited in `evidence_ids`, confidence/effort/risk are
+ * required, the expected effect is descriptive and is stripped of any number
+ * server-side, rule conflicts are declared rather than discovered, and missing
+ * evidence is named. None of it is trusted as returned; all of it is checked.
+ */
+export const recommendationSchema = z.object({
+  type: z.enum(RECOMMENDATION_TYPES),
+  title: z.string().min(1).max(200),
+  summary: z.string().min(1).max(2000),
+  rationale: z.string().min(1).max(4000),
+  priority: z.enum(PRIORITY_LEVELS),
+  confidence: z.enum(CONFIDENCE_LEVELS),
+  effort: z.enum(LEVELS),
+  risk: z.enum(LEVELS),
+  evidence_ids: evidenceIds,
+  /**
+   * Words only. This is the one field that speaks about the future, so any
+   * digit in it is a forecast, and the server removes it (§23).
+   */
+  expected_effect_description: z.string().max(1000).nullable().default(null),
+  /**
+   * Rule evidence IDs the model believes this proposal conflicts with. Declaring
+   * a conflict is how a BLOCKING rule stops a recommendation before a person
+   * ever sees it as approvable.
+   */
+  conflicting_rule_ids: evidenceIds.default([]),
+  /** §23: state when more evidence is required. */
+  missing_evidence: z.array(z.string().min(1).max(500)).max(10).default([]),
+});
+
+export type RecommendationOutput = z.infer<typeof recommendationSchema>;
+
+/**
+ * Proposals per diagnosis. A page with more than eight things wrong with it
+ * needs a smaller list, not a longer one.
+ */
+export const MAX_RECOMMENDATIONS = 8;
+
 export const pageDiagnosisSchema = z.object({
   executive_summary: z.string().min(1).max(4000),
   /**
@@ -104,6 +171,7 @@ export const pageDiagnosisSchema = z.object({
    */
   findings: z.array(findingSchema).max(DIAGNOSTIC_CATEGORIES.length),
   overall_confidence: z.enum(CONFIDENCE_LEVELS),
+  recommendations: z.array(recommendationSchema).max(MAX_RECOMMENDATIONS).default([]),
 });
 
 export type PageDiagnosisOutput = z.infer<typeof pageDiagnosisSchema>;

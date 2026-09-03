@@ -102,6 +102,24 @@ export async function assemblePageDiagnosisPackage(
   const candidates: string[] = [];
   const notes: string[] = [];
 
+  // --- Providers that are planned but not connected --------------------------
+  //
+  // Named as gaps so the model treats them as missing evidence rather than
+  // reasoning around their absence. Similarweb is the current case: competitor
+  // traffic, audience and market-share figures come from nowhere else, and a
+  // diagnosis that wants them must say it wants them. Adding the provider later
+  // is a new evidence category and a resolver, not a change to this model.
+  const marketIntelligence = await prisma.connection.findFirst({
+    where: { ...websiteScope(context), provider: "SIMILARWEB", status: "CONNECTED" },
+    select: { id: true },
+  });
+
+  if (!marketIntelligence) {
+    notes.push(
+      "No market intelligence provider is connected (Similarweb is planned). Competitor traffic, audience and market-share figures are unavailable and must be treated as missing evidence, not estimated.",
+    );
+  }
+
   // --- Governance: what the business said it is doing -----------------------
 
   const contextVersion = await prisma.businessContextVersion.findFirst({
@@ -112,7 +130,9 @@ export async function assemblePageDiagnosisPackage(
   if (contextVersion) {
     candidates.push(buildEvidenceId({ kind: "ctx", contextVersionId: contextVersion.id }));
   } else {
-    notes.push("No approved Business Context. The diagnosis has no statement of what this site is for.");
+    notes.push(
+      "No approved Business Context. The diagnosis has no statement of what this site is for.",
+    );
   }
 
   const goals = await prisma.businessGoal.findMany({
@@ -197,7 +217,9 @@ export async function assemblePageDiagnosisPackage(
     take: policy.budgets.KEYWORD_OWNERSHIP?.max ?? 15,
   });
 
-  candidates.push(...ownerships.map((own) => buildEvidenceId({ kind: "own", ownershipId: own.id })));
+  candidates.push(
+    ...ownerships.map((own) => buildEvidenceId({ kind: "own", ownershipId: own.id })),
+  );
 
   const keywordIds = ownerships.map((own) => own.keywordId);
 
@@ -315,7 +337,9 @@ export async function assemblePageDiagnosisPackage(
     orderBy: { detectedAt: "desc" },
     take: policy.budgets.TECHNICAL_FINDING?.max ?? 10,
   });
-  candidates.push(...signals.map((signal) => buildEvidenceId({ kind: "signal", signalId: signal.id })));
+  candidates.push(
+    ...signals.map((signal) => buildEvidenceId({ kind: "signal", signalId: signal.id })),
+  );
 
   const opportunities = await prisma.opportunity.findMany({
     where: { ...websiteScope(context), pageId: page.id, archivedAt: null },
@@ -632,8 +656,7 @@ export function renderPackage(evidence: Evidence[]): string {
 
   for (const reliability of [...groups.keys()].sort(
     (a, b) =>
-      reliabilityRank(a as Evidence["reliability"]) -
-      reliabilityRank(b as Evidence["reliability"]),
+      reliabilityRank(a as Evidence["reliability"]) - reliabilityRank(b as Evidence["reliability"]),
   )) {
     sections.push(`## ${reliability}`);
     for (const record of groups.get(reliability) ?? []) {

@@ -47,7 +47,7 @@ export const CONNECTION_PROVIDERS: readonly ProviderCard[] = [
     provider: "HUBSPOT",
     name: "HubSpot",
     purpose: "Leads + pipeline + campaigns",
-    availability: "Not yet available",
+    availability: "Planned",
   },
   {
     provider: "SEMRUSH",
@@ -71,18 +71,18 @@ export const CONNECTION_PROVIDERS: readonly ProviderCard[] = [
     provider: "SIMILARWEB",
     name: "Similarweb",
     purpose: "Market + competitor intelligence",
-    availability: "Not yet available",
+    availability: "Planned",
   },
   {
     provider: "SCREAMING_FROG",
     name: "Screaming Frog",
     purpose: "Technical crawl",
-    availability: "Not yet available",
+    availability: "Planned",
   },
   {
     provider: "WORDPRESS",
     name: "WordPress",
     purpose: "Content + publishing",
-    availability: "Not yet available",
+    availability: "Planned",
   },
 ] as const;

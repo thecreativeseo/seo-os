@@ -222,6 +222,7 @@ function answer(overrides: Partial<PageDiagnosisOutput> = {}): PageDiagnosisOutp
     executive_summary: "Clicks held steady against the previous period.",
     overall_confidence: "MEDIUM",
     findings: [],
+    recommendations: [],
     ...overrides,
   };
 }
@@ -296,7 +297,7 @@ describe("running a page diagnosis", () => {
     });
     expect(run.status).toBe("SUCCEEDED");
     expect(run.agentType).toBe("PAGE_DIAGNOSIS");
-    expect(run.promptTemplateVersion).toBe(1);
+    expect(run.promptTemplateVersion).toBe(2);
     expect(run.evidencePackageId).toBe(outcome.diagnosis.evidencePackageId);
 
     expect(outcome.findings).toHaveLength(1);
@@ -354,7 +355,9 @@ describe("running a page diagnosis", () => {
     expect(detail!.primaryFindingId).toBe(mismatch!.id);
 
     expect(mismatch!.evidence.filter((link) => link.relationship === "SUPPORTS")).toHaveLength(2);
-    expect(mismatch!.evidence.filter((link) => link.relationship === "CONTRADICTS")).toHaveLength(1);
+    expect(mismatch!.evidence.filter((link) => link.relationship === "CONTRADICTS")).toHaveLength(
+      1,
+    );
     expect(mismatch!.missingEvidenceJson).toEqual(["No SERP snapshot for this query."]);
 
     // UNKNOWN is a valid answer and is kept as one (§17).
@@ -388,10 +391,7 @@ describe("refusing evidence the model did not have", () => {
     if (!outcome.ok) return;
 
     expect(outcome.citations.accepted).toBe(1);
-    expect(outcome.citations.malformed).toEqual([
-      "the pricing page analytics",
-      "evidence-4",
-    ]);
+    expect(outcome.citations.malformed).toEqual(["the pricing page analytics", "evidence-4"]);
     expect(outcome.findings[0]?.supportingEvidenceCount).toBe(1);
 
     const links = await prisma.diagnosisFindingEvidence.findMany({
@@ -801,9 +801,9 @@ describe("tenant isolation", () => {
 
     useStubProvider({ responses: [answer()] });
 
-    await expect(
-      requestPageDiagnosis(attacker, { pageId: victim.pageId }),
-    ).rejects.toMatchObject({ code: "target_not_found" });
+    await expect(requestPageDiagnosis(attacker, { pageId: victim.pageId })).rejects.toMatchObject({
+      code: "target_not_found",
+    });
 
     // Refused before anything was written, so no request row names the victim's page.
     const leaked = await prisma.diagnosisRequest.findFirst({

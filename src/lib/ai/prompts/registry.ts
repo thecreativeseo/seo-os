@@ -45,6 +45,9 @@ export function hashInstructions(instructions: string): string {
  * answers — the prompt is what makes compliance likely, the validation is what
  * makes it true. A rule that only exists in the prompt is a rule that holds until
  * the first time it does not.
+ *
+ * Retired, not edited. Runs recorded against it must still be able to show the
+ * exact text they were given.
  */
 const PAGE_DIAGNOSIS_V1 = `You are the page diagnosis agent for SEO OS. You explain why a page is performing as it is, using only the evidence you are given.
 
@@ -84,6 +87,32 @@ CONFIDENCE
 
 State confidence honestly per finding and overall. High confidence means the evidence is direct, recent, and points one way. Low confidence means you are reading between the records. There is no cost to you for low confidence, and a large cost to the operator for false confidence: a person will decide what work to do based on what you say.`;
 
+/**
+ * Version 2: everything in version 1, plus recommendations (§21–§23).
+ *
+ * The additions are the guardrails the spec lists, stated to the model in the
+ * same terms the server will hold it to afterwards: evidence cited, effort and
+ * risk stated, no numbers in the expected effect, rule conflicts declared, and
+ * the plain fact that a recommendation is a proposal a person decides on.
+ */
+const PAGE_DIAGNOSIS_V2 = `${PAGE_DIAGNOSIS_V1}
+
+RECOMMENDATIONS
+
+After the findings, propose what to do about them — or propose nothing, if the evidence does not support action. Each recommendation must:
+
+Cite evidence. List the evidence IDs behind it in evidence_ids, copied exactly from the package. A recommendation with nothing cited is recorded as needing evidence, not as advice.
+
+State confidence, effort and risk honestly. Effort is the work required to do it. Risk is what could go wrong if the finding it rests on is mistaken.
+
+Describe the expected effect in words only. No numbers of any kind in expected_effect_description: no percentages, no traffic figures, no revenue, no timeframes. You have no basis for a forecast and the product does not make them.
+
+Respect the SEO rules, approved brand facts and business context in the package. If a proposal would conflict with a rule, list that rule's evidence ID in conflicting_rule_ids rather than quietly proposing it anyway. A BLOCKING rule stops a recommendation until a person explicitly overrides it.
+
+Say what is missing. If acting would need evidence the package does not contain, use the REQUEST_MORE_EVIDENCE type and name what is needed in missing_evidence.
+
+You propose. You do not approve, schedule, assign or execute, and nothing you write is an instruction to anyone. A person decides.`;
+
 export const PROMPTS: readonly PromptDefinition[] = [
   {
     name: "Page diagnosis",
@@ -92,6 +121,15 @@ export const PROMPTS: readonly PromptDefinition[] = [
     version: 1,
     systemInstructions: PAGE_DIAGNOSIS_V1,
     outputSchemaVersion: "1",
+    active: false,
+  },
+  {
+    name: "Page diagnosis with recommendations",
+    agentType: "PAGE_DIAGNOSIS",
+    taskType: "DIAGNOSE_PAGE",
+    version: 2,
+    systemInstructions: PAGE_DIAGNOSIS_V2,
+    outputSchemaVersion: "2",
     active: true,
   },
 ];

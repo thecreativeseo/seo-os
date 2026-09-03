@@ -105,7 +105,9 @@ describe("prompt registry", () => {
     const template = await activeTemplate("PAGE_DIAGNOSIS", "DIAGNOSE_PAGE");
 
     expect(template.status).toBe("ACTIVE");
-    expect(template.version).toBe(1);
+    // Whichever version the registry marks active; a literal here goes stale
+    // the moment a version is added, which is exactly when this test matters.
+    expect(template.version).toBe(PROMPTS.find((prompt) => prompt.active)!.version);
     expect(template.systemInstructions.length).toBeGreaterThan(500);
   });
 
@@ -131,10 +133,11 @@ describe("prompt registry", () => {
 
     await expect(syncPromptTemplates()).rejects.toBeInstanceOf(PromptTemplateError);
 
-    // Restored so the rest of the suite sees the real prompt.
+    // Restored from the row as it was fetched, so the rest of the suite sees
+    // the real prompt whichever version is active.
     await prisma.promptTemplate.update({
       where: { id: template.id },
-      data: { systemInstructions: PROMPTS[0]!.systemInstructions },
+      data: { systemInstructions: template.systemInstructions },
     });
   });
 
@@ -147,7 +150,7 @@ describe("prompt registry", () => {
 });
 
 describe("the page diagnosis prompt", () => {
-  const instructions = PROMPTS[0]!.systemInstructions;
+  const instructions = PROMPTS.find((prompt) => prompt.active)!.systemInstructions;
 
   it("forbids inventing numbers, forecasting, and uncited claims", () => {
     expect(instructions).toContain("Do not state a number that is not in the evidence");
@@ -180,7 +183,8 @@ describe("runAgent", () => {
     expect(result.run.status).toBe("SUCCEEDED");
     expect(result.run.provider).toBe("stub");
     expect(result.run.model).toBe("stub-1");
-    expect(result.run.promptTemplateVersion).toBe(1);
+    // Whatever version is active in the registry; v2 since recommendations landed.
+    expect(result.run.promptTemplateVersion).toBe(2);
     expect(result.run.inputTokens).toBe(900);
     expect(result.run.outputTokens).toBe(120);
     expect(result.run.finishedAt).not.toBeNull();
@@ -219,7 +223,10 @@ describe("runAgent", () => {
       generateStructured: async () => {
         throw new Error("boom");
       },
-      embed: async () => ({ ok: false, error: { code: "unsupported", message: "", retryable: false } }),
+      embed: async () => ({
+        ok: false,
+        error: { code: "unsupported", message: "", retryable: false },
+      }),
       healthCheck: async () => ({
         ok: false,
         provider: "exploding",

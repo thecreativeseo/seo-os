@@ -161,6 +161,10 @@ enum AuditAction {
   SCHEDULE
   DECLINE
   ASSIGN
+  // P3 human review (P3_SPEC §24). APPROVE and REJECT already exist; these are
+  // the other two verdicts a reviewer can reach.
+  MODIFY
+  REQUEST_EVIDENCE
 }
 
 // ---------------------------------------------------------------------------
