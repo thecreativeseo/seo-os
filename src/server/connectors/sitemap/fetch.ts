@@ -1,4 +1,5 @@
 import { normalizeUrl } from "@/lib/url/normalize-url";
+import { validateSameSiteUrl } from "@/lib/url/same-site";
 
 /**
  * Sitemap fetching and parsing (docs/P1_SPEC.md §12).
@@ -45,46 +46,24 @@ export class SitemapError extends Error {
   }
 }
 
-const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
-
 /**
  * Validates that a sitemap URL is safe to fetch for a given website.
  *
- * Exported so it can be tested directly: the guarantees here matter more than the
- * fetching, and they should be provable without a network.
+ * The guard itself now lives in lib/url/same-site, shared with P3's page content
+ * capture. It was written and tested here first; sharing it rather than copying
+ * it means there is one implementation of the rule instead of one correct
+ * implementation and one that was not updated.
+ *
+ * Still exported from here: the guarantees matter more than the fetching, and
+ * they should be provable without a network.
  */
 export function validateSitemapUrl(
   input: string,
   websiteHostname: string,
 ): { ok: true; url: string } | { ok: false; code: SitemapFetchError } {
-  let parsed: URL;
+  const result = validateSameSiteUrl(input, websiteHostname);
 
-  try {
-    parsed = new URL(input.trim());
-  } catch {
-    return { ok: false, code: "invalid_url" };
-  }
-
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return { ok: false, code: "unsupported_protocol" };
-  }
-
-  const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
-
-  if (host.startsWith("[") || IPV4.test(host)) {
-    return { ok: false, code: "ip_address_not_allowed" };
-  }
-
-  // The sitemap must belong to the website it is being added to. Without this a
-  // workspace could point the fetcher anywhere the server can reach.
-  const site = websiteHostname.toLowerCase().replace(/^www\./, "");
-  const candidate = host.replace(/^www\./, "");
-
-  if (candidate !== site && !candidate.endsWith(`.${site}`)) {
-    return { ok: false, code: "host_mismatch" };
-  }
-
-  return { ok: true, url: parsed.toString() };
+  return result.ok ? { ok: true, url: result.url } : { ok: false, code: result.code };
 }
 
 /** Extracts <loc> values. Works for both urlset and sitemapindex documents. */

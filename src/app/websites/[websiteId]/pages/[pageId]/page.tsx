@@ -12,6 +12,9 @@ import {
   formatPosition,
 } from "@/lib/metrics/format";
 import { MetricCard, SeverityBadge } from "@/components/metrics/primitives";
+import { CaptureControls } from "@/components/content/capture-controls";
+import { latestSnapshot } from "@/server/services/page-content";
+import { REQUIRED, hasRole } from "@/server/auth/roles";
 
 export const metadata = { title: "Page detail · SEO OS" };
 
@@ -40,6 +43,9 @@ export default async function PageDetailPage({
   const signals = (await listSignals(context, { limit: 200 })).filter(
     (signal) => signal.pageId === detail.page.id && signal.status !== "RESOLVED",
   );
+
+  const snapshot = await latestSnapshot(context, detail.page.id);
+  const canCapture = hasRole(context.membership.role, REQUIRED.WRITE);
 
   const maxClicks = Math.max(1, ...detail.series.map((point) => point.clicks));
 
@@ -220,6 +226,49 @@ export default async function PageDetailPage({
             ))}
           </ul>
         )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-sm font-medium">Page content</h2>
+
+        {snapshot ? (
+          <div className="border-border space-y-3 rounded-lg border p-4">
+            <div className="text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 text-xs">
+              <span>
+                Captured {snapshot.capturedAt.toLocaleDateString("en-GB")} by{" "}
+                {snapshot.source.replaceAll("_", " ").toLowerCase()}
+              </span>
+              <span className="tabular-nums">{formatCount(snapshot.wordCount)} words</span>
+            </div>
+            <dl className="space-y-2 text-sm">
+              <div>
+                <dt className="text-muted-foreground text-xs">Title</dt>
+                <dd>{snapshot.title ?? "No title found"}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground text-xs">Meta description</dt>
+                <dd>{snapshot.metaDescription ?? "No meta description found"}</dd>
+              </div>
+            </dl>
+            <p className="text-muted-foreground text-xs">
+              Stored as the page&rsquo;s own words. SEO OS makes no claim here about whether
+              they are good — that is a diagnosis, and a diagnosis cites this snapshot.
+            </p>
+          </div>
+        ) : (
+          <p className="border-border text-muted-foreground rounded-lg border border-dashed p-5 text-sm">
+            No content captured for this page. Without it, nothing can be said about what
+            the page says — only about how it performs.
+          </p>
+        )}
+
+        {canCapture ? (
+          <CaptureControls
+            websiteId={websiteId}
+            pageId={detail.page.id}
+            pageUrl={detail.page.url}
+          />
+        ) : null}
       </section>
 
       <section className="space-y-3">
