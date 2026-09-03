@@ -1,5 +1,6 @@
 "use server";
 
+import { MAX_ADDITIONAL_MARKETS, resolveMarketCode } from "@/lib/markets";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 
@@ -116,12 +117,47 @@ function readContent(formData: FormData) {
       .filter(Boolean);
   };
 
+  // Markets are codes. The select cannot submit a sentence, so an unresolvable
+  // value here is a crafted request or a stale form, and it is refused with a
+  // sentence rather than filed under a default: this field decides which
+  // country's search data the connectors ask for.
+  const market = (key: string): string | null => {
+    const raw = text(key);
+    if (raw === null) return null;
+    const code = resolveMarketCode(raw);
+    if (code === null) throw new BusinessContextError("Choose a market from the list.");
+    return code;
+  };
+
+  // A hand-typed list: names or codes, one per line. Resolved, de-duplicated,
+  // and relieved of the main market, which listing again says nothing. An entry
+  // nobody can resolve and a sixth market are refused, not trimmed.
+  const markets = (key: string, exclude: string | null): string[] => {
+    const codes: string[] = [];
+    for (const entry of list(key)) {
+      const code = resolveMarketCode(entry);
+      if (code === null) {
+        throw new BusinessContextError(`"${entry}" is not a market SEO OS recognises.`);
+      }
+      if (code !== exclude && !codes.includes(code)) codes.push(code);
+    }
+    if (codes.length > MAX_ADDITIONAL_MARKETS) {
+      throw new BusinessContextError(
+        `Choose at most ${MAX_ADDITIONAL_MARKETS} additional markets.`,
+      );
+    }
+    return codes;
+  };
+
+  const primaryMarket = market("primaryMarket");
+
   return {
     companySummary: text("companySummary"),
     productService: text("productService"),
     businessModel: text("businessModel"),
     primaryCustomer: text("primaryCustomer"),
-    primaryMarket: text("primaryMarket"),
+    primaryMarket,
+    additionalMarkets: markets("additionalMarkets", primaryMarket),
     primaryConversion: text("primaryConversion"),
     competitorSummary: text("competitorSummary"),
     brandVoice: text("brandVoice"),

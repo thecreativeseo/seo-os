@@ -1,5 +1,6 @@
 "use server";
 
+import { optionalMarketCode } from "@/lib/onboarding/schemas";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
@@ -181,9 +182,7 @@ export async function archiveBrandFactAction(
   formData: FormData,
 ): Promise<GovernanceState> {
   const factId = text(formData, "__factId");
-  return withWebsite(formData, REQUIRED.WRITE, (context) =>
-    archiveBrandFact(context, factId),
-  );
+  return withWebsite(formData, REQUIRED.WRITE, (context) => archiveBrandFact(context, factId));
 }
 
 /* ------------------------------------------------------------- competitors */
@@ -192,9 +191,7 @@ const competitorSchema = z.object({
   name: z.string().trim().min(1, "Enter a competitor name").max(200),
   domain: z.string().trim().max(253).optional(),
   notes: z.string().trim().max(500).optional(),
-  type: z
-    .enum(["DIRECT", "ADJACENT", "SEARCH", "PUBLISHER", "AGGREGATOR", "UNKNOWN"])
-    .optional(),
+  type: z.enum(["DIRECT", "ADJACENT", "SEARCH", "PUBLISHER", "AGGREGATOR", "UNKNOWN"]).optional(),
 });
 
 export async function addCompetitorAction(
@@ -306,7 +303,7 @@ const websiteSchema = z.object({
   name: z.string().trim().max(200).optional(),
   websiteType: z.string().trim().max(40).optional(),
   cmsType: z.string().trim().max(40).optional(),
-  primaryMarket: z.string().trim().max(120).optional(),
+  primaryMarket: optionalMarketCode,
   primaryLanguage: z.string().trim().max(60).optional(),
   timezone: z.string().trim().max(80).optional(),
 });

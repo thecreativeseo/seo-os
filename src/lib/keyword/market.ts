@@ -131,6 +131,30 @@ export function coerceLanguage(input: string | null | undefined): {
   return { value: DEFAULT_LANGUAGE, coerced: true };
 }
 
+/**
+ * The market code an input names, or null when it names none.
+ *
+ * The strict half of `coerceMarket`: everything it understands, none of what it
+ * assumes. A caller that must not guess — one choosing which country to ask a
+ * provider about — uses this and treats null as "ask the person".
+ */
+export function knownMarketCode(input: string | null | undefined): string | null {
+  const raw = (input ?? "").trim();
+
+  if (raw === "") return null;
+
+  const upper = raw.toUpperCase();
+
+  if (MARKET_CODE.test(upper)) return upper;
+
+  // "en-GB" names a market in its second part.
+  const parts = raw.split(/[-_]/);
+  const tail = parts.length > 1 ? parts[parts.length - 1]!.toUpperCase() : "";
+  if (MARKET_CODE.test(tail)) return tail;
+
+  return MARKET_NAMES[raw.toLowerCase()] ?? null;
+}
+
 export function coerceMarket(input: string | null | undefined): {
   value: string;
   coerced: boolean;
@@ -139,17 +163,10 @@ export function coerceMarket(input: string | null | undefined): {
 
   if (raw === "") return { value: DEFAULT_MARKET, coerced: false };
 
-  const upper = raw.toUpperCase();
+  const known = knownMarketCode(raw);
 
-  if (MARKET_CODE.test(upper)) return { value: upper, coerced: false };
-
-  // "en-GB" names a market in its second part.
-  const parts = raw.split(/[-_]/);
-  const tail = parts.length > 1 ? parts[parts.length - 1]!.toUpperCase() : "";
-  if (MARKET_CODE.test(tail)) return { value: tail, coerced: true };
-
-  const named = MARKET_NAMES[raw.toLowerCase()];
-  if (named) return { value: named, coerced: true };
+  // A bare code is taken as given; anything else that resolved was translated.
+  if (known !== null) return { value: known, coerced: known !== raw.toUpperCase() };
 
   return { value: DEFAULT_MARKET, coerced: true };
 }

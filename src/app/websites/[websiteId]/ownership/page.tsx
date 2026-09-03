@@ -1,16 +1,9 @@
+import { MARKETS, marketName, resolveMarketCode } from "@/lib/markets";
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { hasRole } from "@/server/auth/roles";
 import { getTechnicalContext } from "@/server/services/governance";
-import {
-  saveTechnicalContextAction,
-  saveWebsiteAction,
-} from "@/server/actions/governance";
-import {
-  ActionForm,
-  Choice,
-  Field,
-  PageHeader,
-} from "@/components/governance/primitives";
+import { saveTechnicalContextAction, saveWebsiteAction } from "@/server/actions/governance";
+import { ActionForm, Choice, Field, PageHeader } from "@/components/governance/primitives";
 import {
   TECHNICAL_HELP,
   TECHNICAL_PLACEHOLDERS,
@@ -26,6 +19,8 @@ const STAGING = [
   { value: "yes", label: "Yes" },
   { value: "no", label: "No" },
 ] as const;
+
+const MARKET_OPTIONS = MARKETS.map((market) => ({ value: market.code, label: market.name }));
 
 const WEBSITE_TYPES = [
   { value: "MARKETING_SITE", label: "Marketing site" },
@@ -127,11 +122,13 @@ export default async function OwnershipPage({
               includeBlank="Not set"
               defaultValue={website.cmsType ?? ""}
             />
-            <Field
+            <Choice
               name="primaryMarket"
               label="Primary market"
               help={WEBSITE_FIELD_HELP.primaryMarket}
-              defaultValue={website.primaryMarket ?? ""}
+              options={MARKET_OPTIONS}
+              includeBlank="Not set"
+              defaultValue={resolveMarketCode(website.primaryMarket) ?? ""}
             />
             <Field
               name="primaryLanguage"
@@ -154,7 +151,13 @@ export default async function OwnershipPage({
                 ["Name", website.name],
                 ["Type", website.websiteType],
                 ["CMS", website.cmsType],
-                ["Primary market", website.primaryMarket],
+                ["Primary market", marketName(website.primaryMarket)],
+                [
+                  "Additional markets",
+                  website.additionalMarkets.length > 0
+                    ? website.additionalMarkets.map((code) => marketName(code) ?? code).join(", ")
+                    : null,
+                ],
                 ["Primary language", website.primaryLanguage],
                 ["Timezone", website.timezone],
               ] as [string, string | null][]
@@ -191,9 +194,9 @@ export default async function OwnershipPage({
       <section className="space-y-3">
         <h2 className="text-sm font-medium">Technical context</h2>
         <p className="text-muted-foreground text-sm">
-          Operational facts your team knows. SEO OS makes no claim about crawl,
-          indexation, or technical health in this phase. The greyed-out text is one
-          site&rsquo;s example, shown end to end; nothing is filled in for you.
+          Operational facts your team knows. SEO OS makes no claim about crawl, indexation, or
+          technical health in this phase. The greyed-out text is one site&rsquo;s example, shown end
+          to end; nothing is filled in for you.
         </p>
         {canWrite ? (
           <ActionForm
@@ -233,8 +236,7 @@ export default async function OwnershipPage({
               options={STAGING}
               includeBlank="Not answered"
               defaultValue={
-                technical?.stagingAvailable === null ||
-                technical?.stagingAvailable === undefined
+                technical?.stagingAvailable === null || technical?.stagingAvailable === undefined
                   ? ""
                   : technical.stagingAvailable
                     ? "yes"
@@ -271,9 +273,7 @@ export default async function OwnershipPage({
               <dt className="text-muted-foreground">Staging environment</dt>
               <dd
                 className={
-                  technical?.stagingAvailable === null
-                    ? "text-muted-foreground/70 italic"
-                    : ""
+                  technical?.stagingAvailable === null ? "text-muted-foreground/70 italic" : ""
                 }
               >
                 {technical?.stagingAvailable === null || technical === null

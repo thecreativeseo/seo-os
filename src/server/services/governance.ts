@@ -1,9 +1,7 @@
+import { resolveMarketCode } from "@/lib/markets";
 import { prisma } from "@/server/db/prisma";
 import { recordAudit } from "@/server/audit/record";
-import {
-  NORMALIZE_ERROR_MESSAGES,
-  normalizeDomain,
-} from "@/lib/domain/normalize-domain";
+import { NORMALIZE_ERROR_MESSAGES, normalizeDomain } from "@/lib/domain/normalize-domain";
 import { requireTenantMember, websiteScope, type TenantContext } from "@/server/auth/guards";
 import type {
   BrandFact,
@@ -63,10 +61,7 @@ export async function listGoals(context: TenantContext): Promise<BusinessGoal[]>
   });
 }
 
-export async function createGoal(
-  context: TenantContext,
-  input: GoalInput,
-): Promise<BusinessGoal> {
+export async function createGoal(context: TenantContext, input: GoalInput): Promise<BusinessGoal> {
   const ownerUserId = await ensureOwner(context, input.ownerUserId);
 
   return prisma.$transaction(async (tx) => {
@@ -127,9 +122,7 @@ export async function updateGoal(
           : {}),
         ...(input.primaryMetric !== undefined ? { primaryMetric: input.primaryMetric } : {}),
         ...(input.baseline !== undefined ? { baseline: input.baseline || null } : {}),
-        ...(input.baselineSource !== undefined
-          ? { baselineSource: input.baselineSource }
-          : {}),
+        ...(input.baselineSource !== undefined ? { baselineSource: input.baselineSource } : {}),
         ...(input.status !== undefined ? { status: input.status } : {}),
         ownerUserId,
       },
@@ -147,10 +140,7 @@ export async function updateGoal(
   });
 }
 
-export async function retireGoal(
-  context: TenantContext,
-  goalId: string,
-): Promise<BusinessGoal> {
+export async function retireGoal(context: TenantContext, goalId: string): Promise<BusinessGoal> {
   const existing = await prisma.businessGoal.findFirst({
     where: { id: goalId, ...websiteScope(context) },
   });
@@ -265,10 +255,7 @@ export async function decideBrandFact(
   });
 }
 
-export async function archiveBrandFact(
-  context: TenantContext,
-  factId: string,
-): Promise<BrandFact> {
+export async function archiveBrandFact(context: TenantContext, factId: string): Promise<BrandFact> {
   const existing = await prisma.brandFact.findFirst({
     where: { id: factId, ...websiteScope(context) },
   });
@@ -296,9 +283,7 @@ export async function archiveBrandFact(
 }
 
 /** Only approved facts are canonical (P0_SPEC.md §14). */
-export async function listCanonicalBrandFacts(
-  context: TenantContext,
-): Promise<BrandFact[]> {
+export async function listCanonicalBrandFacts(context: TenantContext): Promise<BrandFact[]> {
   return prisma.brandFact.findMany({
     where: { ...websiteScope(context), approvalStatus: "APPROVED", archivedAt: null },
     orderBy: { factKey: "asc" },
@@ -439,10 +424,7 @@ export async function listSeoRules(context: TenantContext): Promise<SeoRule[]> {
   });
 }
 
-export async function createSeoRule(
-  context: TenantContext,
-  input: SeoRuleInput,
-): Promise<SeoRule> {
+export async function createSeoRule(context: TenantContext, input: SeoRuleInput): Promise<SeoRule> {
   return prisma.$transaction(async (tx) => {
     const rule = await tx.seoRule.create({
       data: {
@@ -623,10 +605,7 @@ export type WebsiteInput = {
  * uses. Changing it is audited with both values, because a later question about why
  * a site's data changed shape usually starts here.
  */
-export async function updateWebsite(
-  context: TenantContext,
-  input: WebsiteInput,
-): Promise<Website> {
+export async function updateWebsite(context: TenantContext, input: WebsiteInput): Promise<Website> {
   const result = normalizeDomain(input.domain);
 
   if (!result.ok) {
@@ -663,7 +642,9 @@ export async function updateWebsite(
         name: input.name || null,
         websiteType: (input.websiteType || null) as Website["websiteType"],
         cmsType: (input.cmsType || null) as Website["cmsType"],
-        primaryMarket: input.primaryMarket || null,
+        // Resolved here as well as in the action: a caller that reaches the
+        // service directly must not be able to store a name where a code belongs.
+        primaryMarket: resolveMarketCode(input.primaryMarket ?? null),
         primaryLanguage: input.primaryLanguage || null,
         timezone: input.timezone || null,
       },

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { prisma } from "@/server/db/prisma";
+import { contentFromOnboarding } from "@/server/services/business-context";
 import {
   OnboardingError,
   answersOf,
@@ -254,7 +255,9 @@ describe("repeatable list answers", () => {
       additionalMarkets: ["Singapore", "", "Malaysia"],
     }));
 
-    expect(answersOf(session).market?.additionalMarkets).toEqual(["Singapore", "Malaysia"]);
+    // Typed as names, stored as the codes keyword identity uses.
+    expect(answersOf(session).market?.primaryMarket).toBe("PH");
+    expect(answersOf(session).market?.additionalMarkets).toEqual(["SG", "MY"]);
   });
 
   it("leaves an empty list empty rather than inventing an entry", async () => {
@@ -463,5 +466,101 @@ describe("tenant safety", () => {
     ({ session: b } = await saveStep(contextB, b, "website", { domain: "shared.example.com" }));
 
     expect(a.websiteId).not.toBe(b.websiteId);
+  });
+});
+
+describe("markets as codes", () => {
+  it("stores a code whatever spelling was typed, and collapses repeats", async () => {
+    const context = await makeContext("mkcode");
+    let session = await getOrCreateSession(context);
+
+    ({ session } = await saveStep(context, session, "website", {
+      domain: "mkcode.example.com",
+      primaryMarket: "united kingdom",
+      additionalMarkets: ["Singapore", "MY", "my"],
+    }));
+
+    const website = await prisma.website.findUniqueOrThrow({
+      where: { id: session.websiteId! },
+    });
+
+    expect(website.primaryMarket).toBe("GB");
+    // "MY" and "my" are one market; a repeated pick is a slip, not a claim.
+    expect(website.additionalMarkets).toEqual(["SG", "MY"]);
+  });
+
+  it("refuses a sixth additional market", async () => {
+    const context = await makeContext("mkmax");
+    let session = await getOrCreateSession(context);
+    ({ session } = await saveStep(context, session, "website", { domain: "mkmax.example.com" }));
+
+    await expect(
+      saveStep(context, session, "market", {
+        primaryMarket: "PH",
+        additionalMarkets: ["SG", "MY", "ID", "TH", "VN", "AU"],
+      }),
+    ).rejects.toBeInstanceOf(OnboardingError);
+  });
+
+  it("refuses the main market listed as an additional one", async () => {
+    const context = await makeContext("mkdup");
+    let session = await getOrCreateSession(context);
+    ({ session } = await saveStep(context, session, "website", { domain: "mkdup.example.com" }));
+
+    await expect(
+      saveStep(context, session, "market", {
+        primaryMarket: "Philippines",
+        additionalMarkets: ["SG", "PH"],
+      }),
+    ).rejects.toBeInstanceOf(OnboardingError);
+  });
+
+  it("refuses a market nobody can resolve rather than filing it under a default", async () => {
+    const context = await makeContext("mkbad");
+    let session = await getOrCreateSession(context);
+    ({ session } = await saveStep(context, session, "website", { domain: "mkbad.example.com" }));
+
+    // This field decides which country's data the connectors are billed for.
+    // A default here would be data about the wrong place.
+    await expect(
+      saveStep(context, session, "market", { primaryMarket: "Somewhere nice" }),
+    ).rejects.toBeInstanceOf(OnboardingError);
+
+    await expect(
+      saveStep(context, session, "market", {
+        primaryMarket: "PH",
+        additionalMarkets: ["Narnia"],
+      }),
+    ).rejects.toBeInstanceOf(OnboardingError);
+  });
+
+  it("carries both markets into the business context draft", async () => {
+    const context = await makeContext("mkctx");
+    let session = await getOrCreateSession(context);
+    ({ session } = await saveStep(context, session, "website", { domain: "mkctx.example.com" }));
+    ({ session } = await saveStep(context, session, "market", {
+      primaryMarket: "Philippines",
+      additionalMarkets: ["SG", "MY"],
+    }));
+
+    const content = contentFromOnboarding(answersOf(session));
+
+    expect(content.primaryMarket).toBe("PH");
+    expect(content.additionalMarkets).toEqual(["SG", "MY"]);
+  });
+
+  it("falls back to the website step's markets until the market step is answered", async () => {
+    const context = await makeContext("mkfall");
+    let session = await getOrCreateSession(context);
+    ({ session } = await saveStep(context, session, "website", {
+      domain: "mkfall.example.com",
+      primaryMarket: "GB",
+      additionalMarkets: ["IE"],
+    }));
+
+    const content = contentFromOnboarding(answersOf(session));
+
+    expect(content.primaryMarket).toBe("GB");
+    expect(content.additionalMarkets).toEqual(["IE"]);
   });
 });

@@ -1,4 +1,5 @@
 import type { NormalizedImportRow } from "@/lib/import/formats";
+import { resolveMarketCode } from "@/lib/markets";
 
 /**
  * Ahrefs API v3 (docs/P2_SPEC.md §7 LIVE API MODE, second provider).
@@ -268,9 +269,7 @@ export function parseKeywords(payload: unknown): {
   }
 
   const missingFields =
-    rows.length === 0
-      ? []
-      : SELECT_FIELDS.filter((field) => !seenFields.has(field));
+    rows.length === 0 ? [] : SELECT_FIELDS.filter((field) => !seenFields.has(field));
 
   return { rows, malformed, missingFields };
 }
@@ -332,6 +331,6 @@ function stringList(value: unknown): string[] {
  * Null with no market set, so the caller refuses rather than defaulting to one.
  */
 export function countryForMarket(market: string | null): string | null {
-  const trimmed = market?.trim().toLowerCase();
-  return trimmed ? trimmed : null;
+  const code = resolveMarketCode(market);
+  return code === null ? null : code.toLowerCase();
 }

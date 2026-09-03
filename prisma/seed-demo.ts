@@ -42,7 +42,7 @@ const WEBSITE = {
   normalizedDomain: "northwind-analytics.com",
   websiteType: "SAAS_PRODUCT" as const,
   cmsType: "WEBFLOW" as const,
-  primaryMarket: "United Kingdom",
+  primaryMarket: "GB",
   primaryLanguage: "English",
   timezone: "Europe/London",
 };
@@ -145,7 +145,8 @@ async function main(): Promise<void> {
       primaryCustomer:
         "Subscription software companies between 20 and 200 staff, in the UK and Ireland, that already have a product team but no dedicated data function.",
       buyerRoles: ["Head of Product", "Product Analyst", "VP Engineering"],
-      primaryMarket: "United Kingdom",
+      primaryMarket: "GB",
+      additionalMarkets: ["IE"],
       languages: ["English"],
       primaryConversion: "Start a trial",
       secondaryConversions: ["Book a demo", "Subscribe to the newsletter"],

@@ -53,17 +53,16 @@ function body(keywords: unknown[]): string {
 }
 
 /** A fetch that answers with a body, recording url and headers. */
-function stubFetch(
-  responses: (string | { status: number; body: string })[],
-): { impl: typeof fetch; calls: { url: string; headers: Record<string, string> }[] } {
+function stubFetch(responses: (string | { status: number; body: string })[]): {
+  impl: typeof fetch;
+  calls: { url: string; headers: Record<string, string> }[];
+} {
   const calls: { url: string; headers: Record<string, string> }[] = [];
   const queue = [...responses];
 
   const impl = (async (input: URL | RequestInfo, init?: RequestInit) => {
     const headers: Record<string, string> = {};
-    for (const [name, value] of Object.entries(
-      (init?.headers ?? {}) as Record<string, string>,
-    )) {
+    for (const [name, value] of Object.entries((init?.headers ?? {}) as Record<string, string>)) {
       headers[name.toLowerCase()] = value;
     }
 
@@ -408,7 +407,10 @@ describe("running the sync", () => {
     const connection = await connectApiKey(context, "AHREFS", KEY);
 
     const { impl } = stubFetch([
-      body([keyword({ keyword: "seo audit" }), keyword({ keyword: "seo tools", best_position: 7 })]),
+      body([
+        keyword({ keyword: "seo audit" }),
+        keyword({ keyword: "seo tools", best_position: 7 }),
+      ]),
     ]);
 
     const outcome = await runAhrefsSync(context, { fetchImpl: impl });
@@ -575,9 +577,7 @@ describe("two providers describing the same keyword", () => {
     // declaration order, and AHREFS was appended to ConnectionProvider after
     // SEMRUSH, so "alphabetical" is not what an ORDER BY would give.
     expect(rankings).toHaveLength(2);
-    expect(new Set(rankings.map((r) => r.sourceProvider))).toEqual(
-      new Set(["AHREFS", "SEMRUSH"]),
-    );
+    expect(new Set(rankings.map((r) => r.sourceProvider))).toEqual(new Set(["AHREFS", "SEMRUSH"]));
     expect(Number(rankings.find((r) => r.sourceProvider === "AHREFS")?.position)).toBe(6);
     expect(Number(rankings.find((r) => r.sourceProvider === "SEMRUSH")?.position)).toBe(4);
 
@@ -642,5 +642,17 @@ describe("tenant isolation", () => {
     for (const credential of credentials) {
       expect(credential.encryptedPayload).not.toContain("only");
     }
+  });
+});
+
+describe("resolving a stored market name", () => {
+  it("maps a name the way keyword identity does", () => {
+    expect(countryForMarket("United Kingdom")).toBe("gb");
+    expect(countryForMarket("Philippines")).toBe("ph");
+  });
+
+  it("refuses a sentence rather than sending it as a country", () => {
+    expect(countryForMarket("initially targeting the UK and United States")).toBeNull();
+    expect(countryForMarket("XX")).toBeNull();
   });
 });

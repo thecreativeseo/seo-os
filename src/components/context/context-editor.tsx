@@ -1,11 +1,9 @@
 "use client";
 
+import { MARKETS, MAX_ADDITIONAL_MARKETS, marketName, resolveMarketCode } from "@/lib/markets";
 import { useActionState, useRef, useState } from "react";
 
-import {
-  saveContextDraftAction,
-  type ContextActionState,
-} from "@/server/actions/business-context";
+import { saveContextDraftAction, type ContextActionState } from "@/server/actions/business-context";
 import { FIELD_HELP } from "@/components/context/field-help";
 import { FieldHelp } from "@/components/ui/field-help";
 import type { BusinessContextVersion } from "@/generated/prisma/client";
@@ -33,7 +31,6 @@ const TEXT_FIELDS = [
   ["productService", "Product / service", true],
   ["businessModel", "Business model", false],
   ["primaryCustomer", "Primary customer", true],
-  ["primaryMarket", "Primary market", false],
   ["primaryConversion", "Primary conversion", false],
   ["competitorSummary", "Competitor summary", true],
   ["brandVoice", "Brand voice", true],
@@ -41,6 +38,7 @@ const TEXT_FIELDS = [
 
 const LIST_FIELDS = [
   ["buyerRoles", "Buyer roles"],
+  ["additionalMarkets", "Additional markets"],
   ["languages", "Languages"],
   ["secondaryConversions", "Secondary conversions"],
   ["businessPriorities", "Business priorities"],
@@ -86,12 +84,49 @@ export function ContextEditor({
           />
         ))}
 
+        {/* A market is a code chosen from the list rather than typed: keyword
+            identity and the data connectors both key off it. A version that
+            predates this rule may hold text the list cannot show; saving then
+            asks for a choice rather than carrying the text forward. */}
+        <div className="space-y-1.5">
+          <label htmlFor="ctx-primaryMarket" className="block text-sm font-medium">
+            Primary market
+          </label>
+          <select
+            id="ctx-primaryMarket"
+            name="primaryMarket"
+            defaultValue={resolveMarketCode(version.primaryMarket) ?? ""}
+            className="border-border h-9 w-full rounded-md border px-3 text-sm"
+          >
+            <option value="">Not set</option>
+            {MARKETS.map((market) => (
+              <option key={market.code} value={market.code}>
+                {market.name}
+              </option>
+            ))}
+          </select>
+          {version.primaryMarket && resolveMarketCode(version.primaryMarket) === null ? (
+            <p className="text-muted-foreground text-xs">
+              Currently recorded as &ldquo;{version.primaryMarket}&rdquo;. Choose the country it
+              means.
+            </p>
+          ) : null}
+        </div>
+
         {LIST_FIELDS.map(([field, label]) => (
           <ListField
             key={field}
             name={field}
-            label={label}
-            defaultValue={((version[field] as string[] | null) ?? []).join("\n")}
+            label={
+              field === "additionalMarkets"
+                ? `${label} (up to ${MAX_ADDITIONAL_MARKETS}, one country per line)`
+                : label
+            }
+            defaultValue={((version[field] as string[] | null) ?? [])
+              .map((entry) =>
+                field === "additionalMarkets" ? (marketName(entry) ?? entry) : entry,
+              )
+              .join("\n")}
           />
         ))}
 
@@ -121,9 +156,7 @@ export function ContextEditor({
               Saved
             </span>
           ) : null}
-          {dirty ? (
-            <span className="text-muted-foreground text-xs">Unsaved changes</span>
-          ) : null}
+          {dirty ? <span className="text-muted-foreground text-xs">Unsaved changes</span> : null}
         </div>
 
         {saveState.error ? (
@@ -132,7 +165,6 @@ export function ContextEditor({
           </p>
         ) : null}
       </form>
-
     </div>
   );
 }

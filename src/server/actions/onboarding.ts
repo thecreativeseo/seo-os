@@ -6,12 +6,7 @@ import { requireUser } from "@/server/auth/session";
 import { requireWorkspaceAccess } from "@/server/auth/guards";
 import { prisma } from "@/server/db/prisma";
 import { REQUIRED } from "@/server/auth/roles";
-import {
-  OnboardingError,
-  currentStepOf,
-  saveDraft,
-  saveStep,
-} from "@/server/services/onboarding";
+import { OnboardingError, currentStepOf, saveDraft, saveStep } from "@/server/services/onboarding";
 import { isStepSlug, type OnboardingStepSlug } from "@/lib/onboarding/steps";
 
 export type StepFormState = {
@@ -54,12 +49,7 @@ export async function saveStepAction(
   let next: OnboardingStepSlug | null;
 
   try {
-    const result = await saveStep(
-      context,
-      session,
-      stepSlug,
-      parseFormData(stepSlug, formData),
-    );
+    const result = await saveStep(context, session, stepSlug, parseFormData(stepSlug, formData));
     next = result.next;
   } catch (error) {
     if (error instanceof OnboardingError) {
@@ -134,6 +124,7 @@ function parseFormData(step: OnboardingStepSlug, formData: FormData): unknown {
         websiteType: text("websiteType") || undefined,
         primaryLanguage: text("primaryLanguage"),
         primaryMarket: text("primaryMarket"),
+        additionalMarkets: list("additionalMarkets"),
         timezone: text("timezone"),
       };
     case "business":

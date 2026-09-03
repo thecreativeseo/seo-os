@@ -229,9 +229,7 @@ describe("brand facts", () => {
       value: "y",
     });
 
-    await expect(decideBrandFact(context, fact.id, "APPROVED")).rejects.toThrow(
-      /permission/i,
-    );
+    await expect(decideBrandFact(context, fact.id, "APPROVED")).rejects.toThrow(/permission/i);
     expect(await listCanonicalBrandFacts(context)).toHaveLength(0);
   });
 
@@ -260,9 +258,7 @@ describe("brand facts", () => {
       value: "B only",
     });
 
-    await expect(decideBrandFact(a, factB.id, "APPROVED")).rejects.toBeInstanceOf(
-      GovernanceError,
-    );
+    await expect(decideBrandFact(a, factB.id, "APPROVED")).rejects.toBeInstanceOf(GovernanceError);
     expect(await listBrandFacts(a)).toHaveLength(0);
   });
 });
@@ -312,9 +308,7 @@ describe("competitors", () => {
     const b = await makeContext("comp-b");
     const competitorB = await addCompetitor(b, { name: "B's rival" });
 
-    await expect(archiveCompetitor(a, competitorB.id)).rejects.toBeInstanceOf(
-      GovernanceError,
-    );
+    await expect(archiveCompetitor(a, competitorB.id)).rejects.toBeInstanceOf(GovernanceError);
   });
 });
 
@@ -354,9 +348,7 @@ describe("seo rules", () => {
       severity: "INFO",
     });
 
-    await expect(setSeoRuleActive(a, ruleB.id, false)).rejects.toBeInstanceOf(
-      GovernanceError,
-    );
+    await expect(setSeoRuleActive(a, ruleB.id, false)).rejects.toBeInstanceOf(GovernanceError);
   });
 });
 
@@ -450,6 +442,8 @@ describe("website details", () => {
     expect(updated.name).toBe("Renamed Site");
     expect(updated.websiteType).toBe("SAAS_PRODUCT");
     expect(updated.cmsType).toBe("WEBFLOW");
+    // Typed as a name, stored as the code keyword identity and the connectors use.
+    expect(updated.primaryMarket).toBe("GB");
     expect(updated.timezone).toBe("Europe/London");
   });
 
@@ -466,9 +460,7 @@ describe("website details", () => {
   it("rejects an invalid domain with a usable message", async () => {
     const context = await makeContext("webbad");
 
-    await expect(updateWebsite(context, { domain: "localhost" })).rejects.toThrow(
-      /full domain/i,
-    );
+    await expect(updateWebsite(context, { domain: "localhost" })).rejects.toThrow(/full domain/i);
   });
 
   it("rejects a domain already used in the same workspace", async () => {
@@ -626,9 +618,9 @@ describe("editing existing records", () => {
       severity: "INFO",
     });
 
-    await expect(
-      updateCompetitor(a, competitorB.id, { name: "hijacked" }),
-    ).rejects.toBeInstanceOf(GovernanceError);
+    await expect(updateCompetitor(a, competitorB.id, { name: "hijacked" })).rejects.toBeInstanceOf(
+      GovernanceError,
+    );
     await expect(
       updateSeoRule(a, ruleB.id, { category: "Legal", rule: "hijacked", severity: "INFO" }),
     ).rejects.toBeInstanceOf(GovernanceError);

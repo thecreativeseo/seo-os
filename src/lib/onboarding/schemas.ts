@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { normalizeDomain } from "@/lib/domain/normalize-domain";
 import type { OnboardingStepSlug } from "@/lib/onboarding/steps";
+import { MAX_ADDITIONAL_MARKETS, resolveMarketCode } from "@/lib/markets";
 
 /**
  * Per-step validation. Server-side, always (P0_SPEC.md §10).
@@ -30,34 +31,112 @@ const stringList = z
   .optional()
   .transform((value) => (value ?? []).map((entry) => entry.trim()).filter(Boolean));
 
-export const websiteStepSchema = z.object({
-  domain: z
-    .string()
-    .trim()
-    .min(1, "Enter a website domain")
-    .superRefine((value, ctx) => {
-      const result = normalizeDomain(value);
-      if (!result.ok) {
-        ctx.addIssue({ code: "custom", message: "Enter a valid domain, for example example.com" });
+/**
+ * A market, stored as an ISO 3166-1 alpha-2 code.
+ *
+ * Accepts a code or a name the coercion layer recognises — "GB", "gb", "United
+ * Kingdom" — and keeps the code. A draft saved before markets were a dropdown
+ * still validates. A value nobody can resolve is refused rather than filed under
+ * a default: this field decides which country's data the connectors ask for.
+ */
+const toMarketCode = (value: string, ctx: z.RefinementCtx): string => {
+  const code = resolveMarketCode(value);
+  if (code === null) {
+    ctx.addIssue({ code: "custom", message: "Choose a market from the list" });
+    return z.NEVER;
+  }
+  return code;
+};
+
+export const marketCode = z.string().trim().transform(toMarketCode);
+
+/** Blank means unknown, so it stays undefined rather than failing. */
+export const optionalMarketCode = z
+  .string()
+  .trim()
+  .transform((value, ctx) => (value.length === 0 ? undefined : toMarketCode(value, ctx)))
+  .optional();
+
+/**
+ * Up to MAX_ADDITIONAL_MARKETS distinct codes.
+ *
+ * Blanks are dropped and a repeated pick collapsed — those are slips, not
+ * claims. An unrecognised entry and a sixth market are refused, because both
+ * are things the form should have made impossible and the server must not
+ * quietly repair.
+ */
+export const additionalMarketsList = z
+  .array(z.string())
+  .optional()
+  .transform((values, ctx) => {
+    const codes: string[] = [];
+    for (const raw of values ?? []) {
+      if (raw.trim().length === 0) continue;
+      const code = resolveMarketCode(raw);
+      if (code === null) {
+        ctx.addIssue({ code: "custom", message: `"${raw}" is not a market SEO OS recognises` });
+        return z.NEVER;
       }
-    }),
-  name: optionalText(200),
-  websiteType: z
-    .enum([
-      "MARKETING_SITE",
-      "ECOMMERCE",
-      "SAAS_PRODUCT",
-      "PUBLISHER",
-      "MARKETPLACE",
-      "LOCAL_BUSINESS",
-      "OTHER",
-      "UNKNOWN",
-    ])
-    .optional(),
-  primaryLanguage: optionalText(50),
-  primaryMarket: optionalText(120),
-  timezone: optionalText(80),
-});
+      if (!codes.includes(code)) codes.push(code);
+    }
+    if (codes.length > MAX_ADDITIONAL_MARKETS) {
+      ctx.addIssue({
+        code: "custom",
+        message: `Choose at most ${MAX_ADDITIONAL_MARKETS} additional markets`,
+      });
+      return z.NEVER;
+    }
+    return codes;
+  });
+
+/** The main market is the main market; listing it again says nothing. */
+const noPrimaryInAdditional = (
+  value: { primaryMarket?: string; additionalMarkets?: string[] },
+  ctx: z.RefinementCtx,
+): void => {
+  if (value.primaryMarket && value.additionalMarkets?.includes(value.primaryMarket)) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["additionalMarkets"],
+      message: "Additional markets cannot include the main market",
+    });
+  }
+};
+
+export const websiteStepSchema = z
+  .object({
+    domain: z
+      .string()
+      .trim()
+      .min(1, "Enter a website domain")
+      .superRefine((value, ctx) => {
+        const result = normalizeDomain(value);
+        if (!result.ok) {
+          ctx.addIssue({
+            code: "custom",
+            message: "Enter a valid domain, for example example.com",
+          });
+        }
+      }),
+    name: optionalText(200),
+    websiteType: z
+      .enum([
+        "MARKETING_SITE",
+        "ECOMMERCE",
+        "SAAS_PRODUCT",
+        "PUBLISHER",
+        "MARKETPLACE",
+        "LOCAL_BUSINESS",
+        "OTHER",
+        "UNKNOWN",
+      ])
+      .optional(),
+    primaryLanguage: optionalText(50),
+    primaryMarket: optionalMarketCode,
+    additionalMarkets: additionalMarketsList,
+    timezone: optionalText(80),
+  })
+  .superRefine(noPrimaryInAdditional);
 
 export const businessStepSchema = z.object({
   productService: requiredText(),
@@ -75,11 +154,13 @@ export const conversionStepSchema = z.object({
   secondaryConversions: stringList,
 });
 
-export const marketStepSchema = z.object({
-  primaryMarket: requiredText(2, 120),
-  primaryLanguage: optionalText(50),
-  additionalMarkets: stringList,
-});
+export const marketStepSchema = z
+  .object({
+    primaryMarket: marketCode,
+    primaryLanguage: optionalText(50),
+    additionalMarkets: additionalMarketsList,
+  })
+  .superRefine(noPrimaryInAdditional);
 
 export const competitorsStepSchema = z.object({
   competitors: z

@@ -1,4 +1,5 @@
 import type { NormalizedImportRow } from "@/lib/import/formats";
+import { resolveMarketCode } from "@/lib/markets";
 
 /**
  * Semrush Analytics API v3 (docs/P2_SPEC.md §7 LIVE API MODE).
@@ -131,12 +132,7 @@ const COLUMN_ALIASES = {
   cpc: ["cpc"],
   landingUrl: ["url"],
   intent: ["keyword intents", "keyword intent", "intent", "intents"],
-  serpFeatures: [
-    "serp features by keyword",
-    "serp features",
-    "serp feature",
-    "serp_features",
-  ],
+  serpFeatures: ["serp features by keyword", "serp features", "serp feature", "serp_features"],
   capturedAt: ["timestamp", "date"],
 } as const;
 
@@ -254,10 +250,7 @@ export async function fetchOrganicPositions(
  * report rather than a failure — Semrush reports both through the same channel,
  * and conflating them would turn a domain with no rankings into a sync error.
  */
-async function request(
-  doFetch: typeof fetch,
-  query: Record<string, string>,
-): Promise<string> {
+async function request(doFetch: typeof fetch, query: Record<string, string>): Promise<string> {
   const url = new URL(ENDPOINT);
   for (const [name, value] of Object.entries(query)) {
     url.searchParams.set(name, value);
@@ -508,8 +501,10 @@ function date(raw: string): string | null {
  * volumes to a Philippine site.
  */
 export function databaseForMarket(market: string | null): string | null {
-  const trimmed = market?.trim().toLowerCase();
-  if (!trimmed) return null;
+  // Resolved first, so a record that still holds "United Kingdom" becomes "uk"
+  // and a sentence becomes null — never a lowercased sentence sent as a database.
+  const code = resolveMarketCode(market);
+  if (code === null) return null;
 
-  return trimmed === "gb" ? "uk" : trimmed;
+  return code === "GB" ? "uk" : code.toLowerCase();
 }

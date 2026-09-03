@@ -111,6 +111,7 @@ describe("draft creation", () => {
     expect(draft.brandVoice).toBeNull();
     expect(draft.competitorSummary).toBeNull();
     expect(draft.approvedClaims).toEqual([]);
+    expect(draft.additionalMarkets).toEqual([]);
   });
 
   it("records an audit event on creation", async () => {
@@ -161,9 +162,7 @@ describe("approval", () => {
     const draft = await upsertDraft(context, { productService: "x" });
     await approveDraft(context, draft.id);
 
-    await expect(approveDraft(context, draft.id)).rejects.toBeInstanceOf(
-      BusinessContextError,
-    );
+    await expect(approveDraft(context, draft.id)).rejects.toBeInstanceOf(BusinessContextError);
   });
 
   it("refuses a version belonging to another website", async () => {
@@ -258,7 +257,10 @@ describe("approved context is immutable", () => {
 
   it("keeps historical versions retrievable", async () => {
     const context = await makeContext("history");
-    const v1 = await approveDraft(context, (await upsertDraft(context, { productService: "One" })).id);
+    const v1 = await approveDraft(
+      context,
+      (await upsertDraft(context, { productService: "One" })).id,
+    );
     const v2draft = await createDraftFromApproved(context);
     await prisma.businessContextVersion.update({
       where: { id: v2draft.id },
@@ -287,9 +289,7 @@ describe("approved context is immutable", () => {
 
   it("refuses to start a draft when nothing is approved", async () => {
     const context = await makeContext("nodraft");
-    await expect(createDraftFromApproved(context)).rejects.toBeInstanceOf(
-      BusinessContextError,
-    );
+    await expect(createDraftFromApproved(context)).rejects.toBeInstanceOf(BusinessContextError);
   });
 });
 
@@ -325,9 +325,9 @@ describe("editing a draft", () => {
     const draft = await upsertDraft(context, { productService: "Final" });
     const approved = await approveDraft(context, draft.id);
 
-    await expect(
-      updateDraft(context, approved.id, { productService: "Tampered" }),
-    ).rejects.toThrow(/cannot be edited/i);
+    await expect(updateDraft(context, approved.id, { productService: "Tampered" })).rejects.toThrow(
+      /cannot be edited/i,
+    );
 
     const unchanged = await prisma.businessContextVersion.findUnique({
       where: { id: approved.id },
@@ -340,9 +340,9 @@ describe("editing a draft", () => {
     const b = await makeContext("edit-b");
     const draftB = await upsertDraft(b, { productService: "B only" });
 
-    await expect(
-      updateDraft(a, draftB.id, { productService: "hijacked" }),
-    ).rejects.toBeInstanceOf(BusinessContextError);
+    await expect(updateDraft(a, draftB.id, { productService: "hijacked" })).rejects.toBeInstanceOf(
+      BusinessContextError,
+    );
 
     const unchanged = await prisma.businessContextVersion.findUnique({
       where: { id: draftB.id },
@@ -400,9 +400,7 @@ describe("discarding a draft", () => {
       (await upsertDraft(context, { productService: "Approved" })).id,
     );
 
-    await expect(discardDraft(context, approved.id)).rejects.toThrow(
-      /cannot be discarded/i,
-    );
+    await expect(discardDraft(context, approved.id)).rejects.toThrow(/cannot be discarded/i);
     expect(await prisma.businessContextVersion.count({ where: { id: approved.id } })).toBe(1);
   });
 

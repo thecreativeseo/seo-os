@@ -1,5 +1,6 @@
 "use client";
 
+import { MARKETS, MAX_ADDITIONAL_MARKETS, marketName, resolveMarketCode } from "@/lib/markets";
 import Link from "next/link";
 import { useActionState, useRef, useState } from "react";
 
@@ -89,10 +90,7 @@ export function StepForm({
 
       <header className="flex items-baseline justify-between gap-4">
         <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
-        <span
-          aria-live="polite"
-          className="text-muted-foreground shrink-0 text-xs tabular-nums"
-        >
+        <span aria-live="polite" className="text-muted-foreground shrink-0 text-xs tabular-nums">
           {status === "saving" ? "Saving…" : status === "saved" ? "Saved" : ""}
         </span>
       </header>
@@ -268,6 +266,9 @@ function WebsiteStep({
     saved?.domain ?? website?.domain ?? fallback(undefined, draft, "domain"),
   );
   const preview = normalizeDomain(domain);
+  const [primaryMarket, setPrimaryMarket] = useState(
+    resolveMarketCode(fallback(saved?.primaryMarket, draft, "primaryMarket")) ?? "",
+  );
 
   return (
     <>
@@ -305,10 +306,22 @@ function WebsiteStep({
         label="Primary language"
         defaultValue={fallback(saved?.primaryLanguage, draft, "primaryLanguage")}
       />
-      <Text
+      <MarketSelect
         name="primaryMarket"
         label="Main market"
-        defaultValue={fallback(saved?.primaryMarket, draft, "primaryMarket")}
+        value={primaryMarket}
+        onChange={setPrimaryMarket}
+        hint="The country you are trying to win. Keyword data and the Semrush and Ahrefs connectors report on this market."
+      />
+      <MarketPicker
+        name="additionalMarkets"
+        label="Additional markets"
+        values={
+          saved?.additionalMarkets?.length
+            ? saved.additionalMarkets
+            : draftList(draft, "additionalMarkets")
+        }
+        exclude={primaryMarket}
       />
       <Text
         name="timezone"
@@ -406,6 +419,163 @@ function RepeatableList({
   );
 }
 
+/**
+ * One market, chosen from the list.
+ *
+ * Controlled rather than defaultValue'd because the additional-markets picker
+ * below it needs to know the current choice: the main market is kept out of
+ * that list. A value saved before markets were a dropdown ("Philippines") is
+ * resolved to its code on the way in, so an old draft still shows its answer.
+ */
+function MarketSelect({
+  name,
+  label,
+  value,
+  onChange,
+  required,
+  hint,
+}: {
+  name: string;
+  label: string;
+  value: string;
+  onChange: (code: string) => void;
+  required?: boolean;
+  hint?: string;
+}) {
+  const id = `field-${name}`;
+  const hintId = `${id}-hint`;
+
+  return (
+    <div className="space-y-1.5">
+      <label htmlFor={id} className="block text-sm font-medium">
+        {label}
+        {required ? " *" : null}
+      </label>
+      <select
+        id={id}
+        name={name}
+        required={required}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        aria-describedby={hint ? hintId : undefined}
+        className="border-border h-10 w-full rounded-md border px-3 text-sm"
+      >
+        <option value="">{required ? "Choose a country" : "Not sure yet"}</option>
+        {MARKETS.map((market) => (
+          <option key={market.code} value={market.code}>
+            {market.name}
+          </option>
+        ))}
+      </select>
+      {hint ? (
+        <p id={hintId} className="text-muted-foreground text-xs">
+          {hint}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Up to MAX_ADDITIONAL_MARKETS more, chosen one at a time.
+ *
+ * Chosen codes are submitted as hidden inputs under one name, which is the shape
+ * the action already reads with getAll. The main market is kept out of the
+ * options and out of the submission: listing it twice says nothing, and the
+ * server refuses it anyway.
+ *
+ * The form autosaves on input and change events. Adding goes through the
+ * select's own change event; removing is a button click, which fires neither,
+ * so an input event is dispatched by hand to keep the draft current.
+ */
+function MarketPicker({
+  name,
+  label,
+  values,
+  exclude,
+  hint,
+}: {
+  name: string;
+  label: string;
+  values: string[];
+  exclude?: string;
+  hint?: string;
+}) {
+  const [selected, setSelected] = useState<string[]>(() =>
+    values.map((value) => resolveMarketCode(value)).filter((code): code is string => code !== null),
+  );
+  const wrapper = useRef<HTMLDivElement>(null);
+  const chosen = selected.filter((code) => code !== exclude);
+  const full = chosen.length >= MAX_ADDITIONAL_MARKETS;
+  const selectId = `field-${name}-add`;
+
+  const touch = () => wrapper.current?.dispatchEvent(new Event("input", { bubbles: true }));
+
+  return (
+    <div ref={wrapper} className="space-y-2">
+      <p className="text-sm font-medium">{label}</p>
+
+      {chosen.map((code) => (
+        <input key={code} type="hidden" name={name} value={code} />
+      ))}
+
+      {chosen.length > 0 ? (
+        <ul className="flex flex-wrap gap-2" aria-label={label}>
+          {chosen.map((code) => (
+            <li
+              key={code}
+              className="border-border inline-flex items-center gap-1 rounded-md border px-2 py-1 text-sm"
+            >
+              {marketName(code)}
+              <button
+                type="button"
+                aria-label={`Remove ${marketName(code)}`}
+                onClick={() => {
+                  setSelected((current) => current.filter((entry) => entry !== code));
+                  touch();
+                }}
+                className="text-muted-foreground hover:text-foreground ml-1 px-1"
+              >
+                x
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      <label htmlFor={selectId} className="sr-only">
+        Add {label.toLowerCase()}
+      </label>
+      <select
+        id={selectId}
+        value=""
+        disabled={full}
+        onChange={(event) => {
+          const code = event.target.value;
+          if (!code) return;
+          setSelected((current) => (current.includes(code) ? current : [...current, code]));
+        }}
+        className="border-border h-10 w-full rounded-md border px-3 text-sm disabled:opacity-60"
+      >
+        <option value="">
+          {full ? `Maximum of ${MAX_ADDITIONAL_MARKETS} reached` : "Add a country..."}
+        </option>
+        {MARKETS.filter((market) => market.code !== exclude && !selected.includes(market.code)).map(
+          (market) => (
+            <option key={market.code} value={market.code}>
+              {market.name}
+            </option>
+          ),
+        )}
+      </select>
+      <p className="text-muted-foreground text-xs">
+        {hint ?? `Up to ${MAX_ADDITIONAL_MARKETS}.`} {chosen.length} of {MAX_ADDITIONAL_MARKETS}{" "}
+        chosen.
+      </p>
+    </div>
+  );
+}
+
 function CustomerStep({
   answers,
   draft,
@@ -476,37 +646,40 @@ function ConversionStep({ answers }: { answers: StepAnswers }) {
   );
 }
 
-function MarketStep({
-  answers,
-  draft,
-}: {
-  answers: StepAnswers;
-  draft: Record<string, unknown>;
-}) {
+function MarketStep({ answers, draft }: { answers: StepAnswers; draft: Record<string, unknown> }) {
   const saved = answers.market;
+  // The website step asks the same question first; its answer stands in until
+  // this step has one of its own.
+  const [primaryMarket, setPrimaryMarket] = useState(
+    resolveMarketCode(
+      fallback(saved?.primaryMarket ?? answers.website?.primaryMarket, draft, "primaryMarket"),
+    ) ?? "",
+  );
   const markets = saved?.additionalMarkets?.length
     ? saved.additionalMarkets
-    : draftList(draft, "additionalMarkets");
+    : answers.website?.additionalMarkets?.length
+      ? answers.website.additionalMarkets
+      : draftList(draft, "additionalMarkets");
 
   return (
     <>
-      <Text
+      <MarketSelect
         name="primaryMarket"
         label="Primary market"
         required
-        defaultValue={fallback(saved?.primaryMarket, draft, "primaryMarket")}
+        value={primaryMarket}
+        onChange={setPrimaryMarket}
       />
       <Text
         name="primaryLanguage"
         label="Primary language"
         defaultValue={fallback(saved?.primaryLanguage, draft, "primaryLanguage")}
       />
-      <RepeatableList
+      <MarketPicker
         name="additionalMarkets"
         label="Additional markets"
-        placeholder="Singapore"
         values={markets}
-        addLabel="Add another market"
+        exclude={primaryMarket}
       />
     </>
   );
@@ -553,8 +726,8 @@ function CompetitorsStep({ rows }: { rows: Row[] }) {
         Add another competitor
       </button>
       <p className="text-muted-foreground text-xs">
-        SEO OS does not classify competitors in this phase — everything you add is
-        recorded as provided by you.
+        SEO OS does not classify competitors in this phase — everything you add is recorded as
+        provided by you.
       </p>
     </div>
   );
@@ -611,8 +784,8 @@ function GoalsStep({ rows }: { rows: GoalRow[] }) {
         Add another goal
       </button>
       <p className="text-muted-foreground text-xs">
-        Baselines stay empty until real data is connected — SEO OS will not invent a
-        starting number.
+        Baselines stay empty until real data is connected — SEO OS will not invent a starting
+        number.
       </p>
     </div>
   );
@@ -647,12 +820,7 @@ function CmsStep({ answers }: { answers: StepAnswers }) {
   const saved = answers.cms;
   return (
     <>
-      <Select
-        name="cms"
-        label="CMS"
-        options={CMS_OPTIONS}
-        defaultValue={saved?.cms ?? "UNKNOWN"}
-      />
+      <Select name="cms" label="CMS" options={CMS_OPTIONS} defaultValue={saved?.cms ?? "UNKNOWN"} />
       <Text
         name="publicationProcess"
         label="Publication process"
@@ -672,8 +840,8 @@ function ConnectionsStep() {
   return (
     <div className="space-y-3">
       <p className="text-muted-foreground text-sm">
-        The systems SEO OS is built to operate with. You can connect them after
-        onboarding, from Data &amp; Publishing.
+        The systems SEO OS is built to operate with. You can connect them after onboarding, from
+        Data &amp; Publishing.
       </p>
       <ul className="divide-border border-border divide-y rounded-md border">
         {CONNECTION_PROVIDERS.map((provider) => (
@@ -682,9 +850,7 @@ function ConnectionsStep() {
               <p className="truncate text-sm font-medium">{provider.name}</p>
               <p className="text-muted-foreground truncate text-xs">{provider.purpose}</p>
             </div>
-            <span className="text-muted-foreground shrink-0 text-xs">
-              {provider.availability}
-            </span>
+            <span className="text-muted-foreground shrink-0 text-xs">{provider.availability}</span>
           </li>
         ))}
       </ul>
@@ -704,7 +870,19 @@ function ReviewStep({
     ["Product / service", answers.business?.productService ?? "Not provided"],
     ["Primary customer", answers.customer?.primaryCustomer ?? "Not provided"],
     ["Primary conversion", answers.conversion?.primaryConversion ?? "Not provided"],
-    ["Main market", answers.market?.primaryMarket ?? "Not provided"],
+    [
+      "Main market",
+      marketName(answers.market?.primaryMarket ?? answers.website?.primaryMarket) ?? "Not provided",
+    ],
+    [
+      "Additional markets",
+      (answers.market?.additionalMarkets?.length
+        ? answers.market.additionalMarkets
+        : (answers.website?.additionalMarkets ?? [])
+      )
+        .map((code) => marketName(code) ?? code)
+        .join(", ") || "Not provided",
+    ],
     [
       "SEO priorities",
       (answers["seo-priorities"]?.seoPriorities ?? []).join(", ") || "Not provided",
@@ -718,15 +896,12 @@ function ReviewStep({
         {rows.map(([label, value]) => (
           <div key={label} className="grid grid-cols-[10rem_1fr] gap-4 px-4 py-3 text-sm">
             <dt className="text-muted-foreground">{label}</dt>
-            <dd className={value === "Not provided" ? "text-muted-foreground" : ""}>
-              {value}
-            </dd>
+            <dd className={value === "Not provided" ? "text-muted-foreground" : ""}>{value}</dd>
           </div>
         ))}
       </dl>
       <p className="text-muted-foreground text-xs">
-        Anything left blank stays unknown. Approving this context arrives in the next
-        milestone.
+        Anything left blank stays unknown. Approving this context arrives in the next milestone.
       </p>
     </div>
   );

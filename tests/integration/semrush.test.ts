@@ -67,9 +67,10 @@ function row(overrides: Partial<Record<string, string>> = {}): string {
 }
 
 /** A fetch that answers with a body, and records what it was asked for. */
-function stubFetch(
-  responses: (string | { status: number; body: string })[],
-): { impl: typeof fetch; urls: string[] } {
+function stubFetch(responses: (string | { status: number; body: string })[]): {
+  impl: typeof fetch;
+  urls: string[];
+} {
   const urls: string[] = [];
   const queue = [...responses];
 
@@ -173,10 +174,7 @@ describe("parsing a Semrush response", () => {
   it("finds columns by name, so a reordered response is still read correctly", () => {
     // Same data, columns swapped. A positional parser would put the position
     // into the volume field and the numbers would look entirely plausible.
-    const reordered = [
-      "Search Volume;Keyword;Position",
-      "1300;seo audit;4",
-    ].join("\n");
+    const reordered = ["Search Volume;Keyword;Position", "1300;seo audit;4"].join("\n");
 
     const { rows } = parseCsv(reordered);
 
@@ -186,9 +184,7 @@ describe("parsing a Semrush response", () => {
   });
 
   it("reports a requested column that is absent rather than nulling it quietly", () => {
-    const { rows, missingColumns } = parseCsv(
-      ["Keyword;Position", "seo audit;4"].join("\n"),
-    );
+    const { rows, missingColumns } = parseCsv(["Keyword;Position", "seo audit;4"].join("\n"));
 
     expect(rows[0]?.keywordDifficulty).toBeNull();
     // The point: the sync can say "Semrush stopped sending difficulty" instead of
@@ -454,9 +450,11 @@ describe("running the sync", () => {
     const context = await makeTenant("sync");
     const connectionId = await connect(context);
 
-    const body = [HEADER, row({ keyword: "seo audit" }), row({ keyword: "seo tools", position: "7" })].join(
-      "\n",
-    );
+    const body = [
+      HEADER,
+      row({ keyword: "seo audit" }),
+      row({ keyword: "seo tools", position: "7" }),
+    ].join("\n");
     const { impl } = stubFetch([body]);
 
     const outcome = await runSemrushSync(context, { fetchImpl: impl, sleepImpl: noSleep });
@@ -707,5 +705,21 @@ describe("the shared write path", () => {
     });
     expect(ranking.pageId).toBeNull();
     expect(ranking.rankingUrl).toBe("https://example.com/never-crawled");
+  });
+});
+
+describe("resolving a stored market name", () => {
+  it("maps a name the way keyword identity does", () => {
+    // A website that onboarded as "United Kingdom" is filed under GB by the
+    // keyword layer; the connector must ask Semrush about the same place.
+    expect(databaseForMarket("United Kingdom")).toBe("uk");
+    expect(databaseForMarket("Philippines")).toBe("ph");
+  });
+
+  it("refuses a sentence rather than sending it as a database", () => {
+    // Lowercasing this and sending it would be an error at best, and at worst
+    // a silent fallback to somebody else's country.
+    expect(databaseForMarket("initially targeting the UK and United States")).toBeNull();
+    expect(databaseForMarket("XX")).toBeNull();
   });
 });

@@ -1,3 +1,4 @@
+import { marketName } from "@/lib/markets";
 import type { BusinessContextVersion } from "@/generated/prisma/client";
 
 /**
@@ -21,6 +22,7 @@ const TEXT_FIELDS: [keyof BusinessContextVersion, string][] = [
 
 const LIST_FIELDS: [keyof BusinessContextVersion, string][] = [
   ["buyerRoles", "Buyer roles"],
+  ["additionalMarkets", "Additional markets"],
   ["languages", "Languages"],
   ["secondaryConversions", "Secondary conversions"],
   ["businessPriorities", "Business priorities"],
@@ -37,19 +39,21 @@ export function ContextView({ version }: { version: BusinessContextVersion }) {
     <dl className="divide-border border-border divide-y rounded-lg border">
       {TEXT_FIELDS.map(([field, label]) => {
         const value = version[field];
+        // A market is stored as a code and read as a name. An older approved
+        // version may hold a sentence; marketName hands that back unchanged.
+        const shown =
+          field === "primaryMarket" && typeof value === "string" ? marketName(value) : value;
         return (
           <Row key={field} label={label}>
-            {typeof value === "string" && value.length > 0 ? (
-              value
-            ) : (
-              <NotProvided />
-            )}
+            {typeof shown === "string" && shown.length > 0 ? shown : <NotProvided />}
           </Row>
         );
       })}
       {LIST_FIELDS.map(([field, label]) => {
         const value = version[field];
-        const items = Array.isArray(value) ? (value as string[]) : [];
+        const raw = Array.isArray(value) ? (value as string[]) : [];
+        const items =
+          field === "additionalMarkets" ? raw.map((code) => marketName(code) ?? code) : raw;
         return (
           <Row key={field} label={label}>
             {items.length > 0 ? items.join(", ") : <NotProvided />}

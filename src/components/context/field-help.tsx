@@ -14,7 +14,9 @@ export const FIELD_HELP: Record<string, string> = {
   primaryCustomer:
     "Who actually buys. Describe the organisation or person, not the job title: “mid-market B2B SaaS companies in APAC”.",
   primaryMarket:
-    "The country or region you are trying to win. Where revenue should come from, not everywhere you happen to get traffic.",
+    "The country you are trying to win, chosen from the list. Where revenue should come from, not everywhere you happen to get traffic, and the country whose search data the connectors report.",
+  additionalMarkets:
+    "Other countries that matter, up to five. One per line, by name or code. They are recorded here; keyword data still follows the primary market.",
   primaryConversion:
     "The single action that matters most on this site. If two feel equal, pick the one closer to revenue and put the other under secondary.",
   competitorSummary:
@@ -23,18 +25,15 @@ export const FIELD_HELP: Record<string, string> = {
     "How the business sounds in writing — tone, formality, words you use and words you avoid.",
   buyerRoles:
     "Job titles involved in the buying decision, including people who influence it but do not sign. One per line.",
-  languages:
-    "Languages this website publishes in. One per line.",
+  languages: "Languages this website publishes in. One per line.",
   secondaryConversions:
     "Other actions worth tracking that are genuinely less important than the primary one. One per line.",
   businessPriorities:
     "What the business is trying to achieve this period beyond SEO — the goals SEO has to serve. One per line.",
-  seoPriorities:
-    "Where SEO effort should focus. One per line.",
+  seoPriorities: "Where SEO effort should focus. One per line.",
   differentiators:
     "Specific, checkable reasons a buyer picks you over an alternative. “Faster” is not a differentiator; “results in 90 days or we refund” is.",
-  priorityTopics:
-    "Subjects you want to be known for and will publish on. One per line.",
+  priorityTopics: "Subjects you want to be known for and will publish on. One per line.",
   avoidTopics:
     "Subjects not to publish about — off-strategy, sensitive, or legally constrained. One per line.",
   approvedClaims:

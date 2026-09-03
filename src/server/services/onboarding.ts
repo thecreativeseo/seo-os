@@ -77,9 +77,7 @@ function readAnswers(session: OnboardingSession): StepAnswers {
  * Returns the workspace's in-progress session, creating one if none exists.
  * Resumable by construction: the same workspace always returns the same session.
  */
-export async function getOrCreateSession(
-  context: WorkspaceContext,
-): Promise<OnboardingSession> {
+export async function getOrCreateSession(context: WorkspaceContext): Promise<OnboardingSession> {
   const existing = await prisma.onboardingSession.findFirst({
     where: {
       workspaceId: context.workspace.id,
@@ -247,10 +245,7 @@ async function commitWebsite(
   });
 
   if (clash) {
-    throw new OnboardingError(
-      `${normalized} is already set up in this workspace.`,
-      "domain",
-    );
+    throw new OnboardingError(`${normalized} is already set up in this workspace.`, "domain");
   }
 
   const data = {
@@ -260,6 +255,7 @@ async function commitWebsite(
     websiteType: (input.websiteType as WebsiteType | undefined) ?? null,
     primaryLanguage: input.primaryLanguage ?? null,
     primaryMarket: input.primaryMarket ?? null,
+    additionalMarkets: input.additionalMarkets ?? [],
     timezone: input.timezone ?? null,
   };
 
@@ -295,10 +291,7 @@ async function commitWebsite(
  * Replaces the competitor set for this website.
  * P0 does not classify them: type stays UNKNOWN and provenance stays USER_PROVIDED.
  */
-async function commitCompetitors(
-  websiteId: string,
-  input: CompetitorsStepData,
-): Promise<void> {
+async function commitCompetitors(websiteId: string, input: CompetitorsStepData): Promise<void> {
   await prisma.$transaction(async (tx) => {
     await tx.competitor.deleteMany({ where: { websiteId } });
 
@@ -327,11 +320,7 @@ async function commitCompetitors(
  * asks what the business wants, not what its numbers currently are, and inventing
  * a baseline would fabricate a business fact.
  */
-async function commitGoals(
-  websiteId: string,
-  userId: string,
-  input: GoalsStepData,
-): Promise<void> {
+async function commitGoals(websiteId: string, userId: string, input: GoalsStepData): Promise<void> {
   await prisma.$transaction(async (tx) => {
     await tx.businessGoal.deleteMany({ where: { websiteId, status: "DRAFT" } });
 
@@ -350,11 +339,7 @@ async function commitGoals(
   });
 }
 
-async function commitCms(
-  websiteId: string,
-  userId: string,
-  input: CmsStepData,
-): Promise<void> {
+async function commitCms(websiteId: string, userId: string, input: CmsStepData): Promise<void> {
   await prisma.website.update({
     where: { id: websiteId },
     data: { cmsType: input.cms },

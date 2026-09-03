@@ -2,11 +2,7 @@ import { prisma } from "@/server/db/prisma";
 import { redact } from "@/lib/redact";
 import type { StepAnswers } from "@/lib/onboarding/schemas";
 import type { TenantContext } from "@/server/auth/guards";
-import type {
-  BusinessContext,
-  BusinessContextVersion,
-  Prisma,
-} from "@/generated/prisma/client";
+import type { BusinessContext, BusinessContextVersion, Prisma } from "@/generated/prisma/client";
 
 /**
  * Business Context versioning (docs/P0_SPEC.md §13, CLAUDE.md "Business Context").
@@ -36,6 +32,7 @@ const CONTENT_FIELDS = [
   "primaryCustomer",
   "buyerRoles",
   "primaryMarket",
+  "additionalMarkets",
   "languages",
   "primaryConversion",
   "secondaryConversions",
@@ -50,9 +47,7 @@ const CONTENT_FIELDS = [
   "prohibitedClaims",
 ] as const;
 
-export type ContextContent = Partial<
-  Pick<BusinessContextVersion, (typeof CONTENT_FIELDS)[number]>
->;
+export type ContextContent = Partial<Pick<BusinessContextVersion, (typeof CONTENT_FIELDS)[number]>>;
 
 export async function getOrCreateContext(websiteId: string): Promise<BusinessContext> {
   const existing = await prisma.businessContext.findUnique({ where: { websiteId } });
@@ -82,9 +77,7 @@ export async function listVersions(websiteId: string): Promise<BusinessContextVe
   });
 }
 
-export async function getOpenDraft(
-  websiteId: string,
-): Promise<BusinessContextVersion | null> {
+export async function getOpenDraft(websiteId: string): Promise<BusinessContextVersion | null> {
   const context = await prisma.businessContext.findUnique({ where: { websiteId } });
   if (!context) return null;
 
@@ -118,7 +111,12 @@ export function contentFromOnboarding(answers: StepAnswers): ContextContent {
     businessModel: answers.business?.businessModel ?? null,
     primaryCustomer: answers.customer?.primaryCustomer ?? null,
     buyerRoles: answers.customer?.buyerRoles ?? [],
-    primaryMarket: answers.market?.primaryMarket ?? null,
+    // Both steps ask; the dedicated market step is the answer of record, and the
+    // website step stands in when a session has not reached it yet.
+    primaryMarket: answers.market?.primaryMarket ?? answers.website?.primaryMarket ?? null,
+    additionalMarkets: answers.market?.additionalMarkets?.length
+      ? answers.market.additionalMarkets
+      : (answers.website?.additionalMarkets ?? []),
     languages: answers.market?.primaryLanguage ? [answers.market.primaryLanguage] : [],
     primaryConversion: answers.conversion?.primaryConversion ?? null,
     secondaryConversions: answers.conversion?.secondaryConversions ?? [],
@@ -209,9 +207,7 @@ export async function updateDraft(
   }
 
   if (version.status === "APPROVED") {
-    throw new BusinessContextError(
-      "Approved context cannot be edited. Start a new draft instead.",
-    );
+    throw new BusinessContextError("Approved context cannot be edited. Start a new draft instead.");
   }
 
   if (version.status === "ARCHIVED") {
@@ -248,10 +244,7 @@ export async function updateDraft(
  * discarding would leave the website with no context at all and no way to rebuild
  * it, since the onboarding session that produced it is already complete.
  */
-export async function discardDraft(
-  context: TenantContext,
-  versionId: string,
-): Promise<void> {
+export async function discardDraft(context: TenantContext, versionId: string): Promise<void> {
   const businessContext = await getOrCreateContext(context.website.id);
 
   const version = await prisma.businessContextVersion.findFirst({

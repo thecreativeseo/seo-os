@@ -297,7 +297,12 @@ model Website {
   canonicalUrl       String?            @map("canonical_url")
   websiteType        WebsiteType?       @map("website_type")
   cmsType            CmsType?           @map("cms_type")
+  /// ISO 3166-1 alpha-2. Keyword identity and the market-data connectors key
+  /// off this, so it is a code and never a name (lib/markets).
   primaryMarket      String?            @map("primary_market")
+  /// Other markets the site targets, as codes. Capped at MAX_ADDITIONAL_MARKETS
+  /// by the application; the column itself is an ordinary list.
+  additionalMarkets  String[]           @default([]) @map("additional_markets")
   primaryLanguage    String?            @map("primary_language")
   timezone           String?
   verificationStatus VerificationStatus @default(UNVERIFIED) @map("verification_status")
@@ -420,6 +425,7 @@ model BusinessContextVersion {
   primaryCustomer      String?  @map("primary_customer")
   buyerRoles           String[] @map("buyer_roles")
   primaryMarket        String?  @map("primary_market")
+  additionalMarkets    String[] @default([]) @map("additional_markets")
   languages            String[]
   primaryConversion    String?  @map("primary_conversion")
   secondaryConversions String[] @map("secondary_conversions")
