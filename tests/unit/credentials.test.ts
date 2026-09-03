@@ -55,13 +55,15 @@ describe("credential encryption", () => {
   it("refuses ciphertext that has been altered", () => {
     const { ciphertext } = encryptCredential("token");
     const parts = ciphertext.split(".");
-    // Flip a character in the encrypted body.
-    const tampered = [
-      parts[0],
-      parts[1],
-      parts[2],
-      `${parts[3]!.slice(0, -1)}${parts[3]!.slice(-1) === "A" ? "B" : "A"}`,
-    ].join(".");
+
+    // Flip a bit in the decoded body rather than a character in the base64.
+    // The final base64 character can carry padding bits that decode to nothing,
+    // so changing it sometimes leaves the ciphertext byte-identical — which made
+    // this test pass or fail depending on the random IV.
+    const body = Buffer.from(parts[3]!, "base64");
+    body[0] = body[0]! ^ 0xff;
+
+    const tampered = [parts[0], parts[1], parts[2], body.toString("base64")].join(".");
 
     // Authenticated encryption: tampering fails loudly rather than decrypting to a
     // plausible wrong value.
