@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { publicOrigin } from "@/lib/url/public-origin";
+import { relativeRedirect } from "@/lib/http/relative-redirect";
 import type { NextRequest } from "next/server";
 
 import { requireWebsiteAccess } from "@/server/auth/guards";
@@ -20,10 +20,9 @@ export async function POST(
 ): Promise<NextResponse> {
   const { provider: slug } = await params;
   const provider = providerFromSlug(slug);
-  const origin = publicOrigin(request);
 
   if (!provider) {
-    return NextResponse.redirect(new URL("/", origin), { status: 303 });
+    return relativeRedirect("/", 303);
   }
 
   const form = await request.formData();
@@ -41,9 +40,9 @@ export async function POST(
 
     return NextResponse.redirect(buildAuthorizationUrl(provider, state), { status: 303 });
   } catch {
-    return NextResponse.redirect(
-      new URL(`/websites/${context.website.id}/connections?error=not_configured`, origin),
-      { status: 303 },
+    return relativeRedirect(
+      `/websites/${context.website.id}/connections?error=not_configured`,
+      303,
     );
   }
 }

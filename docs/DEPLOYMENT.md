@@ -137,6 +137,8 @@ the process exits.
 | `SYNC_ON_START`                 |  -  |          opt          |
 | `PGBOSS_SCHEMA`                 |  -  |          opt          |
 
+`NEXT_PUBLIC_APP_URL` is the **public** address (`https://<service>-production-xxxx.up.railway.app`, or your own domain) - never `*.railway.internal`, which is Railway's private network. It is the return address handed to Google and Supabase, and like every `NEXT_PUBLIC_` value it is baked in at build time, so redeploy after changing it.
+
 `DIAGNOSIS_RUNNER` is blank (inline) by default: a diagnosis runs inside the
 web request, which needs no worker. Set it to `queue` on the web service to
 hand diagnoses to the worker, which then needs the AI variables too.
