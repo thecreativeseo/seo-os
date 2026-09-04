@@ -165,6 +165,14 @@ enum AuditAction {
   // the other two verdicts a reviewer can reach.
   MODIFY
   REQUEST_EVIDENCE
+  /// P4 (docs/P4_SPEC.md §36). Each spec event is an (entityType, action)
+  /// pair; these verbs keep the execution trail distinguishable.
+  REQUEST_APPROVAL
+  EXECUTE
+  PUBLISH
+  VERIFY
+  SUPERSEDE
+  CONNECT
 }
 
 // ---------------------------------------------------------------------------
@@ -205,14 +213,30 @@ model User {
   // P3. decisions is the one that matters: a Decision's actor is a User and
   // nothing else, which is how "AI cannot approve its own recommendation" holds
   // in the schema rather than in a check somebody could forget.
-  aiRuns                 AiRun[]               @relation("AiRunCreator")
-  diagnosisRequests      DiagnosisRequest[]    @relation("DiagnosisRequester")
-  createdDiagnoses       Diagnosis[]           @relation("DiagnosisCreator")
-  reviewedDiagnoses      Diagnosis[]           @relation("DiagnosisReviewer")
-  ownedRecommendations   Recommendation[]      @relation("RecommendationOwner")
-  createdRecommendations Recommendation[]      @relation("RecommendationCreator")
-  decisions              Decision[]            @relation("DecisionMaker")
-  capturedContent        PageContentSnapshot[] @relation("ContentCapturer")
+  aiRuns                    AiRun[]                  @relation("AiRunCreator")
+  diagnosisRequests         DiagnosisRequest[]       @relation("DiagnosisRequester")
+  createdDiagnoses          Diagnosis[]              @relation("DiagnosisCreator")
+  reviewedDiagnoses         Diagnosis[]              @relation("DiagnosisReviewer")
+  ownedRecommendations      Recommendation[]         @relation("RecommendationOwner")
+  createdRecommendations    Recommendation[]         @relation("RecommendationCreator")
+  decisions                 Decision[]               @relation("DecisionMaker")
+  capturedContent           PageContentSnapshot[]    @relation("ContentCapturer")
+  // P4
+  ownedContentWorkItems     ContentWorkItem[]        @relation("ContentWorkItemOwner")
+  createdBriefs             ContentBrief[]           @relation("ContentBriefCreator")
+  approvedBriefs            ContentBrief[]           @relation("ContentBriefApprover")
+  createdDrafts             ContentDraft[]           @relation("ContentDraftCreator")
+  approvedDrafts            ContentDraft[]           @relation("ContentDraftApprover")
+  createdRevisions          ContentRevision[]        @relation("ContentRevisionCreator")
+  reviewedLinkSuggestions   InternalLinkSuggestion[] @relation("LinkSuggestionReviewer")
+  createdPublishingPolicies PublishingPolicy[]       @relation("PublishingPolicyCreator")
+  updatedPublishingPolicies PublishingPolicy[]       @relation("PublishingPolicyUpdater")
+  requestedExecutions       Execution[]              @relation("ExecutionRequester")
+  approvedExecutions        Execution[]              @relation("ExecutionApprover")
+  executedExecutions        Execution[]              @relation("ExecutionExecutor")
+  requestedPublishApprovals PublishApproval[]        @relation("PublishApprovalRequester")
+  decidedPublishApprovals   PublishApproval[]        @relation("PublishApprovalDecider")
+  resolvedVerifications     ExecutionVerification[]  @relation("VerificationResolver")
 
   @@map("user")
 }
@@ -351,13 +375,26 @@ model Website {
   opportunities       Opportunity[]
 
   // P3
-  aiRuns            AiRun[]
-  evidencePackages  EvidencePackage[]
-  diagnosisRequests DiagnosisRequest[]
-  diagnoses         Diagnosis[]
-  recommendations   Recommendation[]
-  decisions         Decision[]
-  contentSnapshots  PageContentSnapshot[]
+  aiRuns                  AiRun[]
+  evidencePackages        EvidencePackage[]
+  diagnosisRequests       DiagnosisRequest[]
+  diagnoses               Diagnosis[]
+  recommendations         Recommendation[]
+  decisions               Decision[]
+  contentSnapshots        PageContentSnapshot[]
+  // P4
+  contentWorkItems        ContentWorkItem[]
+  contentBriefs           ContentBrief[]
+  contentDrafts           ContentDraft[]
+  contentRevisions        ContentRevision[]
+  contentQaResults        ContentQaResult[]
+  internalLinkSuggestions InternalLinkSuggestion[]
+  publishingPolicies      PublishingPolicy[]
+  executions              Execution[]
+  executionSteps          ExecutionStep[]
+  publishApprovals        PublishApproval[]
+  executionVerifications  ExecutionVerification[]
+  cmsSandboxPosts         CmsSandboxPost[]
 
   @@unique([workspaceId, normalizedDomain])
   @@index([workspaceId])
@@ -494,8 +531,9 @@ model BusinessGoal {
 
   // P2. What a goal is attached to, so an opportunity can say which business
   // outcome it serves rather than being ranked in a vacuum.
-  keywords Keyword[]
-  topics   Topic[]
+  keywords      Keyword[]
+  topics        Topic[]
+  contentBriefs ContentBrief[]
 
   @@index([websiteId])
   @@map("business_goal")
@@ -555,6 +593,10 @@ model SeoRule {
   rule          String
   severity      SeoRuleSeverity @default(INFO)
   appliesTo     String?         @map("applies_to")
+  /// P4 (D8). Optional machine-readable form of a prose rule, so QA can check
+  /// it deterministically - e.g. { "kind": "max_length", "field": "meta_title",
+  /// "max": 60 }. Rules without one are judged by the content QA agent.
+  checkJson     Json?           @map("check_json")
   ownerUserId   String?         @map("owner_user_id") @db.Uuid
   effectiveFrom DateTime?       @map("effective_from") @db.Date
   active        Boolean         @default(true)
@@ -634,8 +676,10 @@ model Connection {
   ga4Metrics      Ga4LandingPageMetricDaily[]
 
   // P2
-  keywordMetrics   KeywordMetricsSnapshot[]
-  rankingSnapshots RankingSnapshot[]
+  keywordMetrics     KeywordMetricsSnapshot[]
+  rankingSnapshots   RankingSnapshot[]
+  publishingPolicies PublishingPolicy[]
+  executions         Execution[]
 
   @@unique([websiteId, provider])
   @@index([workspaceId])
@@ -839,8 +883,12 @@ model Page {
   opportunities       Opportunity[]
 
   // P3
-  contentSnapshots PageContentSnapshot[]
-  recommendations  Recommendation[]
+  contentSnapshots      PageContentSnapshot[]
+  recommendations       Recommendation[]
+  contentWorkItems      ContentWorkItem[]        @relation("ContentWorkItemPage")
+  briefTargets          ContentBrief[]           @relation("ContentBriefTargetPage")
+  linkSuggestionSources InternalLinkSuggestion[] @relation("LinkSuggestionSource")
+  linkSuggestionTargets InternalLinkSuggestion[] @relation("LinkSuggestionTarget")
 
   @@unique([websiteId, normalizedUrl])
   @@index([websiteId, lastSeenAt])
@@ -1277,6 +1325,8 @@ model Keyword {
   competitorSnapshots CompetitorKeywordSnapshot[]
   opportunities       Opportunity[]
   recommendations     Recommendation[]
+  contentWorkItems    ContentWorkItem[]
+  briefsAsPrimary     ContentBrief[]
 
   @@unique([websiteId, normalizedKeyword, locale, language, market])
   @@index([websiteId, lastSeenAt])
@@ -1425,17 +1475,19 @@ model Topic {
   updatedAt                   DateTime       @updatedAt @map("updated_at")
   archivedAt                  DateTime?      @map("archived_at")
 
-  website               Website          @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  parentTopic           Topic?           @relation("TopicHierarchy", fields: [parentTopicId], references: [id], onDelete: SetNull)
-  childTopics           Topic[]          @relation("TopicHierarchy")
-  pillarPage            Page?            @relation("TopicPillarPage", fields: [pillarPageId], references: [id], onDelete: SetNull)
-  commercialDestination Page?            @relation("TopicCommercialPage", fields: [commercialDestinationPageId], references: [id], onDelete: SetNull)
-  owner                 User?            @relation("TopicOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
-  businessGoal          BusinessGoal?    @relation(fields: [businessGoalId], references: [id], onDelete: SetNull)
+  website               Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  parentTopic           Topic?            @relation("TopicHierarchy", fields: [parentTopicId], references: [id], onDelete: SetNull)
+  childTopics           Topic[]           @relation("TopicHierarchy")
+  pillarPage            Page?             @relation("TopicPillarPage", fields: [pillarPageId], references: [id], onDelete: SetNull)
+  commercialDestination Page?             @relation("TopicCommercialPage", fields: [commercialDestinationPageId], references: [id], onDelete: SetNull)
+  owner                 User?             @relation("TopicOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  businessGoal          BusinessGoal?     @relation(fields: [businessGoalId], references: [id], onDelete: SetNull)
   topicKeywords         TopicKeyword[]
   topicPages            TopicPage[]
   opportunities         Opportunity[]
   recommendations       Recommendation[]
+  contentWorkItems      ContentWorkItem[]
+  contentBriefs         ContentBrief[]
 
   @@unique([websiteId, slug])
   @@index([websiteId, coverageStatus])
@@ -1656,10 +1708,21 @@ model OpportunityEvidence {
 
 enum AgentType {
   PAGE_DIAGNOSIS
+  /// P4 (docs/P4_SPEC.md §7, §11, §12, §16). One agent, one job.
+  CONTENT_BRIEF
+  CONTENT_DRAFT
+  CONTENT_QA
+  INTERNAL_LINK
 }
 
 enum AiTaskType {
   DIAGNOSE_PAGE
+  /// P4
+  GENERATE_BRIEF
+  GENERATE_DRAFT
+  REVISE_DRAFT
+  QA_CONTENT
+  SUGGEST_INTERNAL_LINKS
 }
 
 enum AiRunStatus {
@@ -1802,6 +1865,9 @@ enum RecommendationStatus {
   MODIFIED
   REJECTED
   NEEDS_EVIDENCE
+  /// P4: set when a publish execution for this recommendation is VERIFIED
+  /// (docs/P3_SPEC.md §21 "future states"). implementedAt carries the moment.
+  IMPLEMENTED
   ARCHIVED
 }
 
@@ -1891,6 +1957,11 @@ model AiRun {
   diagnosisRequests DiagnosisRequest[]
   diagnoses         Diagnosis[]
   recommendations   Recommendation[]
+  contentBriefs     ContentBrief[]           @relation("ContentBriefRun")
+  contentDrafts     ContentDraft[]           @relation("ContentDraftRun")
+  contentRevisions  ContentRevision[]        @relation("ContentRevisionRun")
+  contentQaResults  ContentQaResult[]        @relation("ContentQaRun")
+  linkSuggestions   InternalLinkSuggestion[] @relation("LinkSuggestionRun")
 
   @@index([websiteId, createdAt])
   @@index([status])
@@ -1954,6 +2025,8 @@ model EvidencePackage {
   runs              AiRun[]
   diagnosisRequests DiagnosisRequest[]
   diagnoses         Diagnosis[]
+  contentBriefs     ContentBrief[]     @relation("ContentBriefPackage")
+  contentRevisions  ContentRevision[]  @relation("ContentRevisionPackage")
 
   @@index([websiteId, assembledAt])
   @@index([websiteId, targetType, targetId])
@@ -2154,8 +2227,10 @@ model Recommendation {
   createdByAiRun AiRun?       @relation(fields: [createdByAiRunId], references: [id], onDelete: SetNull)
   createdBy      User?        @relation("RecommendationCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
 
-  evidence  RecommendationEvidence[]
-  decisions Decision[]
+  evidence         RecommendationEvidence[]
+  decisions        Decision[]
+  contentWorkItems ContentWorkItem[]
+  executions       Execution[]
 
   @@index([websiteId, status])
   @@index([diagnosisId])
@@ -2197,10 +2272,12 @@ model Decision {
   decidedAt                  DateTime      @default(now()) @map("decided_at")
   createdAt                  DateTime      @default(now()) @map("created_at")
 
-  website        Website        @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  recommendation Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
-  overriddenRule SeoRule?       @relation("DecisionRuleOverride", fields: [overriddenRuleId], references: [id], onDelete: SetNull)
-  decidedBy      User           @relation("DecisionMaker", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+  website          Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  recommendation   Recommendation    @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  overriddenRule   SeoRule?          @relation("DecisionRuleOverride", fields: [overriddenRuleId], references: [id], onDelete: SetNull)
+  decidedBy        User              @relation("DecisionMaker", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+  contentWorkItems ContentWorkItem[]
+  executions       Execution[]
 
   @@index([websiteId, decidedAt])
   @@index([recommendationId])
@@ -2235,4 +2312,599 @@ model PageContentSnapshot {
   @@unique([pageId, contentHash])
   @@index([websiteId, capturedAt])
   @@map("page_content_snapshot")
+}
+
+// ---------------------------------------------------------------------------
+// P4 - Content System + Controlled Execution (docs/P4_SPEC.md §6-§27, §34)
+//
+// Everything a human approves is bound to an exact revision hash, and the rows
+// that record an approval or a revision are immutable at the database level.
+// The partial unique indexes, the provenance check and the four triggers live
+// in the p4_execution_schema migration; Prisma cannot express them.
+// ---------------------------------------------------------------------------
+
+enum ContentWorkItemType {
+  NEW_CONTENT
+  CONTENT_REFRESH
+  TITLE_META_UPDATE
+  INTENT_REALIGNMENT
+  KEYWORD_OWNERSHIP_FIX
+  INTERNAL_LINK_UPDATE
+  PAGE_CONSOLIDATION_PREP
+  OTHER
+}
+
+enum ContentWorkItemStatus {
+  QUEUED
+  BRIEFING
+  DRAFTING
+  QA
+  AWAITING_EDITOR_REVIEW
+  APPROVED_FOR_CMS
+  CMS_DRAFT_CREATED
+  AWAITING_PUBLISH_APPROVAL
+  PUBLISHING
+  PUBLISHED
+  VERIFYING
+  VERIFIED
+  FAILED
+  CANCELLED
+  ARCHIVED
+}
+
+enum ContentBriefStatus {
+  DRAFT
+  AWAITING_REVIEW
+  APPROVED
+  SUPERSEDED
+  ARCHIVED
+}
+
+enum ContentDraftStatus {
+  DRAFTING
+  AWAITING_QA
+  AWAITING_EDITOR_REVIEW
+  APPROVED
+  REJECTED
+  SUPERSEDED
+  ARCHIVED
+}
+
+enum ContentQaType {
+  BRAND_FACT_VALIDATION
+  SEO_RULE_VALIDATION
+  ON_PAGE_SEO
+  INTENT_ALIGNMENT
+  ANSWER_READINESS
+  INTERNAL_LINKING
+  CLAIM_SAFETY
+  STRUCTURE
+  READABILITY
+  DUPLICATION_RISK
+}
+
+enum ContentQaStatus {
+  PASS
+  PASS_WITH_WARNINGS
+  FAIL
+}
+
+enum InternalLinkSuggestionStatus {
+  PROPOSED
+  APPROVED
+  REJECTED
+  IMPLEMENTED
+}
+
+/// How a CMS connection authenticates (§17). P4 implements APPLICATION_PASSWORD;
+/// SIMULATED is the demo provider and is only honoured on demo websites.
+enum CmsAuthType {
+  APPLICATION_PASSWORD
+  OAUTH2
+  CUSTOM_PLUGIN_TOKEN
+  SIMULATED
+}
+
+enum PublishingMode {
+  READ_ONLY
+  DRAFT_ONLY
+  DRAFT_AND_UPDATE
+  PUBLISH_WITH_APPROVAL
+  /// Enum only in P4: the policy service refuses to set it (D4).
+  FULL_PUBLISH
+}
+
+enum ExecutionType {
+  CREATE_CMS_DRAFT
+  UPDATE_CMS_DRAFT
+  PUBLISH_CONTENT
+  UPDATE_PUBLISHED_CONTENT
+  APPLY_INTERNAL_LINK_UPDATE
+  OTHER
+}
+
+enum ExecutionStatus {
+  PROPOSED
+  READY
+  AWAITING_APPROVAL
+  APPROVED
+  EXECUTING
+  SUCCEEDED
+  VERIFYING
+  VERIFIED
+  FAILED
+  CANCELLED
+  ROLLED_BACK
+}
+
+/// One provider call, or one internal check, inside an execution (§22).
+enum ExecutionStepType {
+  PREFLIGHT
+  TEST_CONNECTION
+  CREATE_DRAFT
+  UPDATE_DRAFT
+  GET_PREVIEW
+  PUBLISH
+  GET_PUBLISHED_PAGE
+  VERIFY_STATE
+  RECONCILE
+}
+
+enum ExecutionStepStatus {
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+enum PublishApprovalStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum VerificationType {
+  URL_RESOLVES
+  HTTP_STATUS
+  TITLE_MATCH
+  META_DESCRIPTION_MATCH
+  H1_MATCH
+  CONTENT_PRESENT
+  CANONICAL_PRESENT
+  INTERNAL_LINK_PRESENT
+  CMS_STATUS_PUBLISHED
+}
+
+enum ExecutionVerificationStatus {
+  PASS
+  FAIL
+  SKIPPED
+}
+
+enum CmsSandboxPostStatus {
+  DRAFT
+  PUBLISHED
+}
+
+/// The unit of P4 work (§6). Starts only from a human-approved Decision, and
+/// its status is written by the services as a projection of its children.
+model ContentWorkItem {
+  id                String                @id @default(uuid()) @db.Uuid
+  websiteId         String                @map("website_id") @db.Uuid
+  recommendationId  String                @map("recommendation_id") @db.Uuid
+  decisionId        String                @map("decision_id") @db.Uuid
+  type              ContentWorkItemType
+  status            ContentWorkItemStatus @default(QUEUED)
+  priority          OpportunityPriority   @default(MEDIUM)
+  pageId            String?               @map("page_id") @db.Uuid
+  keywordId         String?               @map("keyword_id") @db.Uuid
+  topicId           String?               @map("topic_id") @db.Uuid
+  title             String
+  objective         String
+  ownerUserId       String?               @map("owner_user_id") @db.Uuid
+  /// SEO Rule overrides granted for this item (D12): [{ ruleId, reason, byUserId, at }].
+  /// Never a Brand Fact or Claim Safety block.
+  ruleOverridesJson Json?                 @map("rule_overrides_json")
+  createdAt         DateTime              @default(now()) @map("created_at")
+  updatedAt         DateTime              @updatedAt @map("updated_at")
+  completedAt       DateTime?             @map("completed_at")
+  archivedAt        DateTime?             @map("archived_at")
+
+  website        Website        @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  recommendation Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  decision       Decision       @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  page           Page?          @relation("ContentWorkItemPage", fields: [pageId], references: [id], onDelete: SetNull)
+  keyword        Keyword?       @relation(fields: [keywordId], references: [id], onDelete: SetNull)
+  topic          Topic?         @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  owner          User?          @relation("ContentWorkItemOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  briefs          ContentBrief[]
+  drafts          ContentDraft[]
+  linkSuggestions InternalLinkSuggestion[]
+  executions      Execution[]
+
+  // Plus, in SQL: one open item per recommendation
+  // (content_work_item_open_per_recommendation).
+  @@index([websiteId, status])
+  @@index([websiteId, createdAt])
+  @@index([recommendationId])
+  @@map("content_work_item")
+}
+
+/// A brief row is a version (§7). Approved rows are immutable by trigger;
+/// editing one creates version n+1.
+model ContentBrief {
+  id                               String             @id @default(uuid()) @db.Uuid
+  websiteId                        String             @map("website_id") @db.Uuid
+  contentWorkItemId                String             @map("content_work_item_id") @db.Uuid
+  version                          Int
+  title                            String
+  contentType                      String             @map("content_type")
+  targetPageId                     String?            @map("target_page_id") @db.Uuid
+  primaryKeywordId                 String?            @map("primary_keyword_id") @db.Uuid
+  secondaryKeywordIdsJson          Json?              @map("secondary_keyword_ids_json")
+  topicId                          String?            @map("topic_id") @db.Uuid
+  searchIntent                     KeywordIntent?     @map("search_intent")
+  businessGoalId                   String?            @map("business_goal_id") @db.Uuid
+  primaryConversion                String?            @map("primary_conversion")
+  audience                         String?
+  customerProblem                  String?            @map("customer_problem")
+  desiredOutcome                   String?            @map("desired_outcome")
+  recommendedAngle                 String?            @map("recommended_angle")
+  keyQuestionsJson                 Json?              @map("key_questions_json")
+  requiredSectionsJson             Json?              @map("required_sections_json")
+  optionalSectionsJson             Json?              @map("optional_sections_json")
+  internalLinkTargetsJson          Json?              @map("internal_link_targets_json")
+  externalEvidenceRequirementsJson Json?              @map("external_evidence_requirements_json")
+  approvedClaimsJson               Json?              @map("approved_claims_json")
+  prohibitedClaimsJson             Json?              @map("prohibited_claims_json")
+  brandVoiceNotes                  String?            @map("brand_voice_notes")
+  seoRuleConstraintsJson           Json?              @map("seo_rule_constraints_json")
+  status                           ContentBriefStatus @default(DRAFT)
+  /// What the generating agent was shown, when a model wrote this version.
+  evidencePackageId                String?            @map("evidence_package_id") @db.Uuid
+  createdByAiRunId                 String?            @map("created_by_ai_run_id") @db.Uuid
+  createdByUserId                  String?            @map("created_by_user_id") @db.Uuid
+  approvedByUserId                 String?            @map("approved_by_user_id") @db.Uuid
+  createdAt                        DateTime           @default(now()) @map("created_at")
+  approvedAt                       DateTime?          @map("approved_at")
+  archivedAt                       DateTime?          @map("archived_at")
+
+  website         Website          @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  contentWorkItem ContentWorkItem  @relation(fields: [contentWorkItemId], references: [id], onDelete: Cascade)
+  targetPage      Page?            @relation("ContentBriefTargetPage", fields: [targetPageId], references: [id], onDelete: SetNull)
+  primaryKeyword  Keyword?         @relation(fields: [primaryKeywordId], references: [id], onDelete: SetNull)
+  topic           Topic?           @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  businessGoal    BusinessGoal?    @relation(fields: [businessGoalId], references: [id], onDelete: SetNull)
+  evidencePackage EvidencePackage? @relation("ContentBriefPackage", fields: [evidencePackageId], references: [id], onDelete: SetNull)
+  createdByAiRun  AiRun?           @relation("ContentBriefRun", fields: [createdByAiRunId], references: [id], onDelete: SetNull)
+  createdBy       User?            @relation("ContentBriefCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  approvedBy      User?            @relation("ContentBriefApprover", fields: [approvedByUserId], references: [id], onDelete: Restrict)
+  drafts          ContentDraft[]
+
+  @@unique([contentWorkItemId, version])
+  @@index([websiteId, status])
+  @@map("content_brief")
+}
+
+/// The container for a work item's revisions (§9). Editor approval binds to
+/// one revision by id and hash; any newer revision clears it.
+model ContentDraft {
+  id                   String             @id @default(uuid()) @db.Uuid
+  websiteId            String             @map("website_id") @db.Uuid
+  contentWorkItemId    String             @map("content_work_item_id") @db.Uuid
+  briefId              String             @map("brief_id") @db.Uuid
+  currentRevisionId    String?            @map("current_revision_id") @db.Uuid
+  approvedRevisionId   String?            @map("approved_revision_id") @db.Uuid
+  approvedRevisionHash String?            @map("approved_revision_hash")
+  approvedByUserId     String?            @map("approved_by_user_id") @db.Uuid
+  approvedAt           DateTime?          @map("approved_at")
+  status               ContentDraftStatus @default(DRAFTING)
+  createdByAiRunId     String?            @map("created_by_ai_run_id") @db.Uuid
+  createdByUserId      String?            @map("created_by_user_id") @db.Uuid
+  createdAt            DateTime           @default(now()) @map("created_at")
+  updatedAt            DateTime           @updatedAt @map("updated_at")
+  archivedAt           DateTime?          @map("archived_at")
+
+  website          Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  contentWorkItem  ContentWorkItem   @relation(fields: [contentWorkItemId], references: [id], onDelete: Cascade)
+  brief            ContentBrief      @relation(fields: [briefId], references: [id], onDelete: Cascade)
+  currentRevision  ContentRevision?  @relation("DraftCurrentRevision", fields: [currentRevisionId], references: [id], onDelete: SetNull)
+  approvedRevision ContentRevision?  @relation("DraftApprovedRevision", fields: [approvedRevisionId], references: [id], onDelete: SetNull)
+  approvedBy       User?             @relation("ContentDraftApprover", fields: [approvedByUserId], references: [id], onDelete: Restrict)
+  createdByAiRun   AiRun?            @relation("ContentDraftRun", fields: [createdByAiRunId], references: [id], onDelete: SetNull)
+  createdBy        User?             @relation("ContentDraftCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  revisions        ContentRevision[] @relation("DraftRevisions")
+
+  @@index([websiteId, status])
+  @@index([contentWorkItemId])
+  @@map("content_draft")
+}
+
+/// Never overwritten, never deleted (§10): a revision is inserted once. The
+/// provenance check in SQL requires exactly one author, run or person.
+model ContentRevision {
+  id                String   @id @default(uuid()) @db.Uuid
+  websiteId         String   @map("website_id") @db.Uuid
+  contentDraftId    String   @map("content_draft_id") @db.Uuid
+  revisionNumber    Int      @map("revision_number")
+  title             String
+  slug              String?
+  excerpt           String?
+  bodyMarkdown      String   @map("body_markdown")
+  /// The exact HTML sent to the CMS, when one was.
+  bodyHtml          String?  @map("body_html")
+  metaTitle         String?  @map("meta_title")
+  metaDescription   String?  @map("meta_description")
+  schemaJson        Json?    @map("schema_json")
+  changeSummary     String   @map("change_summary")
+  /// sha-256 over the canonical content fields (src/lib/execution/hash.ts).
+  /// Every approval binds to it.
+  contentHash       String   @map("content_hash")
+  evidencePackageId String?  @map("evidence_package_id") @db.Uuid
+  createdByAiRunId  String?  @map("created_by_ai_run_id") @db.Uuid
+  createdByUserId   String?  @map("created_by_user_id") @db.Uuid
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  website           Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  draft             ContentDraft      @relation("DraftRevisions", fields: [contentDraftId], references: [id], onDelete: Cascade)
+  evidencePackage   EvidencePackage?  @relation("ContentRevisionPackage", fields: [evidencePackageId], references: [id], onDelete: SetNull)
+  createdByAiRun    AiRun?            @relation("ContentRevisionRun", fields: [createdByAiRunId], references: [id], onDelete: SetNull)
+  createdBy         User?             @relation("ContentRevisionCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  currentForDrafts  ContentDraft[]    @relation("DraftCurrentRevision")
+  approvedForDrafts ContentDraft[]    @relation("DraftApprovedRevision")
+  qaResults         ContentQaResult[]
+  executions        Execution[]
+  publishApprovals  PublishApproval[]
+
+  @@unique([contentDraftId, revisionNumber])
+  @@index([websiteId, createdAt])
+  @@map("content_revision")
+}
+
+/// One checker's verdict on one revision (§12).
+model ContentQaResult {
+  id                 String          @id @default(uuid()) @db.Uuid
+  websiteId          String          @map("website_id") @db.Uuid
+  contentRevisionId  String          @map("content_revision_id") @db.Uuid
+  qaType             ContentQaType   @map("qa_type")
+  status             ContentQaStatus
+  score              Int?
+  issuesJson         Json            @default("[]") @map("issues_json")
+  warningsJson       Json            @default("[]") @map("warnings_json")
+  blockingIssuesJson Json            @default("[]") @map("blocking_issues_json")
+  checkedAt          DateTime        @default(now()) @map("checked_at")
+  checkerVersion     String          @map("checker_version")
+  aiRunId            String?         @map("ai_run_id") @db.Uuid
+  createdAt          DateTime        @default(now()) @map("created_at")
+
+  website  Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  revision ContentRevision @relation(fields: [contentRevisionId], references: [id], onDelete: Cascade)
+  aiRun    AiRun?          @relation("ContentQaRun", fields: [aiRunId], references: [id], onDelete: SetNull)
+
+  @@index([contentRevisionId, qaType, checkedAt])
+  @@index([websiteId, status])
+  @@map("content_qa_result")
+}
+
+/// A proposed link for the work item's content (§16). sourcePage is empty for
+/// content that does not exist yet.
+model InternalLinkSuggestion {
+  id                String                       @id @default(uuid()) @db.Uuid
+  websiteId         String                       @map("website_id") @db.Uuid
+  contentWorkItemId String                       @map("content_work_item_id") @db.Uuid
+  sourcePageId      String?                      @map("source_page_id") @db.Uuid
+  targetPageId      String                       @map("target_page_id") @db.Uuid
+  anchorText        String                       @map("anchor_text")
+  placementContext  String?                      @map("placement_context")
+  reason            String?
+  confidence        ConfidenceLevel              @default(UNKNOWN)
+  status            InternalLinkSuggestionStatus @default(PROPOSED)
+  createdByAiRunId  String?                      @map("created_by_ai_run_id") @db.Uuid
+  reviewedByUserId  String?                      @map("reviewed_by_user_id") @db.Uuid
+  createdAt         DateTime                     @default(now()) @map("created_at")
+  reviewedAt        DateTime?                    @map("reviewed_at")
+
+  website         Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  contentWorkItem ContentWorkItem @relation(fields: [contentWorkItemId], references: [id], onDelete: Cascade)
+  sourcePage      Page?           @relation("LinkSuggestionSource", fields: [sourcePageId], references: [id], onDelete: SetNull)
+  targetPage      Page            @relation("LinkSuggestionTarget", fields: [targetPageId], references: [id], onDelete: Cascade)
+  createdByAiRun  AiRun?          @relation("LinkSuggestionRun", fields: [createdByAiRunId], references: [id], onDelete: SetNull)
+  reviewedBy      User?           @relation("LinkSuggestionReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([websiteId, status])
+  @@index([contentWorkItemId])
+  @@map("internal_link_suggestion")
+}
+
+/// What a CMS connection is allowed to do (§19, §20). Created with the
+/// connection as DRAFT_ONLY; publishing authorization is separate from
+/// content approval.
+model PublishingPolicy {
+  id                      String         @id @default(uuid()) @db.Uuid
+  websiteId               String         @map("website_id") @db.Uuid
+  connectionId            String         @map("connection_id") @db.Uuid
+  mode                    PublishingMode @default(DRAFT_ONLY)
+  requireEditorApproval   Boolean        @default(true) @map("require_editor_approval")
+  requirePublishApproval  Boolean        @default(true) @map("require_publish_approval")
+  requireQaPass           Boolean        @default(true) @map("require_qa_pass")
+  /// D3: the requester may not decide their own publish approval. Off for demo
+  /// and one-person organizations; the service defaults it on where at least
+  /// two eligible approvers exist. Admins may change it.
+  requireDistinctApprover Boolean        @default(false) @map("require_distinct_approver")
+  allowedContentTypesJson Json?          @map("allowed_content_types_json")
+  createdByUserId         String?        @map("created_by_user_id") @db.Uuid
+  updatedByUserId         String?        @map("updated_by_user_id") @db.Uuid
+  createdAt               DateTime       @default(now()) @map("created_at")
+  updatedAt               DateTime       @updatedAt @map("updated_at")
+
+  website    Website    @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  connection Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  createdBy  User?      @relation("PublishingPolicyCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  updatedBy  User?      @relation("PublishingPolicyUpdater", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([websiteId, connectionId])
+  @@map("publishing_policy")
+}
+
+/// One thing done to the CMS on the tenant's behalf (§21), bound to the exact
+/// revision it was proposed for.
+model Execution {
+  id                 String             @id @default(uuid()) @db.Uuid
+  websiteId          String             @map("website_id") @db.Uuid
+  recommendationId   String             @map("recommendation_id") @db.Uuid
+  decisionId         String             @map("decision_id") @db.Uuid
+  contentWorkItemId  String             @map("content_work_item_id") @db.Uuid
+  contentRevisionId  String             @map("content_revision_id") @db.Uuid
+  /// The revision's hash when this was proposed. Preflight recomputes and compares.
+  revisionHash       String             @map("revision_hash")
+  executionType      ExecutionType      @map("execution_type")
+  provider           ConnectionProvider
+  connectionId       String             @map("connection_id") @db.Uuid
+  status             ExecutionStatus    @default(PROPOSED)
+  /// Provider attempts so far. A retry is a new step under the same execution,
+  /// so the approval stays bound to it.
+  attempt            Int                @default(0)
+  requestedByUserId  String?            @map("requested_by_user_id") @db.Uuid
+  approvedByUserId   String?            @map("approved_by_user_id") @db.Uuid
+  executedByUserId   String?            @map("executed_by_user_id") @db.Uuid
+  externalEntityId   String?            @map("external_entity_id")
+  externalUrl        String?            @map("external_url")
+  beforeSnapshotJson Json?              @map("before_snapshot_json")
+  afterSnapshotJson  Json?              @map("after_snapshot_json")
+  startedAt          DateTime?          @map("started_at")
+  completedAt        DateTime?          @map("completed_at")
+  verifiedAt         DateTime?          @map("verified_at")
+  errorCode          String?            @map("error_code")
+  errorSummary       String?            @map("error_summary")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  website         Website                 @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  recommendation  Recommendation          @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  decision        Decision                @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  contentWorkItem ContentWorkItem         @relation(fields: [contentWorkItemId], references: [id], onDelete: Cascade)
+  revision        ContentRevision         @relation(fields: [contentRevisionId], references: [id], onDelete: Cascade)
+  connection      Connection              @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  requestedBy     User?                   @relation("ExecutionRequester", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+  approvedBy      User?                   @relation("ExecutionApprover", fields: [approvedByUserId], references: [id], onDelete: SetNull)
+  executedBy      User?                   @relation("ExecutionExecutor", fields: [executedByUserId], references: [id], onDelete: SetNull)
+  steps           ExecutionStep[]
+  approvals       PublishApproval[]
+  verifications   ExecutionVerification[]
+
+  // Plus, in SQL: one active execution per (work item, type)
+  // (execution_active_per_item_type).
+  @@index([websiteId, status])
+  @@index([contentWorkItemId, executionType])
+  @@map("execution")
+}
+
+/// One provider call or internal check (§22), written once when it finishes.
+/// Append-only by trigger; summaries are allowlisted fields, never payloads.
+model ExecutionStep {
+  id                  String              @id @default(uuid()) @db.Uuid
+  websiteId           String              @map("website_id") @db.Uuid
+  executionId         String              @map("execution_id") @db.Uuid
+  attempt             Int
+  stepType            ExecutionStepType   @map("step_type")
+  status              ExecutionStepStatus
+  requestSummaryJson  Json?               @map("request_summary_json")
+  responseSummaryJson Json?               @map("response_summary_json")
+  startedAt           DateTime            @map("started_at")
+  finishedAt          DateTime            @map("finished_at")
+  errorCode           String?             @map("error_code")
+  errorSummary        String?             @map("error_summary")
+  createdAt           DateTime            @default(now()) @map("created_at")
+
+  website   Website   @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  execution Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@index([executionId, startedAt])
+  @@map("execution_step")
+}
+
+/// The human gate before a publish (§24, §25). Binds execution, revision and
+/// hash at request time; decided rows are immutable by trigger.
+model PublishApproval {
+  id                String                @id @default(uuid()) @db.Uuid
+  websiteId         String                @map("website_id") @db.Uuid
+  executionId       String                @map("execution_id") @db.Uuid
+  contentRevisionId String                @map("content_revision_id") @db.Uuid
+  revisionHash      String                @map("revision_hash")
+  status            PublishApprovalStatus @default(REQUESTED)
+  requestedByUserId String                @map("requested_by_user_id") @db.Uuid
+  decidedByUserId   String?               @map("decided_by_user_id") @db.Uuid
+  reason            String?
+  requestedAt       DateTime              @default(now()) @map("requested_at")
+  decidedAt         DateTime?             @map("decided_at")
+  /// D13: seven days after the request; checked at preflight.
+  expiresAt         DateTime              @map("expires_at")
+  createdAt         DateTime              @default(now()) @map("created_at")
+
+  website     Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  execution   Execution       @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  revision    ContentRevision @relation(fields: [contentRevisionId], references: [id], onDelete: Cascade)
+  requestedBy User            @relation("PublishApprovalRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  decidedBy   User?           @relation("PublishApprovalDecider", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+
+  // Plus, in SQL: one REQUESTED approval per execution
+  // (publish_approval_requested_per_execution).
+  @@index([websiteId, status])
+  @@index([executionId])
+  @@map("publish_approval")
+}
+
+/// One live check on one attempt (§27). A failed required check leaves the
+/// execution VERIFYING until a later attempt passes or a person resolves it.
+model ExecutionVerification {
+  id                String                      @id @default(uuid()) @db.Uuid
+  websiteId         String                      @map("website_id") @db.Uuid
+  executionId       String                      @map("execution_id") @db.Uuid
+  attempt           Int
+  verificationType  VerificationType            @map("verification_type")
+  status            ExecutionVerificationStatus
+  expectedValueJson Json?                       @map("expected_value_json")
+  observedValueJson Json?                       @map("observed_value_json")
+  verifiedAt        DateTime?                   @map("verified_at")
+  errorSummary      String?                     @map("error_summary")
+  resolvedByUserId  String?                     @map("resolved_by_user_id") @db.Uuid
+  resolvedAt        DateTime?                   @map("resolved_at")
+  resolutionReason  String?                     @map("resolution_reason")
+  createdAt         DateTime                    @default(now()) @map("created_at")
+
+  website    Website   @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  execution  Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  resolvedBy User?     @relation("VerificationResolver", fields: [resolvedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([executionId, attempt])
+  @@index([websiteId, status])
+  @@map("execution_verification")
+}
+
+/// The simulated WordPress's own store (§34, D11). Only demo websites ever
+/// get a simulated connection; the sandbox route serves these at a real URL
+/// so live verification genuinely fetches.
+model CmsSandboxPost {
+  id              String               @id @default(uuid()) @db.Uuid
+  websiteId       String               @map("website_id") @db.Uuid
+  externalId      String               @map("external_id")
+  status          CmsSandboxPostStatus @default(DRAFT)
+  title           String
+  slug            String
+  contentHtml     String               @map("content_html")
+  metaDescription String?              @map("meta_description")
+  /// When set, the sandbox page shows this title instead of the CMS title -
+  /// the seeded verification-failure story.
+  servedTitle     String?              @map("served_title")
+  url             String
+  createdAt       DateTime             @default(now()) @map("created_at")
+  updatedAt       DateTime             @updatedAt @map("updated_at")
+  publishedAt     DateTime?            @map("published_at")
+
+  website Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@unique([websiteId, externalId])
+  @@map("cms_sandbox_post")
 }

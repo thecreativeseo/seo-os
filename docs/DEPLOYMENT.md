@@ -142,3 +142,21 @@ the process exits.
 `DIAGNOSIS_RUNNER` is blank (inline) by default: a diagnosis runs inside the
 web request, which needs no worker. Set it to `queue` on the web service to
 hand diagnoses to the worker, which then needs the AI variables too.
+
+## History-preserving tables
+
+Some rows are immutable at the database, by trigger: approved
+`business_context_version` rows (P0), approved `content_brief` versions, every
+`content_revision`, decided `publish_approval` rows and every `execution_step`
+(P4). Updates are refused. Deletes are refused too - which also stops an
+organization that holds such history from being deleted by cascade. That is
+deliberate. To tear one down on purpose, say so inside the same transaction:
+
+```sql
+BEGIN;
+SET LOCAL app.allow_approved_context_delete = 'on';
+DELETE FROM organization WHERE id = '...';
+COMMIT;
+```
+
+The setting is transaction-scoped and the application never sets it.

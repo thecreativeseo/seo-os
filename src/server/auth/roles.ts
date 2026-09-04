@@ -25,11 +25,14 @@ export function hasRole(actual: Role, minimum: Role): boolean {
  *
  *   READ     everyone with any membership
  *   WRITE    create and edit governance records and drafts
+ *   REVIEW   the editor gate (P4): approve briefs and content revisions,
+ *            request publish approval — SEO_LEAD and above
  *   APPROVE  approve Business Context and Brand Facts, manage members and
- *            connections — OWNER and ADMIN only
+ *            connections, authorize publishing — OWNER and ADMIN only
  */
 export const REQUIRED = {
   READ: "VIEWER",
   WRITE: "MEMBER",
+  REVIEW: "SEO_LEAD",
   APPROVE: "ADMIN",
 } as const satisfies Record<string, Role>;
