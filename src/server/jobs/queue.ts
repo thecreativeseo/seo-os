@@ -26,6 +26,8 @@ export const JOB_NAMES = {
   SYNC_DAILY: "sync.daily",
   /** Everything one website needs pulled, then re-detected. */
   WEBSITE_SYNC: "website.sync",
+  /** One diagnosis request, run to completion by the worker. */
+  DIAGNOSIS_RUN: "diagnosis.run",
 } as const;
 
 export type JobName = (typeof JOB_NAMES)[keyof typeof JOB_NAMES];
@@ -66,6 +68,16 @@ const QUEUE_OPTIONS: Record<
     retryDelay: 600,
     retryBackoff: true,
     expireInSeconds: 60 * 60,
+    retentionSeconds: 14 * 24 * 60 * 60,
+  },
+  // A model call is a minute; fifteen is a stuck one. Retries cover a provider
+  // outage - a guardrail failure closes the request and completes the job.
+  [JOB_NAMES.DIAGNOSIS_RUN]: {
+    policy: "short",
+    retryLimit: 2,
+    retryDelay: 60,
+    retryBackoff: true,
+    expireInSeconds: 15 * 60,
     retentionSeconds: 14 * 24 * 60 * 60,
   },
 };

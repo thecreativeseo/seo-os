@@ -27,6 +27,11 @@ Jobs (docs/P1_SPEC.md section 23):
   opportunity detection. A provider that fails is recorded in the job's
   summary; the rest of the steps still run. Anything unexpected fails the job,
   which pg-boss retries (3 attempts, backing off from 10 minutes).
+- `diagnosis.run` - one page diagnosis, requested from the app when the web
+  service has `DIAGNOSIS_RUNNER=queue`. The worker runs it as the person who
+  asked (their membership is re-checked at run time) and closes the request;
+  the app follows the request row until the diagnosis exists. Without the
+  setting, a diagnosis runs inside the web request as before.
 
 The worker acts as a fixed system user (`system@seo-os.invalid`, created on
 first run). Audit events written by jobs name that user as the actor. Its
@@ -64,6 +69,12 @@ project, built from the same GitHub repository.
 
    `SYNC_ON_START=1` runs the daily fan-out once as soon as the worker starts,
    so the first deploy can be checked without waiting for 03:00. Remove it after.
+
+   For queued diagnoses, the worker also needs the web service's
+   `ANTHROPIC_API_KEY` and `AI_*` values, and the **web** service needs
+   `DIAGNOSIS_RUNNER=queue`. Set that last one only once the worker is up:
+   with it set and no worker, a diagnosis request waits, and the request page
+   says so after two minutes.
 
 5. Deploy. The logs should show one line like:
 
@@ -110,21 +121,22 @@ the process exits.
 
 ## Environment variables by service
 
-| Variable                        | web | worker |
-| ------------------------------- | :-: | :----: |
-| `DATABASE_URL`                  | yes |  yes   |
-| `DIRECT_URL`                    | yes |  yes   |
-| `CREDENTIAL_ENCRYPTION_KEY`     | yes |  yes   |
-| `GOOGLE_CLIENT_ID`              | yes |  yes   |
-| `GOOGLE_CLIENT_SECRET`          | yes |  yes   |
-| `NEXT_PUBLIC_APP_URL`           | yes |   -    |
-| `NEXT_PUBLIC_SUPABASE_URL`      | yes |   -    |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes |   -    |
-| `ANTHROPIC_API_KEY` and `AI_*`  | yes |   -    |
-| `SYNC_DAILY_CRON`               |  -  |  opt   |
-| `SYNC_ON_START`                 |  -  |  opt   |
-| `PGBOSS_SCHEMA`                 |  -  |  opt   |
+| Variable                        | web |        worker         |
+| ------------------------------- | :-: | :-------------------: |
+| `DATABASE_URL`                  | yes |          yes          |
+| `DIRECT_URL`                    | yes |          yes          |
+| `CREDENTIAL_ENCRYPTION_KEY`     | yes |          yes          |
+| `GOOGLE_CLIENT_ID`              | yes |          yes          |
+| `GOOGLE_CLIENT_SECRET`          | yes |          yes          |
+| `NEXT_PUBLIC_APP_URL`           | yes |           -           |
+| `NEXT_PUBLIC_SUPABASE_URL`      | yes |           -           |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | yes |           -           |
+| `ANTHROPIC_API_KEY` and `AI_*`  | yes | with queued diagnoses |
+| `DIAGNOSIS_RUNNER`              | opt |           -           |
+| `SYNC_DAILY_CRON`               |  -  |          opt          |
+| `SYNC_ON_START`                 |  -  |          opt          |
+| `PGBOSS_SCHEMA`                 |  -  |          opt          |
 
-The worker does not run diagnoses yet, so it needs no AI variables. When
-diagnosis moves onto the queue, it will need the same `ANTHROPIC_API_KEY` and
-`AI_*` values as the web service.
+`DIAGNOSIS_RUNNER` is blank (inline) by default: a diagnosis runs inside the
+web request, which needs no worker. Set it to `queue` on the web service to
+hand diagnoses to the worker, which then needs the AI variables too.

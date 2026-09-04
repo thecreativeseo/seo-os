@@ -2,7 +2,14 @@ import { z } from "zod";
 
 import { prisma } from "@/server/db/prisma";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
+import { REQUIRED, hasRole } from "@/server/auth/roles";
 import { SitemapError } from "@/server/connectors/sitemap/fetch";
+import {
+  DiagnosisError,
+  OPEN_REQUEST_STATUSES,
+  executeDiagnosisRequest,
+  failDiagnosisRequest,
+} from "@/server/services/diagnosis";
 import { detectAndStoreOpportunities } from "@/server/services/opportunity";
 import { detectAndStoreSignals } from "@/server/services/signals";
 import { listSitemaps, syncSitemap } from "@/server/services/sitemap";
@@ -14,7 +21,7 @@ import {
   SyncError,
   type SyncOutcome,
 } from "@/server/services/sync";
-import type { ConnectionProvider } from "@/generated/prisma/client";
+import type { ConnectionProvider, DiagnosisRequest } from "@/generated/prisma/client";
 
 import { JOB_NAMES, type Queue } from "./queue";
 import { listSyncableWebsiteIds, SystemContextError, systemContextFor } from "./system-context";
@@ -344,6 +351,149 @@ export async function runDailySync(
   return { startedAt, finishedAt: new Date().toISOString(), websites: websites.length, enqueued };
 }
 
+// ---------------------------------------------------------------------------
+// diagnosis.run
+// ---------------------------------------------------------------------------
+
+export const diagnosisRunPayload = z.object({
+  websiteId: z.uuid(),
+  requestId: z.uuid(),
+});
+
+export type DiagnosisRunPayload = z.infer<typeof diagnosisRunPayload>;
+
+export type DiagnosisRunSummary = {
+  requestId: string;
+  websiteId: string;
+  /** The request's status afterwards, or "skipped" when there was nothing to do. */
+  status: DiagnosisRequest["status"] | "skipped";
+  detail?: string;
+  diagnosisId?: string;
+  findings?: number;
+  recommendations?: number;
+};
+
+class RequesterAccessError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RequesterAccessError";
+  }
+}
+
+/**
+ * The context a queued diagnosis runs under: the person who asked.
+ *
+ * The request row names them; their membership is read again here, now, so a
+ * request made by someone whose access was since revoked does not run on their
+ * behalf. The website chain is checked the same way as for any job. A request
+ * with no requester (none are written today) falls back to the system actor.
+ */
+async function contextForRequest(request: DiagnosisRequest): Promise<TenantContext> {
+  const base = await systemContextFor(request.websiteId);
+
+  if (!request.requestedByUserId) return base;
+
+  const user = await prisma.user.findUnique({ where: { id: request.requestedByUserId } });
+  const membership = user
+    ? await prisma.organizationMembership.findFirst({
+        where: { userId: user.id, organizationId: base.organization.id, status: "ACTIVE" },
+      })
+    : null;
+
+  if (!user || !membership || !hasRole(membership.role, REQUIRED.WRITE)) {
+    throw new RequesterAccessError(
+      "The person who asked for this diagnosis no longer has access to the website.",
+    );
+  }
+
+  return { ...base, user, membership };
+}
+
+/**
+ * Runs one queued request. Idempotent: a request that already finished -
+ * completed, failed, or cancelled while it waited - is left alone, so a retry
+ * or a duplicate delivery never produces a second diagnosis.
+ */
+export async function runQueuedDiagnosis(
+  requestId: string,
+  options: { websiteId?: string } = {},
+): Promise<DiagnosisRunSummary> {
+  const request = await prisma.diagnosisRequest.findUnique({ where: { id: requestId } });
+
+  if (!request) {
+    return {
+      requestId,
+      websiteId: options.websiteId ?? "",
+      status: "skipped",
+      detail: "not found",
+    };
+  }
+
+  const summary = { requestId, websiteId: request.websiteId };
+
+  // The payload is a hint; the row is the truth. A payload that disagrees with
+  // the row is either a bug or somebody's attempt to point one at another
+  // tenant, and neither gets a run.
+  if (options.websiteId && options.websiteId !== request.websiteId) {
+    return { ...summary, status: "skipped", detail: "payload website mismatch" };
+  }
+
+  if (!OPEN_REQUEST_STATUSES.includes(request.status)) {
+    return { ...summary, status: "skipped", detail: `already ${request.status}` };
+  }
+
+  let context: TenantContext;
+
+  try {
+    context = await contextForRequest(request);
+  } catch (error) {
+    if (error instanceof SystemContextError) {
+      // The website was archived after the request was made. There is no active
+      // tenant to record an audit event under, so the row alone is closed.
+      await prisma.diagnosisRequest.update({
+        where: { id: request.id },
+        data: {
+          status: "FAILED",
+          errorCode: "website_inactive",
+          errorSummary: "The website is no longer active.",
+          completedAt: new Date(),
+        },
+      });
+      return { ...summary, status: "FAILED", detail: describeError(error) };
+    }
+
+    if (error instanceof RequesterAccessError) {
+      const system = await systemContextFor(request.websiteId);
+      const failed = await failDiagnosisRequest(system, request.id, "forbidden", error.message);
+      return { ...summary, status: failed.status, detail: "forbidden" };
+    }
+
+    throw error;
+  }
+
+  try {
+    const outcome = await executeDiagnosisRequest(context, request.id);
+
+    if (!outcome.ok) {
+      return { ...summary, status: outcome.request.status, detail: outcome.error.code };
+    }
+
+    return {
+      ...summary,
+      status: outcome.request.status,
+      diagnosisId: outcome.diagnosis.id,
+      findings: outcome.findings.length,
+      recommendations: outcome.recommendations.length,
+    };
+  } catch (error) {
+    // Cancelled between the check above and the run: nothing to do.
+    if (error instanceof DiagnosisError && error.code === "already_finished") {
+      return { ...summary, status: "skipped", detail: "finished before it ran" };
+    }
+    throw error;
+  }
+}
+
 function log(payload: Record<string, unknown>): void {
   console.log(JSON.stringify(payload));
 }
@@ -361,6 +511,13 @@ export async function registerJobs(queue: Queue): Promise<void> {
     const payload = websiteSyncPayload.parse(job.data);
     const summary = await runWebsiteSync(payload.websiteId, { signal: job.signal });
     log({ at: JOB_NAMES.WEBSITE_SYNC, event: "completed", jobId: job.id, ...summary });
+    return summary;
+  });
+
+  await queue.work<DiagnosisRunPayload>(JOB_NAMES.DIAGNOSIS_RUN, async (job) => {
+    const payload = diagnosisRunPayload.parse(job.data);
+    const summary = await runQueuedDiagnosis(payload.requestId, { websiteId: payload.websiteId });
+    log({ at: JOB_NAMES.DIAGNOSIS_RUN, event: "completed", jobId: job.id, ...summary });
     return summary;
   });
 }

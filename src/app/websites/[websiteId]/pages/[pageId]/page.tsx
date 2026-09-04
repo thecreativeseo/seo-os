@@ -9,7 +9,8 @@ import { formatCount, formatDateRange, formatPercent, formatPosition } from "@/l
 import { MetricCard, SeverityBadge } from "@/components/metrics/primitives";
 import { CaptureControls } from "@/components/content/capture-controls";
 import { latestSnapshot } from "@/server/services/page-content";
-import { latestDiagnosisForPage } from "@/server/services/diagnosis";
+import { latestDiagnosisForPage, latestOpenRequestForPage } from "@/server/services/diagnosis";
+import { resolveDiagnosisRunner } from "@/server/services/diagnosis-runner";
 import { DiagnoseButton } from "@/components/diagnosis/controls";
 import {
   ConfidenceBadge,
@@ -49,6 +50,8 @@ export default async function PageDetailPage({
 
   const snapshot = await latestSnapshot(context, detail.page.id);
   const diagnosis = await latestDiagnosisForPage(context, detail.page.id);
+  const openRequest = await latestOpenRequestForPage(context, detail.page.id);
+  const runner = resolveDiagnosisRunner();
   const canCapture = hasRole(context.membership.role, REQUIRED.WRITE);
 
   const maxClicks = Math.max(1, ...detail.series.map((point) => point.clicks));
@@ -290,6 +293,21 @@ export default async function PageDetailPage({
           ) : null}
         </div>
 
+        {openRequest ? (
+          <div className="border-border flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed p-4 text-sm">
+            <span>
+              A diagnosis is in progress ({humanize(openRequest.status).toLowerCase()}), requested{" "}
+              {openRequest.createdAt.toLocaleString("en-GB")}.
+            </span>
+            <Link
+              href={`/websites/${websiteId}/diagnoses/requests/${openRequest.id}`}
+              className="hover:underline"
+            >
+              Follow its progress
+            </Link>
+          </div>
+        ) : null}
+
         {diagnosis ? (
           <div className="border-border space-y-3 rounded-lg border p-4">
             <div className="flex flex-wrap items-center gap-2">
@@ -320,7 +338,9 @@ export default async function PageDetailPage({
           </p>
         )}
 
-        {canCapture ? <DiagnoseButton websiteId={websiteId} pageId={detail.page.id} /> : null}
+        {canCapture && !openRequest ? (
+          <DiagnoseButton websiteId={websiteId} pageId={detail.page.id} runner={runner} />
+        ) : null}
       </section>
 
       <section className="space-y-3">

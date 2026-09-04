@@ -13,13 +13,23 @@ const initial: DiagnosisActionState = {};
 /**
  * Asking for a diagnosis (docs/P3_SPEC.md §14).
  *
- * The run is synchronous today — assemble, call the model, validate, store —
- * so the button says how long that takes rather than pretending it is instant.
- * On success the action redirects to the diagnosis; on failure the reason is
- * shown here, in our own words, never a provider's.
+ * Where the run happens is the server's setting, not the button's: inline, it
+ * takes about a minute inside this request, so the button says so; queued, the
+ * request is handed to the worker and the action redirects to a page that
+ * follows it. On failure the reason is shown here, in our own words, never a
+ * provider's.
  */
-export function DiagnoseButton({ websiteId, pageId }: { websiteId: string; pageId: string }) {
+export function DiagnoseButton({
+  websiteId,
+  pageId,
+  runner = "inline",
+}: {
+  websiteId: string;
+  pageId: string;
+  runner?: "inline" | "queue";
+}) {
   const [state, action, pending] = useActionState(requestDiagnosisAction, initial);
+  const busy = runner === "queue" ? "Requesting\u2026" : "Diagnosing\u2026 this can take a minute";
 
   return (
     <form action={action} className="space-y-2">
@@ -31,7 +41,7 @@ export function DiagnoseButton({ websiteId, pageId }: { websiteId: string; pageI
           disabled={pending}
           className="bg-foreground text-background inline-flex h-9 items-center rounded-md px-4 text-sm font-medium disabled:opacity-60"
         >
-          {pending ? "Diagnosing… this can take a minute" : "Diagnose this page"}
+          {pending ? busy : "Diagnose this page"}
         </button>
         <span className="text-muted-foreground text-xs">
           Reads this page&rsquo;s evidence and explains its performance, citing every record.

@@ -68,7 +68,8 @@ export class DiagnosisError extends Error {
       | "signal_not_found"
       | "opportunity_not_found"
       | "forbidden"
-      | "not_reviewable",
+      | "not_reviewable"
+      | "already_finished",
   ) {
     super(message);
     this.name = "DiagnosisError";
@@ -98,13 +99,15 @@ export type RequestPageDiagnosisInput = {
 };
 
 /**
- * Requests, runs and records one page diagnosis.
+ * Requests, runs and records one page diagnosis, end to end in this process.
  *
- * Synchronous end to end. A queue belongs here eventually — a model call is slow
- * and a request row with seven statuses is obviously shaped for one — but the
- * statuses are written at each step regardless of who advances them, so moving
- * the work to a worker later changes where this is called from and not what it
- * records.
+ * Two halves, usable apart. createDiagnosisRequest writes the request and its
+ * audit event; executeDiagnosisRequest does the work and closes it. This
+ * combined form is what the web app uses when DIAGNOSIS_RUNNER=inline. With a
+ * worker, the app creates the request and the worker executes it
+ * (src/server/jobs), which keeps a slow model call out of a web request. The
+ * statuses are written at each step regardless of who advances them, so the
+ * record reads the same either way.
  *
  * Failures are returned rather than thrown once a request row exists. A caller
  * that catches a thrown error has no handle on the request that failed, and the
@@ -114,11 +117,24 @@ export async function requestPageDiagnosis(
   context: TenantContext,
   input: RequestPageDiagnosisInput,
 ): Promise<DiagnosisOutcome> {
+  const request = await createDiagnosisRequest(context, input);
+  return executeDiagnosisRequest(context, request.id);
+}
+
+/**
+ * Writes the request (section 14) and nothing else. Whoever executes it later
+ * - this process or a worker - starts from the row, not from the input.
+ */
+export async function createDiagnosisRequest(
+  context: TenantContext,
+  input: RequestPageDiagnosisInput,
+): Promise<DiagnosisRequest> {
   // Nothing client-supplied is trusted to name a target. Each of these is a
   // scoped read, so an ID belonging to another tenant reads as "not found" here
   // rather than becoming the subject of a diagnosis.
   const page = await prisma.page.findFirst({
     where: { id: input.pageId, ...websiteScope(context) },
+    select: { id: true },
   });
 
   if (!page) {
@@ -146,7 +162,7 @@ export async function requestPageDiagnosis(
   }
 
   // DIAGNOSIS_REQUESTED (section 35), written with the row.
-  let request = await prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx) => {
     const created = await tx.diagnosisRequest.create({
       data: {
         websiteId: context.website.id,
@@ -173,8 +189,55 @@ export async function requestPageDiagnosis(
 
     return created;
   });
+}
 
-  request = await advance(request.id, { status: "ASSEMBLING_EVIDENCE", startedAt: new Date() });
+/**
+ * Runs a request to completion: assemble, seal, call the model, validate,
+ * store. The request must be open. One that was left mid-flight by a process
+ * that died is picked up again from the start - a fresh package is assembled,
+ * and the abandoned one stays on record, unsealed, which is what it was.
+ *
+ * The context is the caller's. Under a worker it is rebuilt for the person who
+ * asked, so the audit trail and the creator fields name them and not a system
+ * account; the tenant scope is re-checked on every read either way.
+ */
+export async function executeDiagnosisRequest(
+  context: TenantContext,
+  requestId: string,
+): Promise<DiagnosisOutcome> {
+  const existing = await prisma.diagnosisRequest.findFirst({
+    where: { id: requestId, ...websiteScope(context) },
+  });
+
+  if (!existing) {
+    throw new DiagnosisError("That diagnosis request is not available.", "not_found");
+  }
+
+  if (!OPEN_REQUEST_STATUSES.includes(existing.status)) {
+    throw new DiagnosisError("That diagnosis request has already finished.", "already_finished");
+  }
+
+  if (existing.targetType !== "PAGE") {
+    return fail(
+      context,
+      existing,
+      "unsupported_target",
+      "Only pages can be diagnosed in this phase.",
+    );
+  }
+
+  const page = await prisma.page.findFirst({
+    where: { id: existing.targetId, ...websiteScope(context) },
+  });
+
+  if (!page) {
+    return fail(context, existing, "target_not_found", "That page is no longer available.");
+  }
+
+  let request = await advance(existing.id, {
+    status: "ASSEMBLING_EVIDENCE",
+    startedAt: existing.startedAt ?? new Date(),
+  });
 
   let assembled;
 
@@ -195,9 +258,9 @@ export async function requestPageDiagnosis(
   });
 
   // Nothing to reason over. Answered deterministically rather than by spending a
-  // model call to be told what we already know — and answered rather than
+  // model call to be told what we already know - and answered rather than
   // failed, because "we hold no evidence about this page" is both true and
-  // useful, and the manifest records exactly what was looked for (§20).
+  // useful, and the manifest records exactly what was looked for (section 20).
   if (assembled.evidence.length === 0) {
     const empty = await persistEmptyDiagnosis(context, {
       request,
@@ -229,8 +292,8 @@ export async function requestPageDiagnosis(
     evidencePackageId: assembled.package.id,
     request: {
       task: buildTask(page, assembled.manifest),
-      // Every record goes in as untrusted (§27). Not only the page body: a
-      // competitor's title, a keyword string and a business goal are all text
+      // Every record goes in as untrusted (section 27). Not only the page body:
+      // a competitor's title, a keyword string and a business goal are all text
       // somebody typed, and sorting them into trusted and untrusted piles here
       // would mean getting that sort right forever.
       untrustedData: renderPackage(assembled.evidence),
@@ -914,6 +977,97 @@ export async function cancelDiagnosisRequest(
   });
 
   return cancelled;
+}
+
+/** A request somebody may still be waiting on. The worker picks up any of these. */
+export const OPEN_REQUEST_STATUSES: DiagnosisRequest["status"][] = [
+  "REQUESTED",
+  "ASSEMBLING_EVIDENCE",
+  "READY",
+  "RUNNING",
+];
+
+/**
+ * Closes an open request from outside the pipeline - the queue refused it, or
+ * the person who asked has lost access before a worker got to it. Same record
+ * as a pipeline failure: our own code and sentence, and an audit event.
+ */
+export async function failDiagnosisRequest(
+  context: TenantContext,
+  requestId: string,
+  code: string,
+  message: string,
+): Promise<DiagnosisRequest> {
+  const existing = await prisma.diagnosisRequest.findFirst({
+    where: { id: requestId, ...websiteScope(context) },
+  });
+
+  if (!existing) {
+    throw new DiagnosisError("That diagnosis request is not available.", "not_found");
+  }
+
+  if (TERMINAL.includes(existing.status)) return existing;
+
+  const outcome = await fail(context, existing, code, message);
+  return outcome.request;
+}
+
+/** The request a page is currently waiting on, if any. */
+export async function latestOpenRequestForPage(
+  context: TenantContext,
+  pageId: string,
+): Promise<DiagnosisRequest | null> {
+  return prisma.diagnosisRequest.findFirst({
+    where: {
+      targetType: "PAGE",
+      targetId: pageId,
+      status: { in: OPEN_REQUEST_STATUSES },
+      ...websiteScope(context),
+    },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+export type DiagnosisRequestListItem = DiagnosisRequest & {
+  page: { id: string; path: string } | null;
+};
+
+/**
+ * Requests that are still running, plus recent failures. A failed request
+ * produces no diagnosis, so without this list it would vanish from every
+ * screen and the person who pressed the button would be left wondering.
+ */
+export async function listOpenDiagnosisRequests(
+  context: TenantContext,
+  options: { failedWithinHours?: number; limit?: number } = {},
+): Promise<DiagnosisRequestListItem[]> {
+  const since = new Date(Date.now() - (options.failedWithinHours ?? 24) * 60 * 60 * 1000);
+
+  const rows = await prisma.diagnosisRequest.findMany({
+    where: {
+      ...websiteScope(context),
+      OR: [
+        { status: { in: OPEN_REQUEST_STATUSES } },
+        { status: "FAILED", completedAt: { gte: since } },
+      ],
+    },
+    orderBy: { createdAt: "desc" },
+    take: options.limit ?? 50,
+  });
+
+  const pageIds = [
+    ...new Set(rows.filter((row) => row.targetType === "PAGE").map((row) => row.targetId)),
+  ];
+  const pages =
+    pageIds.length > 0
+      ? await prisma.page.findMany({
+          where: { id: { in: pageIds }, ...websiteScope(context) },
+          select: { id: true, path: true },
+        })
+      : [];
+  const byId = new Map(pages.map((page) => [page.id, page]));
+
+  return rows.map((row) => ({ ...row, page: byId.get(row.targetId) ?? null }));
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 import { requireWebsiteAccess } from "@/server/auth/guards";
-import { listDiagnoses } from "@/server/services/diagnosis";
+import { listDiagnoses, listOpenDiagnosisRequests } from "@/server/services/diagnosis";
 import { EmptyState, PageHeader } from "@/components/governance/primitives";
 import { DemoBadge } from "@/components/metrics/primitives";
 import {
@@ -27,7 +27,10 @@ export default async function DiagnosesPage({
 }) {
   const { websiteId } = await params;
   const context = await requireWebsiteAccess(websiteId);
-  const diagnoses = await listDiagnoses(context, 100);
+  const [diagnoses, requests] = await Promise.all([
+    listDiagnoses(context, 100),
+    listOpenDiagnosisRequests(context),
+  ]);
 
   return (
     <main className="space-y-8">
@@ -38,6 +41,38 @@ export default async function DiagnosesPage({
         />
         {context.website.isDemo ? <DemoBadge /> : null}
       </div>
+
+      {requests.length > 0 ? (
+        <section className="space-y-2">
+          <h2 className="text-sm font-medium">In progress and recent failures</h2>
+          <ul className="divide-border border-border divide-y rounded-lg border">
+            {requests.map((request) => (
+              <li
+                key={request.id}
+                className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3"
+              >
+                <Link
+                  href={`/websites/${websiteId}/diagnoses/requests/${request.id}`}
+                  className="min-w-0 font-mono text-sm font-medium hover:underline"
+                >
+                  {request.page?.path ?? "Unknown target"}
+                </Link>
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  <StatusBadge status={request.status} />
+                  {request.status === "FAILED" && request.errorSummary ? (
+                    <span className="text-muted-foreground max-w-md truncate text-xs">
+                      {request.errorSummary}
+                    </span>
+                  ) : null}
+                  <span className="text-muted-foreground text-xs">
+                    {request.createdAt.toLocaleString("en-GB")}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       {diagnoses.length === 0 ? (
         <EmptyState>
