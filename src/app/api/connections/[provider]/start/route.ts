@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+
+import { publicOrigin } from "@/lib/url/public-origin";
 import type { NextRequest } from "next/server";
 
 import { requireWebsiteAccess } from "@/server/auth/guards";
@@ -18,7 +20,7 @@ export async function POST(
 ): Promise<NextResponse> {
   const { provider: slug } = await params;
   const provider = providerFromSlug(slug);
-  const origin = new URL(request.url).origin;
+  const origin = publicOrigin(request);
 
   if (!provider) {
     return NextResponse.redirect(new URL("/", origin), { status: 303 });

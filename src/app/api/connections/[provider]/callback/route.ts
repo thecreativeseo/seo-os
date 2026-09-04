@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+
+import { publicOrigin } from "@/lib/url/public-origin";
 import type { NextRequest } from "next/server";
 
 import { verifyOAuthState } from "@/server/crypto/credentials";
@@ -26,13 +28,11 @@ export async function GET(
 ): Promise<NextResponse> {
   const { provider: slug } = await params;
   const url = new URL(request.url);
-  const origin = url.origin;
+  const origin = publicOrigin(request);
 
   const fail = (websiteId: string | null, code: string) => {
     const safe = SAFE_ERRORS.has(code) ? code : "exchange_failed";
-    const path = websiteId
-      ? `/websites/${websiteId}/connections?error=${safe}`
-      : `/?error=${safe}`;
+    const path = websiteId ? `/websites/${websiteId}/connections?error=${safe}` : `/?error=${safe}`;
     return NextResponse.redirect(new URL(path, origin), { status: 303 });
   };
 
@@ -66,10 +66,7 @@ export async function GET(
 
     // Authorised, but not yet connected: a property still has to be chosen.
     return NextResponse.redirect(
-      new URL(
-        `/websites/${state.websiteId}/connections?select=${connection.provider}`,
-        origin,
-      ),
+      new URL(`/websites/${state.websiteId}/connections?select=${connection.provider}`, origin),
       { status: 303 },
     );
   } catch (error) {

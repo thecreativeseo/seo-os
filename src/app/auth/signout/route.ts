@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { publicOrigin } from "@/lib/url/public-origin";
 import type { NextRequest } from "next/server";
 
 import { createSupabaseServerClient } from "@/server/auth/supabase-server";
@@ -11,7 +12,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const supabase = await createSupabaseServerClient();
   await supabase.auth.signOut();
 
-  return NextResponse.redirect(new URL("/login", new URL(request.url).origin), {
+  return NextResponse.redirect(new URL("/login", publicOrigin(request)), {
     status: 303,
   });
 }

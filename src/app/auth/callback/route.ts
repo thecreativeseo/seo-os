@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
+import { publicOrigin } from "@/lib/url/public-origin";
 import { createSupabaseServerClient } from "@/server/auth/supabase-server";
 import { resolveInternalUser } from "@/server/auth/resolve-user";
 
@@ -14,11 +15,12 @@ import { resolveInternalUser } from "@/server/auth/resolve-user";
  */
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const url = new URL(request.url);
+  const origin = publicOrigin(request);
   const code = url.searchParams.get("code");
   const providerError = url.searchParams.get("error");
 
   const errorRedirect = (reason: string) =>
-    NextResponse.redirect(new URL(`/auth/auth-error?reason=${reason}`, url.origin));
+    NextResponse.redirect(new URL(`/auth/auth-error?reason=${reason}`, origin));
 
   // The user declined consent, or Google rejected the request.
   if (providerError) {
@@ -42,5 +44,5 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return errorRedirect("user_resolution_failed");
   }
 
-  return NextResponse.redirect(new URL("/", url.origin));
+  return NextResponse.redirect(new URL("/", origin));
 }
