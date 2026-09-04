@@ -4,6 +4,12 @@ import { notFound } from "next/navigation";
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { REQUIRED, hasRole } from "@/server/auth/roles";
 import { getRecommendationForReview } from "@/server/services/decision";
+import {
+  contentWorkForRecommendation,
+  effectiveRecommendation,
+  eligibilityFor,
+} from "@/server/services/content-work";
+import { StartContentWorkButton } from "@/components/execution/controls";
 import { PageHeader } from "@/components/governance/primitives";
 import { DemoBadge } from "@/components/metrics/primitives";
 import { DecisionPanel } from "@/components/review/controls";
@@ -40,6 +46,18 @@ export default async function ReviewPage({
 
   const { recommendation, evidence, staleEvidenceIds, diagnosis, rules, decisions } = review;
   const canDecide = hasRole(context.membership.role, REQUIRED.APPROVE);
+  const canStartWork = hasRole(context.membership.role, REQUIRED.WRITE);
+
+  // P4 (docs/P4_SPEC.md §5): an approved recommendation is where content work
+  // starts - by a person choosing to, never by the decision itself.
+  const approved =
+    review.recommendation.status === "APPROVED" || review.recommendation.status === "MODIFIED";
+  const latestDecision = review.decisions[review.decisions.length - 1] ?? null;
+  const effective = effectiveRecommendation(review.recommendation, latestDecision);
+  const eligibility = eligibilityFor(effective.type);
+  const startedWork = approved
+    ? await contentWorkForRecommendation(context, review.recommendation.id)
+    : null;
   const byId = new Map(evidence.map((record) => [record.id, record]));
 
   return (
@@ -254,6 +272,46 @@ export default async function ReviewPage({
           canDecide={canDecide}
         />
       </section>
+
+      {approved ? (
+        <section className="space-y-3">
+          <h2 className="text-sm font-medium">Content work</h2>
+          {startedWork ? (
+            <p className="border-border rounded-lg border p-4 text-sm">
+              Content work has started:{" "}
+              <Link
+                href={`/websites/${websiteId}/content/${startedWork.id}`}
+                className="font-medium hover:underline"
+              >
+                {startedWork.title}
+              </Link>
+              <span className="text-muted-foreground"> · {humanize(startedWork.status)}</span>
+            </p>
+          ) : eligibility.eligible ? (
+            <div className="border-border space-y-3 rounded-lg border p-4">
+              <p className="text-sm">
+                Approved as <span className="font-medium">{humanize(eligibility.workType)}</span>.
+                Starting creates a work item in the Content Work Queue; the brief, draft and QA
+                follow from there.
+              </p>
+              {canStartWork ? (
+                <StartContentWorkButton
+                  websiteId={websiteId}
+                  recommendationId={recommendation.id}
+                />
+              ) : (
+                <p className="text-muted-foreground text-xs">
+                  A member of the team can start the work.
+                </p>
+              )}
+            </div>
+          ) : (
+            <p className="border-border text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
+              {eligibility.reason}
+            </p>
+          )}
+        </section>
+      ) : null}
     </main>
   );
 }

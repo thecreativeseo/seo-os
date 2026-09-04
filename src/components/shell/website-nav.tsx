@@ -41,6 +41,12 @@ const GROUPS = [
     ],
   },
   {
+    heading: "Execution",
+    // P4 (docs/P4_SPEC.md §38). Drafts, Publishing and Verification arrive
+    // with their milestones; only what exists is listed.
+    sections: [{ slug: "content", label: "Content Work" }],
+  },
+  {
     heading: "Website",
     sections: [
       { slug: "ownership", label: "Ownership" },
