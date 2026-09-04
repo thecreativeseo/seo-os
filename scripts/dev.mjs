@@ -113,12 +113,23 @@ async function restart(reason) {
 }
 
 function watchGenerated() {
-  if (!existsSync(GENERATED)) {
+  // The parent is watched, not the generated directory itself. A watcher on a
+  // directory dies with it, and a clean rebuild deletes the generated client
+  // before writing it back - which is exactly the moment a restart matters.
+  const parent = path.dirname(GENERATED);
+  const inside = path.basename(GENERATED);
+
+  if (!existsSync(parent)) {
     log(`no generated client at ${GENERATED}; run \`npm run db:generate\` first`);
     return;
   }
 
-  watch(GENERATED, { recursive: true }, () => {
+  watch(parent, { recursive: true }, (_event, filename) => {
+    const changed = filename == null ? "" : String(filename).split(path.sep).join("/");
+    // Only the generated client matters; anything else under src/generated is
+    // somebody else's business.
+    if (changed && !changed.startsWith(inside)) return;
+
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => void restart("Prisma client regenerated"), DEBOUNCE_MS);
   });
