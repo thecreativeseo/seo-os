@@ -21,8 +21,7 @@ export default async function AuthErrorPage({
   searchParams: Promise<{ reason?: string }>;
 }) {
   const { reason } = await searchParams;
-  const message =
-    (reason && REASONS[reason]) ?? "Sign-in could not be completed.";
+  const message = (reason && REASONS[reason]) ?? "Sign-in could not be completed.";
 
   return (
     <main className="flex flex-1 items-center justify-center px-6">
