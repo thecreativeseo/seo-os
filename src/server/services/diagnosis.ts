@@ -5,10 +5,14 @@ import { runAgent } from "@/server/services/ai-run";
 import {
   EvidenceAssemblyError,
   assemblePageDiagnosisPackage,
+  getPackage,
   renderPackage,
   sealPackage,
   type RetrievalManifest,
 } from "@/server/services/evidence-assembler";
+import { resolveEvidenceIds } from "@/server/services/evidence";
+import { REQUIRED, hasRole } from "@/server/auth/roles";
+import { reliabilityRank } from "@/lib/evidence/types";
 import { validateCitations, type CitationAudit } from "@/server/services/citations";
 import { persistRecommendations, rulesInPackage } from "@/server/services/recommendation";
 import type { Evidence } from "@/lib/evidence/types";
@@ -58,7 +62,13 @@ export type { CitationAudit } from "@/server/services/citations";
 export class DiagnosisError extends Error {
   constructor(
     message: string,
-    readonly code: "target_not_found" | "not_found" | "signal_not_found" | "opportunity_not_found",
+    readonly code:
+      | "target_not_found"
+      | "not_found"
+      | "signal_not_found"
+      | "opportunity_not_found"
+      | "forbidden"
+      | "not_reviewable",
   ) {
     super(message);
     this.name = "DiagnosisError";
@@ -550,7 +560,9 @@ async function persistDiagnosis(
         targetId: input.page.id,
         signalId: input.request.signalId,
         opportunityId: input.request.opportunityId,
-        status: "DRAFT",
+        // Ready for a person, so it starts where the review lifecycle (section 19)
+        // can pick it up. DRAFT would be a state nothing moves out of.
+        status: "AWAITING_REVIEW",
         executiveSummary: input.output.executive_summary,
         overallConfidence,
         evidencePackageId: input.packageId,
@@ -710,7 +722,7 @@ async function persistEmptyDiagnosis(
         targetId: input.page.id,
         signalId: input.request.signalId,
         opportunityId: input.request.opportunityId,
-        status: "DRAFT",
+        status: "AWAITING_REVIEW",
         executiveSummary:
           "No diagnosis was attempted. No evidence could be assembled for this page, " +
           "so there is nothing to reason from.",
@@ -885,4 +897,159 @@ export async function cancelDiagnosisRequest(
   });
 
   return cancelled;
+}
+
+// ---------------------------------------------------------------------------
+// Reading for the screens (section 31), and closing the review (section 19)
+// ---------------------------------------------------------------------------
+
+export type DiagnosisListItem = Diagnosis & {
+  findings: Pick<DiagnosisFinding, "id" | "category" | "verdict" | "confidence" | "title">[];
+  recommendations: Pick<Recommendation, "id" | "status">[];
+  page: { id: string; url: string; path: string } | null;
+};
+
+/** Every diagnosis for the website, newest first, with the page it is about. */
+export async function listDiagnoses(
+  context: TenantContext,
+  limit = 50,
+): Promise<DiagnosisListItem[]> {
+  const rows = await prisma.diagnosis.findMany({
+    where: websiteScope(context),
+    orderBy: { createdAt: "desc" },
+    take: limit,
+    include: {
+      findings: {
+        select: { id: true, category: true, verdict: true, confidence: true, title: true },
+        orderBy: [{ verdict: "asc" }, { confidence: "asc" }],
+      },
+      recommendations: { select: { id: true, status: true } },
+    },
+  });
+
+  // A diagnosis names its target by id and type rather than by relation, since
+  // a target may one day be a keyword or a topic. Pages are looked up in one go.
+  const pageIds = rows.filter((row) => row.targetType === "PAGE").map((row) => row.targetId);
+  const pages = pageIds.length
+    ? await prisma.page.findMany({
+        where: { id: { in: pageIds }, ...websiteScope(context) },
+        select: { id: true, url: true, path: true },
+      })
+    : [];
+  const pageById = new Map(pages.map((page) => [page.id, page]));
+
+  return rows.map((row) => ({ ...row, page: pageById.get(row.targetId) ?? null }));
+}
+
+export type DiagnosisEvidenceView = {
+  packageId: string | null;
+  sealedAt: Date | null;
+  manifest: RetrievalManifest | null;
+  /** Resolved now, most direct first. */
+  evidence: Evidence[];
+  /** IDs in the sealed package that no longer resolve. Shown, not hidden. */
+  stale: string[];
+};
+
+/**
+ * The evidence a diagnosis was shown, re-resolved for display.
+ *
+ * Resolved from the sealed package's IDs rather than read back from the frozen
+ * copies, so provenance on screen is what the record says today - and any ID
+ * that resolved then and does not now is listed as stale rather than dropped.
+ */
+export async function getDiagnosisEvidence(
+  context: TenantContext,
+  diagnosisId: string,
+): Promise<DiagnosisEvidenceView | null> {
+  const diagnosis = await prisma.diagnosis.findFirst({
+    where: { id: diagnosisId, ...websiteScope(context) },
+    select: { evidencePackageId: true },
+  });
+
+  if (!diagnosis) return null;
+
+  const empty: DiagnosisEvidenceView = {
+    packageId: null,
+    sealedAt: null,
+    manifest: null,
+    evidence: [],
+    stale: [],
+  };
+
+  if (!diagnosis.evidencePackageId) return empty;
+
+  const pkg = await getPackage(context, diagnosis.evidencePackageId);
+  if (!pkg) return empty;
+
+  const resolution = await resolveEvidenceIds(
+    context,
+    pkg.refs.map((ref) => ref.evidenceId),
+  );
+
+  const evidence = [...resolution.resolved].sort((a, b) => {
+    const byReliability = reliabilityRank(a.reliability) - reliabilityRank(b.reliability);
+    if (byReliability !== 0) return byReliability;
+    const byType = a.type.localeCompare(b.type);
+    return byType !== 0 ? byType : a.id.localeCompare(b.id);
+  });
+
+  return {
+    packageId: pkg.id,
+    sealedAt: pkg.sealedAt,
+    manifest: (pkg.retrievalManifestJson as RetrievalManifest | null) ?? null,
+    evidence,
+    stale: [...resolution.unresolved, ...resolution.invalid],
+  };
+}
+
+/**
+ * Closes the review of a diagnosis (section 19: AWAITING_REVIEW to REVIEWED).
+ *
+ * Also reached automatically when the last recommendation on a diagnosis is
+ * decided; this is the explicit route, for a diagnosis with nothing to decide
+ * or one a reviewer has read and is done with. APPROVE level, same as deciding.
+ */
+export async function markDiagnosisReviewed(
+  context: TenantContext,
+  diagnosisId: string,
+): Promise<Diagnosis> {
+  if (!hasRole(context.membership.role, REQUIRED.APPROVE)) {
+    throw new DiagnosisError("Only an owner or admin can mark a diagnosis reviewed.", "forbidden");
+  }
+
+  const existing = await prisma.diagnosis.findFirst({
+    where: { id: diagnosisId, ...websiteScope(context) },
+  });
+
+  if (!existing) {
+    throw new DiagnosisError("That diagnosis is not available.", "not_found");
+  }
+
+  if (existing.status === "REVIEWED") return existing;
+
+  if (existing.status === "SUPERSEDED" || existing.status === "ARCHIVED") {
+    throw new DiagnosisError(
+      "A superseded or archived diagnosis is no longer under review.",
+      "not_reviewable",
+    );
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const reviewed = await tx.diagnosis.update({
+      where: { id: existing.id },
+      data: { status: "REVIEWED", reviewedByUserId: context.user.id, reviewedAt: new Date() },
+    });
+
+    // DIAGNOSIS_REVIEWED (section 35).
+    await recordAudit(tx, context, {
+      entityType: "Diagnosis",
+      entityId: reviewed.id,
+      action: "COMPLETE",
+      before: { status: existing.status },
+      after: { status: "REVIEWED" },
+    });
+
+    return reviewed;
+  });
 }

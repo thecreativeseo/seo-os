@@ -249,6 +249,35 @@ export async function decide(
       data: { status },
     });
 
+    // Section 19: a diagnosis is reviewed once every proposal on it has been
+    // decided. Reached here rather than left to a person to remember, and only
+    // moved forward - a superseded or archived diagnosis stays what it is.
+    if (existing.diagnosisId) {
+      const open = await tx.recommendation.count({
+        where: { diagnosisId: existing.diagnosisId, status: { in: REVIEWABLE } },
+      });
+
+      if (open === 0) {
+        const closed = await tx.diagnosis.updateMany({
+          where: {
+            id: existing.diagnosisId,
+            websiteId: context.website.id,
+            status: { in: ["DRAFT", "AWAITING_REVIEW"] },
+          },
+          data: { status: "REVIEWED", reviewedByUserId: context.user.id, reviewedAt: new Date() },
+        });
+
+        if (closed.count > 0) {
+          await recordAudit(tx, context, {
+            entityType: "Diagnosis",
+            entityId: existing.diagnosisId,
+            action: "COMPLETE",
+            after: { status: "REVIEWED", via: "last recommendation decided" },
+          });
+        }
+      }
+    }
+
     // DECISION_RECORDED and RECOMMENDATION_<verdict> (§35).
     await recordAudit(tx, context, {
       entityType: "Decision",
@@ -391,4 +420,32 @@ export async function getRecommendationForReview(
     rules,
     decisions,
   };
+}
+
+export type RecommendationListItem = Recommendation & {
+  page: { id: string; url: string; path: string } | null;
+  diagnosis: Pick<Diagnosis, "id" | "executiveSummary" | "overallConfidence"> | null;
+  blockedByRule: Pick<SeoRule, "id" | "rule" | "severity"> | null;
+};
+
+/** Recommendations for the website, optionally by status, newest first. */
+export async function listRecommendations(
+  context: TenantContext,
+  filter: { status?: RecommendationStatus[] } = {},
+  limit = 100,
+): Promise<RecommendationListItem[]> {
+  return prisma.recommendation.findMany({
+    where: {
+      ...websiteScope(context),
+      archivedAt: null,
+      ...(filter.status && filter.status.length > 0 ? { status: { in: filter.status } } : {}),
+    },
+    orderBy: [{ createdAt: "desc" }],
+    take: limit,
+    include: {
+      page: { select: { id: true, url: true, path: true } },
+      diagnosis: { select: { id: true, executiveSummary: true, overallConfidence: true } },
+      blockedByRule: { select: { id: true, rule: true, severity: true } },
+    },
+  });
 }

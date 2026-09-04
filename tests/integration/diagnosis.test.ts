@@ -290,7 +290,7 @@ describe("running a page diagnosis", () => {
     // and diagnosis → package → the exact records.
     expect(outcome.diagnosis.aiRunId).toBe(outcome.request.aiRunId);
     expect(outcome.diagnosis.evidencePackageId).toBe(outcome.request.evidencePackageId);
-    expect(outcome.diagnosis.status).toBe("DRAFT");
+    expect(outcome.diagnosis.status).toBe("AWAITING_REVIEW");
 
     const run = await prisma.aiRun.findUniqueOrThrow({
       where: { id: outcome.request.aiRunId! },

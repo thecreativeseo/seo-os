@@ -33,6 +33,14 @@ const GROUPS = [
     ],
   },
   {
+    heading: "AI Workbench",
+    sections: [
+      { slug: "diagnoses", label: "Diagnoses" },
+      { slug: "recommendations", label: "Recommendations" },
+      { slug: "review", label: "Review Queue" },
+    ],
+  },
+  {
     heading: "Website",
     sections: [
       { slug: "ownership", label: "Ownership" },
@@ -79,9 +87,7 @@ export function WebsiteNav({ websiteId }: { websiteId: string }) {
                     href={href}
                     aria-current={active ? "page" : undefined}
                     className={`block rounded-md px-2 py-1.5 text-sm transition-colors ${
-                      active
-                        ? "bg-accent font-medium"
-                        : "text-muted-foreground hover:bg-accent/60"
+                      active ? "bg-accent font-medium" : "text-muted-foreground hover:bg-accent/60"
                     }`}
                   >
                     {section.label}

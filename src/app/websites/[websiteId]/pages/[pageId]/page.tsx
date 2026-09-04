@@ -5,15 +5,18 @@ import { requireWebsiteAccess } from "@/server/auth/guards";
 import { getPageDetail, resolveWebsiteWindows } from "@/server/services/metrics";
 import { listSignals } from "@/server/services/signals";
 import { engagementRate } from "@/lib/metrics/aggregate";
-import {
-  formatCount,
-  formatDateRange,
-  formatPercent,
-  formatPosition,
-} from "@/lib/metrics/format";
+import { formatCount, formatDateRange, formatPercent, formatPosition } from "@/lib/metrics/format";
 import { MetricCard, SeverityBadge } from "@/components/metrics/primitives";
 import { CaptureControls } from "@/components/content/capture-controls";
 import { latestSnapshot } from "@/server/services/page-content";
+import { latestDiagnosisForPage } from "@/server/services/diagnosis";
+import { DiagnoseButton } from "@/components/diagnosis/controls";
+import {
+  ConfidenceBadge,
+  StatusBadge,
+  VerdictBadge,
+  humanize,
+} from "@/components/diagnosis/primitives";
 import { REQUIRED, hasRole } from "@/server/auth/roles";
 
 export const metadata = { title: "Page detail · SEO OS" };
@@ -45,6 +48,7 @@ export default async function PageDetailPage({
   );
 
   const snapshot = await latestSnapshot(context, detail.page.id);
+  const diagnosis = await latestDiagnosisForPage(context, detail.page.id);
   const canCapture = hasRole(context.membership.role, REQUIRED.WRITE);
 
   const maxClicks = Math.max(1, ...detail.series.map((point) => point.clicks));
@@ -122,8 +126,8 @@ export default async function PageDetailPage({
             </div>
           )}
           <p className="text-muted-foreground mt-2 text-xs">
-            Daily clicks across {formatDateRange(windows.current)}. Hover a bar for the
-            exact figures.
+            Daily clicks across {formatDateRange(windows.current)}. Hover a bar for the exact
+            figures.
           </p>
         </div>
       </section>
@@ -158,7 +162,9 @@ export default async function PageDetailPage({
             value={formatCount(detail.ga4.current.revenue)}
             current={detail.ga4.current.revenue}
             previous={detail.ga4.previous.revenue}
-            note={detail.ga4.current.revenue === null ? "This property does not report it" : undefined}
+            note={
+              detail.ga4.current.revenue === null ? "This property does not report it" : undefined
+            }
           />
         </div>
       </section>
@@ -251,14 +257,14 @@ export default async function PageDetailPage({
               </div>
             </dl>
             <p className="text-muted-foreground text-xs">
-              Stored as the page&rsquo;s own words. SEO OS makes no claim here about whether
-              they are good — that is a diagnosis, and a diagnosis cites this snapshot.
+              Stored as the page&rsquo;s own words. SEO OS makes no claim here about whether they
+              are good — that is a diagnosis, and a diagnosis cites this snapshot.
             </p>
           </div>
         ) : (
           <p className="border-border text-muted-foreground rounded-lg border border-dashed p-5 text-sm">
-            No content captured for this page. Without it, nothing can be said about what
-            the page says — only about how it performs.
+            No content captured for this page. Without it, nothing can be said about what the page
+            says — only about how it performs.
           </p>
         )}
 
@@ -269,6 +275,52 @@ export default async function PageDetailPage({
             pageUrl={detail.page.url}
           />
         ) : null}
+      </section>
+
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm font-medium">Diagnosis</h2>
+          {diagnosis ? (
+            <Link
+              href={`/websites/${websiteId}/diagnoses/${diagnosis.id}`}
+              className="text-sm hover:underline"
+            >
+              Open the full diagnosis
+            </Link>
+          ) : null}
+        </div>
+
+        {diagnosis ? (
+          <div className="border-border space-y-3 rounded-lg border p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusBadge status={diagnosis.status} />
+              <ConfidenceBadge level={diagnosis.overallConfidence} />
+              <span className="text-muted-foreground text-xs">
+                {diagnosis.createdAt.toLocaleDateString("en-GB")}
+                {diagnosis.aiRunId ? "" : " \u00b7 no model run"}
+              </span>
+            </div>
+            <p className="text-sm leading-relaxed">{diagnosis.executiveSummary}</p>
+            {diagnosis.findings.length > 0 ? (
+              <ul className="space-y-1.5">
+                {diagnosis.findings.slice(0, 4).map((finding) => (
+                  <li key={finding.id} className="flex flex-wrap items-center gap-2 text-sm">
+                    <span className="font-medium">{humanize(finding.category)}</span>
+                    <VerdictBadge verdict={finding.verdict} />
+                    <ConfidenceBadge level={finding.confidence} />
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : (
+          <p className="border-border text-muted-foreground rounded-lg border border-dashed p-5 text-sm">
+            Not diagnosed yet. A diagnosis reads this page&rsquo;s evidence and says why it performs
+            as it does, citing every record it relies on.
+          </p>
+        )}
+
+        {canCapture ? <DiagnoseButton websiteId={websiteId} pageId={detail.page.id} /> : null}
       </section>
 
       <section className="space-y-3">

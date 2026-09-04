@@ -14,13 +14,11 @@ import { MOVEMENT_LABELS } from "@/lib/ranking/movement";
 import { PriorityBadge, ScorePill } from "@/components/opportunity/primitives";
 import { engagementRate } from "@/lib/metrics/aggregate";
 import { freshnessInDays, isStale } from "@/lib/metrics/compare";
-import {
-  formatCount,
-  formatDateRange,
-  formatPercent,
-  formatPosition,
-} from "@/lib/metrics/format";
+import { formatCount, formatDateRange, formatPercent, formatPosition } from "@/lib/metrics/format";
 import { MetricCard, SeverityBadge } from "@/components/metrics/primitives";
+import { listDiagnoses } from "@/server/services/diagnosis";
+import { listRecommendations, listReviewQueue } from "@/server/services/decision";
+import { ConfidenceBadge, VerdictBadge, humanize } from "@/components/diagnosis/primitives";
 
 export const metadata = { title: "Command Center · SEO OS" };
 
@@ -83,6 +81,25 @@ export default async function CommandCenterPage({
 
   const nextStep = signals[0];
 
+  // P3 (section 30): why, and what should we do? Read after the P1/P2 batch
+  // rather than inside it, so a slow AI table never delays the first paint of
+  // the numbers people came for.
+  const [diagnoses, reviewQueue, approved] = await Promise.all([
+    listDiagnoses(context, 20),
+    listReviewQueue(context, 20),
+    listRecommendations(context, { status: ["APPROVED"] }, 5),
+  ]);
+  const awaitingDiagnoses = diagnoses.filter((d) => d.status === "AWAITING_REVIEW");
+  const awaitingReview = reviewQueue.filter((r) => r.status === "AWAITING_REVIEW");
+  const needsEvidence = reviewQueue.filter((r) => r.status === "NEEDS_EVIDENCE");
+  const rank = { HIGH: 0, MEDIUM: 1, LOW: 2, UNKNOWN: 3 } as const;
+  const topFindings = diagnoses
+    .flatMap((d) => d.findings.map((f) => ({ ...f, diagnosisId: d.id, page: d.page })))
+    .filter((f) => f.verdict === "CONFIRMED" || f.verdict === "STRONGLY_SUPPORTED")
+    .sort((a, b) => rank[a.confidence] - rank[b.confidence])
+    .slice(0, 4);
+  const nextDecision = awaitingReview[0] ?? null;
+
   return (
     <main className="space-y-10">
       <header className="space-y-1">
@@ -99,7 +116,9 @@ export default async function CommandCenterPage({
       {/* Freshness first: every number below is only as current as this. */}
       <section
         className={`rounded-lg border p-4 ${
-          stale ? "border-amber-400 bg-amber-50 dark:border-amber-800 dark:bg-amber-950" : "border-border"
+          stale
+            ? "border-amber-400 bg-amber-50 dark:border-amber-800 dark:bg-amber-950"
+            : "border-border"
         }`}
       >
         <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -147,9 +166,7 @@ export default async function CommandCenterPage({
                   </span>
                 </div>
                 <p className="text-muted-foreground text-xs">
-                  {opportunity.businessGoal
-                    ? `${opportunity.businessGoal.title} · `
-                    : ""}
+                  {opportunity.businessGoal ? `${opportunity.businessGoal.title} · ` : ""}
                   effort {opportunity.effort.toLowerCase()} · confidence{" "}
                   {opportunity.confidence.toLowerCase()}
                 </p>
@@ -171,7 +188,7 @@ export default async function CommandCenterPage({
                   href={`/websites/${websiteId}/opportunities?type=${type}`}
                   className="border-border hover:bg-accent/40 rounded-lg border px-3 py-2 text-sm"
                 >
-                  <span className="tabular-nums font-medium">{count}</span>{" "}
+                  <span className="font-medium tabular-nums">{count}</span>{" "}
                   <span className="text-muted-foreground">
                     {type.replace(/_/g, " ").toLowerCase()}
                   </span>
@@ -179,9 +196,9 @@ export default async function CommandCenterPage({
               ))}
           </div>
           <p className="text-muted-foreground text-xs">
-            {/* A queue that is all one type is a queue that has stopped looking. */}
-            A varied mix suggests the whole picture is being read; a single type
-            dominating usually means one source of evidence is doing all the work.
+            {/* A queue that is all one type is a queue that has stopped looking. */}A varied mix
+            suggests the whole picture is being read; a single type dominating usually means one
+            source of evidence is doing all the work.
           </p>
         </section>
       ) : null}
@@ -275,6 +292,108 @@ export default async function CommandCenterPage({
               previous={engagementRate(summary.ga4.previous)}
             />
           )}
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
+          <h2 className="text-sm font-medium">Why, and what should we do?</h2>
+          <Link href={`/websites/${websiteId}/review`} className="text-sm hover:underline">
+            Review queue
+          </Link>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            {
+              label: "Diagnoses awaiting review",
+              count: awaitingDiagnoses.length,
+              href: "diagnoses",
+            },
+            {
+              label: "Recommendations awaiting review",
+              count: awaitingReview.length,
+              href: "review",
+            },
+            { label: "Needs more evidence", count: needsEvidence.length, href: "review" },
+            {
+              label: "Approved recommendations",
+              count: approved.length,
+              href: "recommendations?status=APPROVED",
+            },
+          ].map((tile) => (
+            <Link
+              key={tile.label}
+              href={`/websites/${websiteId}/${tile.href}`}
+              className="border-border hover:bg-accent/40 flex flex-col gap-1 rounded-lg border p-4"
+            >
+              <p className="text-muted-foreground text-xs font-medium">{tile.label}</p>
+              <p className="text-xl font-semibold tabular-nums">{tile.count}</p>
+            </Link>
+          ))}
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-2">
+          <div className="border-border space-y-3 rounded-lg border p-5">
+            <h3 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+              Highest-confidence findings
+            </h3>
+            {topFindings.length === 0 ? (
+              <p className="text-muted-foreground text-sm">
+                No supported findings yet. Diagnose a page to get one.
+              </p>
+            ) : (
+              <ul className="space-y-2">
+                {topFindings.map((finding) => (
+                  <li key={finding.id} className="text-sm">
+                    <Link
+                      href={`/websites/${websiteId}/diagnoses/${finding.diagnosisId}`}
+                      className="hover:underline"
+                    >
+                      <span className="font-medium">{humanize(finding.category)}</span>
+                      {finding.page ? (
+                        <span className="text-muted-foreground font-mono text-xs">
+                          {" "}
+                          {finding.page.path}
+                        </span>
+                      ) : null}
+                    </Link>
+                    <span className="ml-2 inline-flex gap-1 align-middle">
+                      <VerdictBadge verdict={finding.verdict} />
+                      <ConfidenceBadge level={finding.confidence} />
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="border-border space-y-3 rounded-lg border p-5">
+            <h3 className="text-muted-foreground text-xs font-medium tracking-wide uppercase">
+              Next best step
+            </h3>
+            {nextDecision ? (
+              <div className="space-y-1 text-sm">
+                <Link
+                  href={`/websites/${websiteId}/review/${nextDecision.id}`}
+                  className="font-medium hover:underline"
+                >
+                  {nextDecision.title}
+                </Link>
+                <p className="text-muted-foreground">
+                  {humanize(nextDecision.type)}
+                  {nextDecision.page ? ` \u00b7 ${nextDecision.page.path}` : ""}
+                  {nextDecision.blockedByRule ? " \u00b7 blocked by an SEO rule" : ""}
+                </p>
+                <p className="text-muted-foreground text-xs">
+                  Waiting for a decision. Nothing is executed in this phase; a person approves,
+                  modifies, rejects, or asks for more evidence.
+                </p>
+              </div>
+            ) : (
+              <p className="text-muted-foreground text-sm">Nothing waiting for a decision.</p>
+            )}
+          </div>
         </div>
       </section>
 
@@ -373,10 +492,7 @@ export default async function CommandCenterPage({
               className="flex items-center justify-between gap-4 px-4 py-2.5 text-sm"
             >
               {item.path ? (
-                <Link
-                  href={`/websites/${websiteId}/${item.path}`}
-                  className="hover:underline"
-                >
+                <Link href={`/websites/${websiteId}/${item.path}`} className="hover:underline">
                   {item.label}
                 </Link>
               ) : (
@@ -453,9 +569,9 @@ async function SetupOnly({ websiteId }: { websiteId: string }) {
       <section className="border-border space-y-2 rounded-lg border border-dashed p-5">
         <p className="text-sm font-medium">No first-party data yet</p>
         <p className="text-muted-foreground max-w-prose text-sm leading-relaxed">
-          Once Search Console and Analytics are connected, this becomes a view of what
-          changed. Until then it shows how completely the business has been described —
-          and SEO OS reports no search metric it has not been given.
+          Once Search Console and Analytics are connected, this becomes a view of what changed.
+          Until then it shows how completely the business has been described — and SEO OS reports no
+          search metric it has not been given.
         </p>
         <Link
           href={`/websites/${websiteId}/connections`}
