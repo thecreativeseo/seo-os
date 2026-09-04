@@ -2,6 +2,13 @@ import type { Metadata } from "next";
 import { Google_Sans, Google_Sans_Code } from "next/font/google";
 import "./globals.css";
 
+// Every page renders per request, never at build time. This is an
+// authenticated dashboard: what a page shows depends on who is asking, and
+// several pages read environment that a build must not need. Static
+// prerendering would bake build-time secrets into HTML, or fail without them -
+// it did, three routes in a row - and there is nothing here worth caching.
+export const dynamic = "force-dynamic";
+
 /**
  * Type system.
  *

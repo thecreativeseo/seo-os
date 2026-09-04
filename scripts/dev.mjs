@@ -99,9 +99,11 @@ async function restart(reason) {
   log(`${reason}; restarting next dev`);
   await stop();
 
-  // Compiled output can hold references to the old client. A clean start
-  // costs a few seconds; a stale one has cost an afternoon.
-  rmSync(path.join(ROOT, ".next"), {
+  // Compiled dev output can hold references to the old client. A clean start
+  // costs a few seconds; a stale one has cost an afternoon. Only the dev
+  // output is cleared: a production build writes the rest of .next, and a
+  // restart that raced one mid-write has already killed a build once.
+  rmSync(path.join(ROOT, ".next", "dev"), {
     recursive: true,
     force: true,
     maxRetries: 5,
