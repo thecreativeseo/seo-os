@@ -125,20 +125,35 @@ describe("prompt registry", () => {
     // Simulates somebody editing the prompt in place instead of adding a version.
     // Historical runs cite v1; if v1's text could change, every one of them would
     // point at instructions that were never used.
-    const template = await activeTemplate("PAGE_DIAGNOSIS", "DIAGNOSE_PAGE");
+    //
+    // The retired v1 row is the one mutated, on purpose. The guard checks every
+    // version code defines, so it fires just the same - and no other test file
+    // ever needs v1, whereas mutating the active row races every file that runs
+    // the agent while this test holds it changed. The prompt table is global,
+    // not tenant-scoped, so that race crosses files.
+    const template = await prisma.promptTemplate.findUniqueOrThrow({
+      where: {
+        agentType_taskType_version: {
+          agentType: "PAGE_DIAGNOSIS",
+          taskType: "DIAGNOSE_PAGE",
+          version: 1,
+        },
+      },
+    });
     await prisma.promptTemplate.update({
       where: { id: template.id },
       data: { systemInstructions: "Say whatever you like." },
     });
 
-    await expect(syncPromptTemplates()).rejects.toBeInstanceOf(PromptTemplateError);
-
-    // Restored from the row as it was fetched, so the rest of the suite sees
-    // the real prompt whichever version is active.
-    await prisma.promptTemplate.update({
-      where: { id: template.id },
-      data: { systemInstructions: template.systemInstructions },
-    });
+    try {
+      await expect(syncPromptTemplates()).rejects.toBeInstanceOf(PromptTemplateError);
+    } finally {
+      // Restored from the row as it was fetched, whatever the assertion did.
+      await prisma.promptTemplate.update({
+        where: { id: template.id },
+        data: { systemInstructions: template.systemInstructions },
+      });
+    }
   });
 
   it("reads a historical version from the database, not from code", async () => {
