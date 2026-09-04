@@ -3,11 +3,7 @@ import { recordAudit } from "@/server/audit/record";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
 import { resolveProvider } from "@/server/ai/registry";
 import { activeTemplate } from "@/server/services/prompt-template";
-import type {
-  AiError,
-  AiUsage,
-  GenerateStructuredRequest,
-} from "@/lib/ai/provider";
+import type { AiError, AiUsage, GenerateStructuredRequest } from "@/lib/ai/provider";
 import { Prisma } from "@/generated/prisma/client";
 import type { AgentType, AiRun, AiTaskType } from "@/generated/prisma/client";
 import type { z } from "zod";
@@ -78,8 +74,7 @@ export type RunAgentInput<T> = {
 };
 
 export type RunAgentResult<T> =
-  | { ok: true; run: AiRun; value: T }
-  | { ok: false; run: AiRun; error: AiError };
+  { ok: true; run: AiRun; value: T } | { ok: false; run: AiRun; error: AiError };
 
 /**
  * Runs an agent and records what happened.
@@ -95,23 +90,45 @@ export async function runAgent<T>(
   const template = await activeTemplate(input.agentType, input.taskType);
   const provider = resolveProvider();
 
-  const run = await prisma.aiRun.create({
-    data: {
-      organizationId: context.organization.id,
-      workspaceId: context.workspace.id,
-      websiteId: context.website.id,
-      agentType: input.agentType,
-      taskType: input.taskType,
-      provider: provider.name,
-      model: provider.model,
-      promptTemplateId: template.id,
-      promptTemplateVersion: template.version,
-      outputSchemaVersion: template.outputSchemaVersion,
-      evidencePackageId: input.evidencePackageId,
-      status: "RUNNING",
-      startedAt: new Date(),
-      createdByUserId: context.user.id,
-    },
+  // AI_RUN_STARTED (section 35). Written with the row, in one transaction, so a
+  // run that exists is a run the audit trail knows began - a process that dies
+  // mid-call leaves a RUNNING row and a start event, never one without the other.
+  const run = await prisma.$transaction(async (tx) => {
+    const created = await tx.aiRun.create({
+      data: {
+        organizationId: context.organization.id,
+        workspaceId: context.workspace.id,
+        websiteId: context.website.id,
+        agentType: input.agentType,
+        taskType: input.taskType,
+        provider: provider.name,
+        model: provider.model,
+        promptTemplateId: template.id,
+        promptTemplateVersion: template.version,
+        outputSchemaVersion: template.outputSchemaVersion,
+        evidencePackageId: input.evidencePackageId,
+        status: "RUNNING",
+        startedAt: new Date(),
+        createdByUserId: context.user.id,
+      },
+    });
+
+    await recordAudit(tx, context, {
+      entityType: "AiRun",
+      entityId: created.id,
+      action: "CREATE",
+      after: {
+        status: "RUNNING",
+        agentType: created.agentType,
+        taskType: created.taskType,
+        provider: created.provider,
+        model: created.model,
+        promptTemplateVersion: created.promptTemplateVersion,
+        evidencePackageId: created.evidencePackageId,
+      },
+    });
+
+    return created;
   });
 
   const schema = input.request.schema as z.ZodType<T>;

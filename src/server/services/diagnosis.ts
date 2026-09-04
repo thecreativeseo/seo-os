@@ -145,16 +145,33 @@ export async function requestPageDiagnosis(
     }
   }
 
-  let request = await prisma.diagnosisRequest.create({
-    data: {
-      websiteId: context.website.id,
-      targetType: "PAGE",
-      targetId: page.id,
-      signalId: input.signalId,
-      opportunityId: input.opportunityId,
-      requestedByUserId: context.user.id,
-      status: "REQUESTED",
-    },
+  // DIAGNOSIS_REQUESTED (section 35), written with the row.
+  let request = await prisma.$transaction(async (tx) => {
+    const created = await tx.diagnosisRequest.create({
+      data: {
+        websiteId: context.website.id,
+        targetType: "PAGE",
+        targetId: page.id,
+        signalId: input.signalId,
+        opportunityId: input.opportunityId,
+        requestedByUserId: context.user.id,
+        status: "REQUESTED",
+      },
+    });
+
+    await recordAudit(tx, context, {
+      entityType: "DiagnosisRequest",
+      entityId: created.id,
+      action: "CREATE",
+      after: {
+        targetType: created.targetType,
+        targetId: created.targetId,
+        signalId: created.signalId,
+        opportunityId: created.opportunityId,
+      },
+    });
+
+    return created;
   });
 
   request = await advance(request.id, { status: "ASSEMBLING_EVIDENCE", startedAt: new Date() });

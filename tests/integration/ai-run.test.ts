@@ -287,13 +287,18 @@ describe("runAgent", () => {
 
     const result = await runAgent(context, request);
 
-    const event = await prisma.auditEvent.findFirst({
-      where: { entityType: "AiRun", entityId: result.run.id },
+    // Two events per run (section 35): it started, and it finished.
+    const started = await prisma.auditEvent.findFirst({
+      where: { entityType: "AiRun", entityId: result.run.id, action: "CREATE" },
+    });
+    const finished = await prisma.auditEvent.findFirst({
+      where: { entityType: "AiRun", entityId: result.run.id, action: "COMPLETE" },
     });
 
-    expect(event).not.toBeNull();
-    expect(event?.action).toBe("COMPLETE");
-    expect(JSON.stringify(event?.afterSnapshotJson)).toContain("SUCCEEDED");
+    expect(started).not.toBeNull();
+    expect(JSON.stringify(started?.afterSnapshotJson)).toContain("RUNNING");
+    expect(finished).not.toBeNull();
+    expect(JSON.stringify(finished?.afterSnapshotJson)).toContain("SUCCEEDED");
   });
 });
 
