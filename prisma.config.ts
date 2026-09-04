@@ -27,10 +27,23 @@ loadEnv({ quiet: true });
 // is read directly and omitted when empty.
 const shadowDatabaseUrl = process.env.SHADOW_DATABASE_URL || undefined;
 
+// env() throws while the config is being loaded, which would make every Prisma
+// command need a database URL - including `generate`, which never touches a
+// database and runs in builds that have none. So the direct URL is required only
+// when it is actually there to require. Without it, generate works and migrate
+// fails on the placeholder with a message that names the variable.
+const directUrl = process.env.DIRECT_URL
+  ? env("DIRECT_URL")
+  : "postgresql://DIRECT_URL_is_not_set@localhost:5432/set_DIRECT_URL";
+
+if (!process.env.DIRECT_URL) {
+  console.warn("prisma.config: DIRECT_URL is not set. generate will work; migrate will not.");
+}
+
 export default defineConfig({
   schema: "prisma/schema.prisma",
   datasource: {
-    url: env("DIRECT_URL"),
+    url: directUrl,
     ...(shadowDatabaseUrl ? { shadowDatabaseUrl } : {}),
   },
   migrations: {
