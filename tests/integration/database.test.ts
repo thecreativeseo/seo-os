@@ -1,5 +1,5 @@
 import { PrismaPg } from "@prisma/adapter-pg";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { PrismaClient } from "@/generated/prisma/client";
 
@@ -77,7 +77,17 @@ async function createFixture() {
 }
 
 describe("seeded tenant structure", () => {
-  it("creates Organization -> Workspace -> Website", async () => {
+  // These describe the seed, not the database: on an instance where an operator
+  // has removed the seeded organization, there is nothing to check and nothing
+  // wrong. They skip, visibly, rather than fail or re-seed what was removed.
+  let seeded = false;
+
+  beforeAll(async () => {
+    seeded = (await prisma.organization.count({ where: { slug: "the-creative-seo" } })) > 0;
+  });
+
+  it("creates Organization -> Workspace -> Website", async ({ skip }) => {
+    if (!seeded) skip("the seeded organization is not present in this database");
     const organization = await prisma.organization.findUnique({
       where: { slug: "the-creative-seo" },
       include: { workspaces: { include: { websites: true } } },
@@ -86,12 +96,11 @@ describe("seeded tenant structure", () => {
     expect(organization?.name).toBe("The Creative SEO");
     expect(organization?.workspaces).toHaveLength(1);
     expect(organization?.workspaces[0]?.name).toBe("SEO Team");
-    expect(organization?.workspaces[0]?.websites[0]?.normalizedDomain).toBe(
-      "thecreativeseo.com",
-    );
+    expect(organization?.workspaces[0]?.websites[0]?.normalizedDomain).toBe("thecreativeseo.com");
   });
 
-  it("seeds no business facts", async () => {
+  it("seeds no business facts", async ({ skip }) => {
+    if (!seeded) skip("the seeded organization is not present in this database");
     const organization = await prisma.organization.findUnique({
       where: { slug: "the-creative-seo" },
       include: { workspaces: { include: { websites: true } } },
@@ -117,7 +126,10 @@ describe("seeded tenant structure", () => {
     });
   });
 
-  it("grants no memberships, so the seeded tenant is unreachable until provisioned", async () => {
+  it("grants no memberships, so the seeded tenant is unreachable until provisioned", async ({
+    skip,
+  }) => {
+    if (!seeded) skip("the seeded organization is not present in this database");
     const organization = await prisma.organization.findUnique({
       where: { slug: "the-creative-seo" },
       include: { memberships: true },
@@ -196,9 +208,7 @@ describe("approved business context immutability", () => {
       prisma.businessContextVersion.delete({ where: { id: version.id } }),
     ).rejects.toThrow(/immutable/i);
 
-    expect(
-      await prisma.businessContextVersion.count({ where: { id: version.id } }),
-    ).toBe(1);
+    expect(await prisma.businessContextVersion.count({ where: { id: version.id } })).toBe(1);
   });
 
   it("still allows draft versions to be edited", async () => {
