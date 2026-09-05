@@ -18,6 +18,7 @@ import { formatCount, formatDateRange, formatPercent, formatPosition } from "@/l
 import { MetricCard, SeverityBadge } from "@/components/metrics/primitives";
 import { listDiagnoses } from "@/server/services/diagnosis";
 import { listRecommendations, listReviewQueue } from "@/server/services/decision";
+import { listDrafts } from "@/server/services/content-draft";
 import { ConfidenceBadge, VerdictBadge, humanize } from "@/components/diagnosis/primitives";
 
 export const metadata = { title: "Command Center · SEO OS" };
@@ -99,6 +100,12 @@ export default async function CommandCenterPage({
     .sort((a, b) => rank[a.confidence] - rank[b.confidence])
     .slice(0, 4);
   const nextDecision = awaitingReview[0] ?? null;
+
+  // P4 (section 30): what approved work is ready to execute? Drafts awaiting
+  // an editor, and drafts approved and ready for QA.
+  const drafts = await listDrafts(context);
+  const draftsAwaitingReview = drafts.filter((row) => row.awaitingReview).length;
+  const draftsReadyForQa = drafts.filter((row) => row.status === "APPROVED").length;
 
   return (
     <main className="space-y-10">
@@ -292,6 +299,34 @@ export default async function CommandCenterPage({
               previous={engagementRate(summary.ga4.previous)}
             />
           )}
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
+          <h2 className="text-sm font-medium">What approved work is ready to execute?</h2>
+          <Link href={`/websites/${websiteId}/drafts`} className="text-sm hover:underline">
+            Drafts
+          </Link>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            {
+              label: "Drafts awaiting review",
+              count: draftsAwaitingReview,
+              href: "drafts?awaiting=1",
+            },
+            { label: "Ready for QA", count: draftsReadyForQa, href: "drafts?approved=1" },
+          ].map((tile) => (
+            <Link
+              key={tile.label}
+              href={`/websites/${websiteId}/${tile.href}`}
+              className="border-border hover:bg-accent/40 flex flex-col gap-1 rounded-lg border p-4"
+            >
+              <p className="text-muted-foreground text-xs font-medium">{tile.label}</p>
+              <p className="text-xl font-semibold tabular-nums">{tile.count}</p>
+            </Link>
+          ))}
         </div>
       </section>
 

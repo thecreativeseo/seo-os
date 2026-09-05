@@ -2,12 +2,15 @@ import { shortHash } from "@/lib/content/draft-ux";
 
 /**
  * Who wrote a revision, based on which brief, using which evidence
- * (M4.4 §7). One panel for both kinds of author: a generated revision shows
- * the provider, model, agent, prompt and schema versions, the sealed
- * package with its policy and context version; a hand-written one shows the
- * person, the revision it was written from, and the change summary. Above
- * both sit the brief version, the work item and the decision that started
- * it. Long strings are shortened on the face and kept in full in a title.
+ * (M4.4 §7), and what review did with it (M4.5). One panel for both kinds
+ * of author: a generated revision shows the provider, model, agent, prompt
+ * and schema versions, the sealed package with its policy and context
+ * version; a hand-written one shows the person, the revision it was written
+ * from, and the change summary. Above both sit the brief version, the work
+ * item and the decision that started it. The Review block reads from the
+ * ContentDraftReview row: who asked, who decided, what exactly, and
+ * whether the approval still stands. Long strings are shortened on the
+ * face and kept in full in a title.
  */
 
 export type ProvenanceRevision = {
@@ -44,6 +47,25 @@ export type ProvenanceLineage = {
   workItem: { title: string; type: string } | null;
   recommendation: { title: string } | null;
   decision: { decision: string; decidedBy: string; decidedAt: Date } | null;
+};
+
+/** The review cycle that concerns this revision, from its ContentDraftReview row. */
+export type ProvenanceReview = {
+  status: "REQUESTED" | "APPROVED" | "RETURNED" | "INVALIDATED";
+  revisionNumber: number;
+  revisionHash: string;
+  briefVersion: number;
+  requestedBy: string | null;
+  requestedAt: Date;
+  decidedBy: string | null;
+  decidedAt: Date | null;
+  note: string | null;
+  selfDecided: boolean;
+  briefSupersededAtDecision: boolean;
+  briefMismatchAcknowledged: boolean;
+  invalidatedReason: string | null;
+  /** For APPROVED: the draft's standing approval still rests on this row. */
+  current: boolean;
 };
 
 export function AuthorLabel({
@@ -87,13 +109,94 @@ function Mono({ value, keep = 12 }: { value: string; keep?: number }) {
   );
 }
 
+function at(date: Date | null | undefined): string {
+  return date ? date.toLocaleString("en-GB") : "—";
+}
+
+const INVALIDATION_WORDS: Record<string, string> = {
+  content_changed: "the content changed after review was requested",
+  draft_superseded: "the draft was superseded by a draft on a newer brief",
+};
+
+/** What review did with a revision, in words (M4.5). */
+export function ReviewBlock({ review }: { review: ProvenanceReview }) {
+  return (
+    <>
+      <Row label="Review requested">
+        {review.requestedBy ?? "Not recorded"} on {at(review.requestedAt)}
+        <span className="text-muted-foreground">
+          {" "}
+          · for revision {review.revisionNumber} · <Mono value={review.revisionHash} /> · Brief v
+          {review.briefVersion}
+        </span>
+      </Row>
+      {review.status === "APPROVED" ? (
+        <>
+          <Row label="Approved">
+            {review.decidedBy ?? "Not recorded"} on {at(review.decidedAt)}
+            <span className="text-muted-foreground">
+              {" "}
+              · exactly revision {review.revisionNumber}
+              {review.selfDecided ? " · approved by its own author" : ""}
+            </span>
+          </Row>
+          <Row label="Approval note">
+            {review.note ?? <span className="text-muted-foreground">None given</span>}
+          </Row>
+          {review.briefSupersededAtDecision ? (
+            <Row label="Newer brief">
+              A newer brief version had been approved by then;{" "}
+              {review.briefMismatchAcknowledged
+                ? `the reviewer acknowledged it and approved against Brief v${review.briefVersion}.`
+                : "not acknowledged."}
+            </Row>
+          ) : null}
+          <Row label="Standing">
+            {review.current ? (
+              <span className="font-medium">
+                This approval is current: the draft is ready for QA.
+              </span>
+            ) : (
+              <span>
+                <span className="font-medium">Approval no longer current.</span>{" "}
+                <span className="text-muted-foreground">
+                  The draft was reopened or superseded after this approval; it stays in history.
+                </span>
+              </span>
+            )}
+          </Row>
+        </>
+      ) : review.status === "RETURNED" ? (
+        <Row label="Returned to drafting">
+          {review.decidedBy ?? "Not recorded"} on {at(review.decidedAt)}
+          {review.selfDecided ? (
+            <span className="text-muted-foreground"> · by its own author</span>
+          ) : null}
+          {review.note ? <span className="block">“{review.note}”</span> : null}
+        </Row>
+      ) : review.status === "INVALIDATED" ? (
+        <Row label="Request withdrawn">
+          {INVALIDATION_WORDS[review.invalidatedReason ?? ""] ?? "the request no longer applies"}
+          <span className="text-muted-foreground">. Nothing was decided.</span>
+        </Row>
+      ) : (
+        <Row label="Decision">
+          <span className="text-muted-foreground">Awaiting an SEO lead, admin or owner.</span>
+        </Row>
+      )}
+    </>
+  );
+}
+
 export function ProvenancePanel({
   revision,
   lineage,
+  review,
   viewerUserId,
 }: {
   revision: ProvenanceRevision;
   lineage: ProvenanceLineage;
+  review?: ProvenanceReview | null;
   viewerUserId?: string;
 }) {
   const run = revision.createdByAiRun;
@@ -204,6 +307,8 @@ export function ProvenancePanel({
           </Row>
         ) : null}
         <Row label="Length">{revision.wordCount ?? "?"} words</Row>
+
+        {review ? <ReviewBlock review={review} /> : null}
       </dl>
     </section>
   );

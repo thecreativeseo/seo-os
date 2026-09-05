@@ -11,6 +11,7 @@ import { decide } from "@/server/services/decision";
 import { startFromRecommendation } from "@/server/services/content-work";
 import { approveBrief, listBriefs } from "@/server/services/content-brief";
 import {
+  approveDraft,
   generateRevision,
   getBriefPanel,
   listDrafts,
@@ -19,6 +20,7 @@ import {
   startDraft,
   startDraftFromBrief,
 } from "@/server/services/content-draft";
+import { applyDraftFilters, parseDraftFilters } from "@/lib/content/draft-ux";
 
 /**
  * The drafts list and the brief panel (M4.4 §2, §3): rows with their
@@ -451,5 +453,43 @@ describe("the brief panel", () => {
 
     expect(await getBriefPanel(other, brief.id)).toBeNull();
     expect(await getBriefPanel(tenant, crypto.randomUUID())).toBeNull();
+  });
+});
+
+describe("approved drafts in the list (M4.5)", () => {
+  it("shows Approved for QA with the approved revision number, and the Ready-for-QA filter finds it", async () => {
+    const tenant = await makeTenant("approved");
+    const { item } = await makeItem(tenant, "Approved one");
+    const { draft } = await startDraft(tenant, item.id);
+    await saveRevision(tenant, draft.id, {
+      title: "Guide",
+      slug: null,
+      excerpt: null,
+      metaTitle: null,
+      metaDescription: null,
+      bodyMarkdown: "# Guide\n\nPayslips follow BIR formats.\n",
+      changeSummary: "Written by hand.",
+    });
+    await requestDraftReview(tenant, draft.id);
+    await approveDraft(tenant, draft.id, { note: "Fine." });
+
+    const rows = await listDrafts(tenant);
+    const row = rows.find((entry) => entry.id === draft.id);
+    expect(row).toMatchObject({
+      status: "APPROVED",
+      awaitingReview: false,
+      approvedRevisionNumber: 1,
+      workItemStatus: "QA",
+    });
+
+    expect(applyDraftFilters(rows, parseDraftFilters({ approved: "1" })).map((r) => r.id)).toEqual([
+      draft.id,
+    ]);
+    expect(applyDraftFilters(rows, parseDraftFilters({ awaiting: "1" })).map((r) => r.id)).toEqual(
+      [],
+    );
+    expect(
+      applyDraftFilters(rows, parseDraftFilters({ status: "APPROVED" })).map((r) => r.id),
+    ).toEqual([draft.id]);
   });
 });

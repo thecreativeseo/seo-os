@@ -1,7 +1,7 @@
-import { draftStateText, type DraftStateKind } from "@/lib/content/draft-ux";
+import { draftStateText, type DraftStateDetail, type DraftStateKind } from "@/lib/content/draft-ux";
 
 /**
- * A state of the draft workflow, said plainly (M4.4 §13). The tone is
+ * A state of the draft workflow, said plainly (M4.4 §13, M4.5). The tone is
  * carried by a word on the left as well as by the border, so nothing rests
  * on colour.
  */
@@ -14,6 +14,9 @@ const TONE: Record<DraftStateKind, { word: string; className: string }> = {
   no_revision: { word: "Empty", className: "border-border border-dashed" },
   blocking: { word: "Blocked", className: "border-red-300 dark:border-red-900" },
   awaiting_review: { word: "In review", className: "border-amber-300 dark:border-amber-900" },
+  approved_for_qa: { word: "Approved", className: "border-emerald-300 dark:border-emerald-900" },
+  returned: { word: "Returned", className: "border-amber-300 dark:border-amber-900" },
+  approval_not_current: { word: "Reopened", className: "border-amber-300 dark:border-amber-900" },
   newer_brief: { word: "Notice", className: "border-amber-300 dark:border-amber-900" },
   superseded: { word: "Read-only", className: "border-border" },
   stale_evidence: { word: "Notice", className: "border-red-300 dark:border-red-900" },
@@ -25,7 +28,7 @@ export function DraftStateNotice({
   children,
 }: {
   kind: DraftStateKind;
-  detail?: { briefVersion?: number; approvedVersion?: number; count?: number };
+  detail?: DraftStateDetail;
   /** Controls or links that belong to the state. */
   children?: React.ReactNode;
 }) {
@@ -39,7 +42,7 @@ export function DraftStateNotice({
         </span>
         <span className="font-medium">{text.title}</span>
       </p>
-      <p className="text-muted-foreground mt-1">{text.body}</p>
+      <p className="text-muted-foreground mt-1 break-words">{text.body}</p>
       {children ? <div className="mt-3">{children}</div> : null}
     </div>
   );

@@ -7,6 +7,9 @@ import {
   countFindings,
   describeFinding,
   draftControls,
+  draftStatusLabel,
+  workItemStatusLabel,
+  APPROVED_READ_ONLY_REASON,
   draftFiltersToQuery,
   draftStateText,
   evidenceSourceLabel,
@@ -286,6 +289,7 @@ describe("the drafts list filters", () => {
       contentType: "GUIDE",
       blocking: true,
       awaitingReview: false,
+      approved: false,
       superseded: false,
       author: "HUMAN",
     });
@@ -301,6 +305,7 @@ describe("the drafts list filters", () => {
         contentType: "all",
         blocking: false,
         awaitingReview: false,
+        approved: false,
         superseded: false,
         author: "all",
       },
@@ -348,5 +353,150 @@ describe("states in plain English", () => {
     }
     expect(targetLengthFor("TITLE_META_UPDATE")).toMatch(/150-300 words/);
     expect(targetLengthFor("CONTENT_REFRESH")).toBe("900-1,500 words");
+  });
+});
+
+describe("M4.5: approve, reopen, labels, filters and states", () => {
+  const base: ControlsInput = {
+    canWrite: true,
+    canReview: true,
+    draftStatus: "AWAITING_EDITOR_REVIEW",
+    itemDrafting: true,
+    briefCurrent: true,
+    hasRevision: true,
+    blocking: false,
+    aiConfigured: true,
+    hasOpenRequest: true,
+  };
+
+  it("offers Approve to a reviewer while review is requested and nothing blocks", () => {
+    const controls = draftControls(base);
+    expect(controls.canApprove).toBe(true);
+    expect(controls.approveReason).toBeNull();
+    expect(controls.needsBriefAcknowledgement).toBe(false);
+    expect(controls.canReturn).toBe(true);
+    expect(controls.canReopen).toBe(false);
+    expect(controls.canGenerate).toBe(false);
+  });
+
+  it("says why Approve is not available, in the server's words", () => {
+    expect(draftControls({ ...base, canReview: false })).toMatchObject({
+      canApprove: false,
+      approveReason: expect.stringMatching(/SEO lead, admin or owner/),
+    });
+    expect(draftControls({ ...base, blocking: true })).toMatchObject({
+      canApprove: false,
+      approveReason: expect.stringMatching(/blocking findings/),
+    });
+    expect(draftControls({ ...base, hasOpenRequest: false })).toMatchObject({
+      canApprove: false,
+      approveReason: expect.stringMatching(/no longer open/),
+    });
+    expect(draftControls({ ...base, draftStatus: "DRAFTING" })).toMatchObject({
+      canApprove: false,
+      approveReason: expect.stringMatching(/No review has been requested/),
+    });
+    expect(draftControls({ ...base, draftStatus: "SUPERSEDED" })).toMatchObject({
+      canApprove: false,
+      approveReason: expect.stringMatching(/superseded/),
+    });
+  });
+
+  it("requires the brief acknowledgement when a newer brief is approved", () => {
+    const controls = draftControls({ ...base, briefCurrent: false });
+    expect(controls.canApprove).toBe(true);
+    expect(controls.needsBriefAcknowledgement).toBe(true);
+  });
+
+  it("locks an approved draft for everyone and offers Reopen to writers", () => {
+    const approved = draftControls({
+      ...base,
+      draftStatus: "APPROVED",
+      itemDrafting: false,
+      itemReadyForQa: true,
+    });
+    expect(approved).toMatchObject({
+      readOnly: true,
+      readOnlyReason: APPROVED_READ_ONLY_REASON,
+      canEdit: false,
+      canGenerate: false,
+      canRequestReview: false,
+      canApprove: false,
+      approveReason: expect.stringMatching(/already approved/),
+      canReopen: true,
+      reopenReason: null,
+      canReturn: false,
+    });
+    const viewer = draftControls({
+      ...base,
+      canWrite: false,
+      canReview: false,
+      draftStatus: "APPROVED",
+      itemDrafting: false,
+      itemReadyForQa: true,
+    });
+    expect(viewer.canReopen).toBe(false);
+    expect(viewer.reopenReason).toMatch(/member's access/);
+  });
+
+  it("labels the P4 statuses in the flow's words", () => {
+    expect(workItemStatusLabel("QA")).toBe("Ready for QA");
+    expect(workItemStatusLabel("DRAFTING")).toBe("Drafting");
+    expect(draftStatusLabel("APPROVED")).toBe("Approved for QA");
+    expect(draftStatusLabel("AWAITING_EDITOR_REVIEW")).toBe("Awaiting review");
+    expect(draftStatusLabel("SUPERSEDED")).toBe("Superseded");
+  });
+
+  it("filters approved drafts, ready for QA", () => {
+    const rows = [
+      {
+        id: "a",
+        status: "APPROVED" as const,
+        contentType: "GUIDE",
+        blocking: false,
+        authorKind: "HUMAN" as const,
+      },
+      {
+        id: "b",
+        status: "DRAFTING" as const,
+        contentType: "GUIDE",
+        blocking: false,
+        authorKind: "AI" as const,
+      },
+    ];
+    const filters = parseDraftFilters({ approved: "1" });
+    expect(filters.approved).toBe(true);
+    expect(applyDraftFilters(rows, filters).map((row) => row.id)).toEqual(["a"]);
+    expect(
+      applyDraftFilters(rows, parseDraftFilters({ status: "APPROVED" })).map((row) => row.id),
+    ).toEqual(["a"]);
+    expect(draftFiltersToQuery(filters)).toEqual({ approved: "1" });
+  });
+
+  it("says the approval, the return and the reopen in plain words", () => {
+    const at = new Date("2026-09-06T09:00:00Z");
+    const approved = draftStateText("approved_for_qa", {
+      revisionNumber: 2,
+      by: "lead@example.com",
+      at,
+      note: "Ship it.",
+    });
+    expect(approved.title).toBe("Approved for QA · revision 2");
+    expect(approved.body).toContain("by lead@example.com");
+    expect(approved.body).toContain("ready for QA");
+    expect(approved.body).toContain("Note: “Ship it.”");
+    const returned = draftStateText("returned", {
+      by: "lead@example.com",
+      at,
+      note: "Add prices.",
+    });
+    expect(returned.title).toMatch(/^Returned to drafting by lead@example.com on /);
+    expect(returned.body).toBe("“Add prices.”");
+    const reopened = draftStateText("approval_not_current", { revisionNumber: 2 });
+    expect(reopened.title).toBe("Approval no longer current · revision 2 was approved");
+    expect(reopened.body).toMatch(/needs a new review and approval before QA/);
+    expect(draftStateText("awaiting_review", { revisionNumber: 3 }).title).toBe(
+      "Awaiting review of revision 3",
+    );
   });
 });

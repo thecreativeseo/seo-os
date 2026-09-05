@@ -8,10 +8,13 @@ import { ClaimsPanel } from "@/components/execution/claims-panel";
 import { DraftStateNotice } from "@/components/execution/draft-state";
 import { FindingsPanel, ReviewBlockers } from "@/components/execution/findings-panel";
 import { DraftsTable } from "@/components/execution/drafts-table";
+import { DraftStatusBadge, WorkItemStatusBadge } from "@/components/execution/status";
 import {
   AuthorLabel,
   ProvenancePanel,
+  ReviewBlock,
   type ProvenanceLineage,
+  type ProvenanceReview,
   type ProvenanceRevision,
 } from "@/components/execution/provenance-panel";
 import type { DraftListRow } from "@/server/services/content-draft";
@@ -429,5 +432,142 @@ describe("DraftsTable", () => {
       createElement(DraftsTable, { rows: [row({})], websiteId: "site", isDemo: false }),
     );
     expect(out).not.toContain("DEMO DATA");
+  });
+});
+
+describe("M4.5: review presentation", () => {
+  const at = new Date("2026-09-06T09:00:00Z");
+  const review: ProvenanceReview = {
+    status: "APPROVED",
+    revisionNumber: 2,
+    revisionHash: "sha256:0123456789abcdef0123456789abcdef",
+    briefVersion: 1,
+    requestedBy: "editor@example.com",
+    requestedAt: new Date("2026-09-06T08:00:00Z"),
+    decidedBy: "lead@example.com",
+    decidedAt: at,
+    note: "Ship it.",
+    selfDecided: false,
+    briefSupersededAtDecision: false,
+    briefMismatchAcknowledged: false,
+    invalidatedReason: null,
+    current: true,
+  };
+  const block = (value: ProvenanceReview) =>
+    text(createElement("dl", null, createElement(ReviewBlock, { review: value })));
+
+  it("states the approval - who, when, exactly which revision - and whether it still stands", () => {
+    const out = block(review);
+    expect(out).toContain("Review requested editor@example.com");
+    expect(out).toContain("for revision 2");
+    expect(out).toContain("sha256:0123456789ab…");
+    expect(out).toContain("Brief v1");
+    expect(out).toContain("Approved lead@example.com");
+    expect(out).toContain("exactly revision 2");
+    expect(out).toContain("Approval note Ship it.");
+    expect(out).toContain("This approval is current: the draft is ready for QA.");
+    expect(out).not.toContain("own author");
+
+    const stale = block({
+      ...review,
+      current: false,
+      selfDecided: true,
+      briefSupersededAtDecision: true,
+      briefMismatchAcknowledged: true,
+      briefVersion: 1,
+    });
+    expect(stale).toContain("Approval no longer current.");
+    expect(stale).toContain("approved by its own author");
+    expect(stale).toContain("the reviewer acknowledged it and approved against Brief v1");
+  });
+
+  it("states a return with its note, and a withdrawn request with its reason", () => {
+    const returned = block({ ...review, status: "RETURNED", note: "Add prices.", current: false });
+    expect(returned).toContain("Returned to drafting lead@example.com");
+    expect(returned).toContain("“Add prices.”");
+    const withdrawn = block({
+      ...review,
+      status: "INVALIDATED",
+      decidedBy: null,
+      decidedAt: null,
+      note: null,
+      invalidatedReason: "content_changed",
+      current: false,
+    });
+    expect(withdrawn).toContain("Request withdrawn the content changed after review was requested");
+    const open = block({
+      ...review,
+      status: "REQUESTED",
+      decidedBy: null,
+      decidedAt: null,
+      note: null,
+      current: false,
+    });
+    expect(open).toContain("Awaiting an SEO lead, admin or owner.");
+  });
+
+  it("carries the approval state on notices and badges as words", () => {
+    expect(
+      text(
+        createElement(DraftStateNotice, {
+          kind: "approved_for_qa",
+          detail: { revisionNumber: 2, by: "lead@example.com", at, note: null },
+        }),
+      ),
+    ).toContain("Approved Approved for QA · revision 2");
+    expect(
+      text(
+        createElement(DraftStateNotice, {
+          kind: "returned",
+          detail: { by: "lead@example.com", at, note: "Add prices." },
+        }),
+      ),
+    ).toContain("Returned Returned to drafting by lead@example.com");
+    expect(
+      text(
+        createElement(DraftStateNotice, {
+          kind: "approval_not_current",
+          detail: { revisionNumber: 2 },
+        }),
+      ),
+    ).toContain("Reopened Approval no longer current · revision 2 was approved");
+    expect(text(createElement(WorkItemStatusBadge, { status: "QA" }))).toContain("Ready for QA");
+    expect(text(createElement(WorkItemStatusBadge, { status: "DRAFTING" }))).toContain("Drafting");
+    expect(text(createElement(DraftStatusBadge, { status: "APPROVED" }))).toContain(
+      "Approved for QA",
+    );
+    expect(text(createElement(DraftStatusBadge, { status: "AWAITING_EDITOR_REVIEW" }))).toContain(
+      "Awaiting review",
+    );
+  });
+
+  it("lists an approved draft as Approved for QA with its approved revision", () => {
+    const row: DraftListRow = {
+      id: "d9",
+      workItemId: "w9",
+      workItemTitle: "Approved one",
+      workItemType: "CONTENT_REFRESH",
+      workItemStatus: "QA",
+      contentType: "GUIDE",
+      briefId: "b9",
+      briefVersion: 1,
+      briefStatus: "APPROVED",
+      briefMismatch: null,
+      status: "APPROVED",
+      awaitingReview: false,
+      currentRevisionNumber: 2,
+      currentTitle: "Guide",
+      revisionCount: 2,
+      authorKind: "HUMAN",
+      findings: { blocking: 0, warning: 0, info: 0 },
+      blocking: false,
+      approvedRevisionNumber: 2,
+      updatedAt: at,
+    };
+    const out = text(createElement(DraftsTable, { rows: [row], websiteId: "site", isDemo: false }));
+    expect(out).toContain("Approved for QA");
+    expect(out).toContain("Ready for QA");
+    expect(out).toContain("Approved revision 2");
+    expect(out).not.toContain("Review requested");
   });
 });

@@ -6,6 +6,7 @@ import {
   DRAFT_AUTHOR_FILTERS,
   DRAFT_STATUS_FILTERS,
   applyDraftFilters,
+  draftStatusLabel,
   parseDraftFilters,
 } from "@/lib/content/draft-ux";
 import { EmptyState, PageHeader } from "@/components/governance/primitives";
@@ -17,10 +18,10 @@ import { DraftStateNotice } from "@/components/execution/draft-state";
 export const metadata = { title: "Drafts · SEO OS" };
 
 /**
- * Execution → Drafts (M4.4 §2): every draft of the website, most recently
- * updated first, with filters a person would actually reach for. On a demo
- * website the two seeded stories are pointed out, so a visitor can find them
- * without knowing where to look.
+ * Execution → Drafts (M4.4 §2, M4.5): every draft of the website, most
+ * recently updated first, with filters a person would actually reach for -
+ * including the drafts awaiting review and those approved and ready for QA.
+ * On a demo website the seeded stories are pointed out.
  */
 export default async function DraftsPage({
   params,
@@ -40,7 +41,9 @@ export default async function DraftsPage({
   const filtering = JSON.stringify(filters) !== JSON.stringify(parseDraftFilters({}));
 
   // The seeded stories, found by what they are rather than by id.
-  const storyA = context.website.isDemo ? all.find((row) => row.awaitingReview) : undefined;
+  const storyA = context.website.isDemo
+    ? (all.find((row) => row.status === "APPROVED") ?? all.find((row) => row.awaitingReview))
+    : undefined;
   const storyOld = context.website.isDemo
     ? all.find((row) => row.status === "SUPERSEDED")
     : undefined;
@@ -49,13 +52,15 @@ export default async function DraftsPage({
     : undefined;
 
   const select = "border-border bg-background h-9 rounded-md border px-2 text-sm";
+  const awaitingCount = all.filter((row) => row.awaitingReview).length;
+  const readyCount = all.filter((row) => row.status === "APPROVED").length;
 
   return (
     <main className="space-y-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <PageHeader
           title="Drafts"
-          description="Every draft of this website: which brief it is pinned to, where it stands, who wrote the current revision, and what the server found in it."
+          description="Every draft of this website: which brief it is pinned to, where it stands, who wrote the current revision, what the server found in it, and which revision is approved."
         />
         {context.website.isDemo ? <DemoBadge /> : null}
       </div>
@@ -72,6 +77,23 @@ export default async function DraftsPage({
         </span>
       </nav>
 
+      <div className="flex flex-wrap gap-3 text-sm">
+        <Link
+          href={`/websites/${websiteId}/drafts?awaiting=1`}
+          className="border-border hover:bg-accent/40 rounded-lg border px-3 py-2"
+        >
+          <span className="text-muted-foreground text-xs">Awaiting review</span>
+          <span className="ml-2 font-semibold tabular-nums">{awaitingCount}</span>
+        </Link>
+        <Link
+          href={`/websites/${websiteId}/drafts?approved=1`}
+          className="border-border hover:bg-accent/40 rounded-lg border px-3 py-2"
+        >
+          <span className="text-muted-foreground text-xs">Ready for QA</span>
+          <span className="ml-2 font-semibold tabular-nums">{readyCount}</span>
+        </Link>
+      </div>
+
       {context.website.isDemo && (storyA || storyOld) ? (
         <section className="border-border space-y-2 rounded-lg border border-dashed p-4 text-sm">
           <div className="flex flex-wrap items-center gap-2">
@@ -82,8 +104,8 @@ export default async function DraftsPage({
             {storyA ? (
               <li>
                 <span className="font-medium">
-                  Approved brief → AI revision → blocking finding → human revision → review
-                  requested.
+                  Approved brief → AI revision → blocking finding → human revision → review →{" "}
+                  {storyA.status === "APPROVED" ? "approved for QA" : "review requested"}.
                 </span>{" "}
                 <Link
                   href={`/websites/${websiteId}/content/${storyA.workItemId}/draft?draft=${storyA.id}`}
@@ -134,7 +156,7 @@ export default async function DraftsPage({
           <select id="filter-status" name="status" defaultValue={filters.status} className={select}>
             {DRAFT_STATUS_FILTERS.map((status) => (
               <option key={status} value={status}>
-                {status === "all" ? "All statuses" : humanize(status)}
+                {status === "all" ? "All statuses" : draftStatusLabel(status)}
               </option>
             ))}
           </select>
@@ -185,6 +207,10 @@ export default async function DraftsPage({
             defaultChecked={filters.awaitingReview}
           />
           Awaiting review
+        </label>
+        <label className="flex h-9 items-center gap-2">
+          <input type="checkbox" name="approved" value="1" defaultChecked={filters.approved} />
+          Ready for QA
         </label>
         <label className="flex h-9 items-center gap-2">
           <input type="checkbox" name="superseded" value="1" defaultChecked={filters.superseded} />

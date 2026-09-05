@@ -16,13 +16,17 @@ import {
   previewHtml,
   revisionClaims,
   revisionFindings,
+  type ReviewView,
 } from "@/server/services/content-draft";
 import { draftControls } from "@/lib/content/draft-ux";
 import { EmptyState, PageHeader } from "@/components/governance/primitives";
 import { DemoBadge } from "@/components/metrics/primitives";
-import { StatusBadge, humanize } from "@/components/diagnosis/primitives";
+import { humanize } from "@/components/diagnosis/primitives";
+import { DraftStatusBadge } from "@/components/execution/status";
 import {
+  ApproveDraftForm,
   GenerateRevisionButton,
+  ReopenDraftForm,
   RequestReviewButton,
   ReturnToDraftingForm,
   StartDraftButton,
@@ -33,19 +37,51 @@ import { BriefPanel } from "@/components/execution/brief-panel";
 import { ClaimsPanel } from "@/components/execution/claims-panel";
 import { DraftStateNotice } from "@/components/execution/draft-state";
 import { FindingsPanel, ReviewBlockers } from "@/components/execution/findings-panel";
-import { AuthorLabel, ProvenancePanel } from "@/components/execution/provenance-panel";
+import {
+  AuthorLabel,
+  ProvenancePanel,
+  type ProvenanceReview,
+} from "@/components/execution/provenance-panel";
 
 export const metadata = { title: "Draft · SEO OS" };
 
+/** The review row that concerns a revision, as the provenance panel shows it. */
+function reviewFor(
+  history: ReviewView[],
+  revisionId: string,
+  approvedReviewId: string | null,
+): ProvenanceReview | null {
+  const ofThis = history.filter((row) => row.contentRevisionId === revisionId);
+  const row = ofThis.find((entry) => entry.status === "APPROVED") ?? ofThis[0];
+  if (!row) return null;
+  return {
+    status: row.status,
+    revisionNumber: row.revisionNumber,
+    revisionHash: row.revisionHash,
+    briefVersion: row.briefVersion,
+    requestedBy: row.requestedBy?.email ?? null,
+    requestedAt: row.requestedAt,
+    decidedBy: row.decidedBy?.email ?? null,
+    decidedAt: row.decidedAt,
+    note: row.note,
+    selfDecided: row.selfDecided,
+    briefSupersededAtDecision: row.briefSupersededAtDecision,
+    briefMismatchAcknowledged: row.briefMismatchAcknowledged,
+    invalidatedReason: row.invalidatedReason,
+    current: row.status === "APPROVED" && approvedReviewId === row.id,
+  };
+}
+
 /**
- * The draft workspace (docs/P4_SPEC.md §9-§12; M4.4 §3-§7, §12-§13).
+ * The draft workspace (docs/P4_SPEC.md §9-§12, §25; M4.4 §3-§7, M4.5).
  *
  * Three areas: the pinned brief as constraints on the left, the draft in
  * the middle - preview or editor - and on the right who wrote it, what the
- * server found, and what it claims. Controls follow the service rules for
- * the person's role and the draft's state; a superseded draft is read-only
- * for everyone. `?draft=` opens a particular draft; `?mode=edit` opens the
- * editor.
+ * server found, what it claims, and what review did with it. Controls
+ * follow the service rules for the person's role and the draft's state: a
+ * superseded draft is read-only for everyone; an approved draft is read-only
+ * until a person reopens it; a reviewer approves exactly the requested
+ * revision. `?draft=` opens a particular draft; `?mode=edit` opens the editor.
  */
 export default async function DraftPage({
   params,
@@ -77,6 +113,7 @@ export default async function DraftPage({
   const canReview = hasRole(context.membership.role, REQUIRED.REVIEW);
   const briefApproved = brief?.status === "APPROVED";
   const drafting = item.status === "DRAFTING";
+  const readyForQa = item.status === "QA";
   const aiConfigured = isAiConfigured();
   // Minted per render: a retry of this page's form returns the same revision.
   const generationToken = crypto.randomUUID();
@@ -93,10 +130,12 @@ export default async function DraftPage({
         canReview,
         draftStatus: view.draft.status,
         itemDrafting: drafting,
+        itemReadyForQa: readyForQa,
         briefCurrent: view.brief.status === "APPROVED",
         hasRevision: Boolean(current),
         blocking,
         aiConfigured,
+        hasOpenRequest: Boolean(view.review.open),
       })
     : null;
   const editing = mode === "edit" && Boolean(controls?.canEdit);
@@ -104,7 +143,22 @@ export default async function DraftPage({
   const base = `/websites/${websiteId}/content/${item.id}/draft`;
   const withDraft = (path: string, extra = "") =>
     view ? `${path}?draft=${view.draft.id}${extra}` : path;
-  const earlier = drafts.filter((row) => row.status === "SUPERSEDED" || row.status === "ARCHIVED");
+
+  const approval = view?.review.approval ?? null;
+  const openRequest = view?.review.open ?? null;
+  const latestReturn = view?.review.history.find((row) => row.status === "RETURNED") ?? null;
+  const pastApproval =
+    view && !approval
+      ? (view.review.history.find((row) => row.status === "APPROVED") ?? null)
+      : null;
+  const reopenEvent =
+    view && pastApproval && view.draft.status === "DRAFTING"
+      ? view.review.history.find((row) => row.status === "APPROVED" && row.id === pastApproval.id)
+      : null;
+  const reviewOfCurrent =
+    view && current
+      ? reviewFor(view.review.history, current.id, view.draft.approvedReviewId)
+      : null;
 
   return (
     <main className="space-y-6">
@@ -171,10 +225,15 @@ export default async function DraftPage({
           {/* ------------------------------------------------ Status strip */}
           <section className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
-              <StatusBadge status={view.draft.status} />
+              <DraftStatusBadge status={view.draft.status} />
               {view.draft.status === "AWAITING_EDITOR_REVIEW" ? (
                 <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 dark:bg-amber-900/40 dark:text-amber-200">
                   Review requested
+                </span>
+              ) : null}
+              {view.draft.status === "APPROVED" ? (
+                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-200">
+                  Ready for QA
                 </span>
               ) : null}
               <span className="text-muted-foreground text-xs">
@@ -226,30 +285,103 @@ export default async function DraftPage({
               </DraftStateNotice>
             ) : null}
 
-            {view.draft.status === "AWAITING_EDITOR_REVIEW" ? (
-              <DraftStateNotice kind="awaiting_review">
-                {controls.canReturn ? (
-                  <ReturnToDraftingForm
+            {/* ---- Approved for QA */}
+            {view.draft.status === "APPROVED" && approval ? (
+              <DraftStateNotice
+                kind="approved_for_qa"
+                detail={{
+                  revisionNumber: approval.revisionNumber,
+                  by: approval.by,
+                  at: approval.at,
+                  note: approval.note,
+                }}
+              >
+                {controls.canReopen ? (
+                  <ReopenDraftForm
                     websiteId={websiteId}
                     workItemId={item.id}
                     draftId={view.draft.id}
+                    approvedRevisionNumber={approval.revisionNumber}
                   />
+                ) : controls.reopenReason ? (
+                  <p className="text-muted-foreground text-sm">{controls.reopenReason}</p>
                 ) : null}
               </DraftStateNotice>
             ) : null}
 
-            {view.lastReturn && view.draft.status === "DRAFTING" ? (
-              <div role="status" className="border-border rounded-lg border p-3 text-sm">
-                <p className="font-medium">
-                  Returned to drafting
-                  {view.lastReturn.by ? ` by ${view.lastReturn.by}` : ""} on{" "}
-                  {view.lastReturn.at.toLocaleString("en-GB")}
-                </p>
-                <p className="text-muted-foreground mt-1">“{view.lastReturn.note}”</p>
-              </div>
+            {/* ---- Awaiting review: the reviewer decides exactly this revision */}
+            {view.draft.status === "AWAITING_EDITOR_REVIEW" ? (
+              <DraftStateNotice
+                kind="awaiting_review"
+                detail={{ revisionNumber: openRequest?.revisionNumber ?? current?.revisionNumber }}
+              >
+                {current && (controls.canApprove || (canReview && controls.approveReason)) ? (
+                  <div className="space-y-4">
+                    <ApproveDraftForm
+                      websiteId={websiteId}
+                      workItemId={item.id}
+                      draftId={view.draft.id}
+                      revisionNumber={openRequest?.revisionNumber ?? current.revisionNumber}
+                      revisionHash={openRequest?.revisionHash ?? current.contentHash}
+                      disabled={!controls.canApprove}
+                      reason={controls.approveReason}
+                      needsBriefAcknowledgement={controls.needsBriefAcknowledgement}
+                      briefVersion={view.brief.version}
+                      approvedBriefVersion={view.briefMismatch?.approvedVersion ?? null}
+                    />
+                    {controls.canReturn ? (
+                      <ReturnToDraftingForm
+                        websiteId={websiteId}
+                        workItemId={item.id}
+                        draftId={view.draft.id}
+                      />
+                    ) : null}
+                  </div>
+                ) : !canReview ? (
+                  <p className="text-muted-foreground text-sm">
+                    Approval needs an SEO lead, admin or owner.
+                    {controls.canEdit
+                      ? " You can still save a revision; that sends the draft back to drafting."
+                      : ""}
+                  </p>
+                ) : null}
+              </DraftStateNotice>
             ) : null}
 
-            {controls.readOnly && controls.readOnlyReason && view.draft.status !== "SUPERSEDED" ? (
+            {/* ---- Returned, and approval no longer current */}
+            {view.draft.status === "DRAFTING" && latestReturn && !pastApproval ? (
+              <DraftStateNotice
+                kind="returned"
+                detail={{
+                  by: latestReturn.decidedBy?.email ?? null,
+                  at: latestReturn.decidedAt,
+                  note: latestReturn.note,
+                }}
+              />
+            ) : null}
+            {view.draft.status === "DRAFTING" && pastApproval ? (
+              <DraftStateNotice
+                kind="approval_not_current"
+                detail={{ revisionNumber: pastApproval.revisionNumber, note: null }}
+              >
+                {latestReturn &&
+                latestReturn.decidedAt &&
+                pastApproval.decidedAt &&
+                latestReturn.decidedAt > pastApproval.decidedAt ? (
+                  <p className="text-muted-foreground text-sm">
+                    Returned again
+                    {latestReturn.decidedBy ? ` by ${latestReturn.decidedBy.email}` : ""}
+                    {latestReturn.note ? `: “${latestReturn.note}”` : "."}
+                  </p>
+                ) : null}
+              </DraftStateNotice>
+            ) : null}
+            {reopenEvent ? null : null}
+
+            {controls.readOnly &&
+            controls.readOnlyReason &&
+            view.draft.status !== "SUPERSEDED" &&
+            view.draft.status !== "APPROVED" ? (
               <p className="text-muted-foreground text-sm">{controls.readOnlyReason}</p>
             ) : null}
 
@@ -351,7 +483,8 @@ export default async function DraftPage({
                 <>
                   {view.draft.status === "AWAITING_EDITOR_REVIEW" ? (
                     <p className="text-muted-foreground text-sm">
-                      Saving while review is requested sends the draft back to drafting.
+                      Saving while review is requested sends the draft back to drafting and
+                      withdraws the request.
                     </p>
                   ) : null}
                   <DraftForm
@@ -390,7 +523,12 @@ export default async function DraftPage({
                     dangerouslySetInnerHTML={{ __html: previewHtml(current) }}
                   />
 
-                  {controls.canEdit || controls.canGenerate || controls.canRequestReview ? (
+                  {view.draft.status === "APPROVED" ? (
+                    <p className="text-muted-foreground text-sm">
+                      Edit and Generate are closed while the draft is approved. Reopen it for
+                      revision above to change it; the approval stays in history.
+                    </p>
+                  ) : controls.canEdit || controls.canGenerate || controls.canRequestReview ? (
                     <div className="space-y-4">
                       {controls.canGenerate ? (
                         <GenerateRevisionButton
@@ -434,6 +572,7 @@ export default async function DraftPage({
                   <ProvenancePanel
                     revision={current}
                     viewerUserId={context.user.id}
+                    review={reviewOfCurrent}
                     lineage={{
                       briefVersion: view.brief.version,
                       briefSuperseded: view.brief.status !== "APPROVED",
@@ -461,13 +600,13 @@ export default async function DraftPage({
             </aside>
           </div>
 
-          {earlier.length > 0 || drafts.length > 1 ? (
+          {drafts.length > 1 ? (
             <section className="space-y-2">
               <h2 className="text-sm font-medium">Drafts of this work item</h2>
               <ul className="divide-border border-border divide-y rounded-lg border text-sm">
                 {drafts.map((row) => (
                   <li key={row.id} className="flex flex-wrap items-center gap-2 px-4 py-2">
-                    <StatusBadge status={row.status} />
+                    <DraftStatusBadge status={row.status} />
                     <span className="text-muted-foreground text-xs">
                       brief v{row.briefVersion} · {row.revisionCount} revision
                       {row.revisionCount === 1 ? "" : "s"}

@@ -14,13 +14,15 @@ import { PageHeader } from "@/components/governance/primitives";
 import { DemoBadge } from "@/components/metrics/primitives";
 import { PriorityBadge } from "@/components/opportunity/primitives";
 import { StatusBadge, humanize } from "@/components/diagnosis/primitives";
+import { DraftStatusBadge, WorkItemStatusBadge } from "@/components/execution/status";
 import { StartDraftButton } from "@/components/execution/draft-controls";
 
 /**
- * One work item (docs/P4_SPEC.md §6; M4.4 §10): where it came from, read
- * as a chain - Recommendation → Decision → Brief → Draft - and where each
- * link stands. The active draft is shown apart from any earlier, superseded
- * ones. Stages that follow arrive with their own milestones.
+ * One work item (docs/P4_SPEC.md §6; M4.4 §10, M4.5): where it came from,
+ * read as a chain - Recommendation → Decision → Brief → Draft - and where
+ * each link stands. An approved draft reads "Approved for QA · revision N"
+ * and the item "Ready for QA"; QA itself is M5. The active draft is shown
+ * apart from any earlier, superseded ones.
  */
 export default async function ContentWorkItemPage({
   params,
@@ -47,35 +49,40 @@ export default async function ContentWorkItemPage({
   const currentFindings = draftView?.current ? revisionFindings(draftView.current) : null;
   const blockingCount =
     currentFindings?.findings.filter((row) => row.severity === "BLOCKING").length ?? 0;
+  const approval = draftView?.review.approval ?? null;
   const base = `/websites/${websiteId}/content/${item.id}`;
+
+  const draftStep = draftView
+    ? draftView.draft.status === "APPROVED" && approval
+      ? `Approved for QA · revision ${approval.revisionNumber}`
+      : draftView.current
+        ? `Revision ${draftView.current.revisionNumber} · ${draftView.current.title}`
+        : "Started, no revision yet"
+    : "Not started";
 
   const steps = [
     {
       label: "Recommendation",
       value: item.recommendation.title,
-      status: item.recommendation.status,
+      badge: <StatusBadge status={item.recommendation.status} />,
       href: `/websites/${websiteId}/review/${item.recommendation.id}`,
     },
     {
       label: "Decision",
       value: `${humanize(item.decision.decision)} by ${item.decision.decidedBy.email}`,
-      status: item.decision.decision,
+      badge: <StatusBadge status={item.decision.decision} />,
       href: `/websites/${websiteId}/review/${item.recommendation.id}`,
     },
     {
       label: "Brief",
       value: brief ? `v${brief.version} · ${brief.title}` : "Not written yet",
-      status: brief?.status ?? null,
+      badge: brief ? <StatusBadge status={brief.status} /> : null,
       href: `${base}/brief`,
     },
     {
       label: "Draft",
-      value: draftView
-        ? draftView.current
-          ? `Revision ${draftView.current.revisionNumber} · ${draftView.current.title}`
-          : "Started, no revision yet"
-        : "Not started",
-      status: draftView?.draft.status ?? null,
+      value: draftStep,
+      badge: draftView ? <DraftStatusBadge status={draftView.draft.status} /> : null,
       href: `${base}/draft`,
     },
   ];
@@ -88,7 +95,7 @@ export default async function ContentWorkItemPage({
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <StatusBadge status={item.status} />
+        <WorkItemStatusBadge status={item.status} />
         <PriorityBadge priority={item.priority} />
         <span className="text-muted-foreground text-xs">{humanize(item.type)}</span>
       </div>
@@ -108,11 +115,7 @@ export default async function ContentWorkItemPage({
                 {step.value}
               </Link>
               <div className="mt-1">
-                {step.status ? (
-                  <StatusBadge status={step.status} />
-                ) : (
-                  <span className="text-muted-foreground text-xs">—</span>
-                )}
+                {step.badge ?? <span className="text-muted-foreground text-xs">—</span>}
               </div>
             </li>
           ))}
@@ -248,10 +251,15 @@ export default async function ContentWorkItemPage({
         {draftView ? (
           <div className="border-border space-y-2 rounded-lg border p-4">
             <div className="flex flex-wrap items-center gap-2">
-              <StatusBadge status={draftView.draft.status} />
+              <DraftStatusBadge status={draftView.draft.status} />
               {draftView.draft.status === "AWAITING_EDITOR_REVIEW" ? (
                 <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 dark:bg-amber-900/40 dark:text-amber-200">
                   Review requested
+                </span>
+              ) : null}
+              {draftView.draft.status === "APPROVED" ? (
+                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-200">
+                  Ready for QA
                 </span>
               ) : null}
               {blockingCount > 0 ? (
@@ -276,6 +284,18 @@ export default async function ContentWorkItemPage({
             ) : (
               <p className="text-muted-foreground text-sm">No revision yet.</p>
             )}
+            {approval ? (
+              <p className="text-sm">
+                <span className="font-medium">
+                  Approved for QA · revision {approval.revisionNumber}
+                </span>
+                <span className="text-muted-foreground">
+                  {" "}
+                  by {approval.by ?? "—"} on {approval.at.toLocaleString("en-GB")}
+                  {approval.note ? ` · “${approval.note}”` : ""}
+                </span>
+              </p>
+            ) : null}
             {draftView.briefMismatch ? (
               <p className="text-sm">
                 <span className="font-medium">
@@ -312,7 +332,7 @@ export default async function ContentWorkItemPage({
             <ul className="divide-border border-border divide-y rounded-lg border text-sm">
               {earlier.map((row) => (
                 <li key={row.id} className="flex flex-wrap items-center gap-2 px-4 py-2">
-                  <StatusBadge status={row.status} />
+                  <DraftStatusBadge status={row.status} />
                   <span className="text-muted-foreground text-xs">
                     based on Brief v{row.briefVersion} · {row.revisionCount} revision
                     {row.revisionCount === 1 ? "" : "s"}
@@ -330,11 +350,13 @@ export default async function ContentWorkItemPage({
       <section className="space-y-2">
         <h2 className="text-sm font-medium">Next</h2>
         <p className="text-muted-foreground border-border rounded-lg border border-dashed p-4 text-sm">
-          {draftView?.draft.status === "AWAITING_EDITOR_REVIEW"
-            ? "An editor reviews the current revision. QA, approval and CMS steps follow in later milestones."
-            : brief?.status === "APPROVED"
-              ? "Draft, revise and request editorial review. QA, approval and CMS steps follow in later milestones."
-              : "An approved brief comes first. Drafting, QA and CMS steps follow in later milestones."}
+          {item.status === "QA"
+            ? "The draft is approved and ready for QA. QA checks run in a later milestone (M5); nothing runs yet. Reopening the draft for revision brings the work item back to drafting."
+            : draftView?.draft.status === "AWAITING_EDITOR_REVIEW"
+              ? "An editor approves exactly the requested revision, or returns the draft with a note. QA, CMS and publishing follow in later milestones."
+              : brief?.status === "APPROVED"
+                ? "Draft, revise and request editorial review. QA, approval for CMS and publishing follow in later milestones."
+                : "An approved brief comes first. Drafting, QA and CMS steps follow in later milestones."}
         </p>
       </section>
 

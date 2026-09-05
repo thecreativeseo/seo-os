@@ -3,13 +3,16 @@
 import { useActionState } from "react";
 
 import {
+  approveDraftAction,
   generateRevisionAction,
+  reopenDraftAction,
   requestReviewAction,
   returnToDraftingAction,
   startDraftAction,
   startFromBriefAction,
   type DraftActionState,
 } from "@/server/actions/content-draft";
+import { shortHash } from "@/lib/content/draft-ux";
 
 const initial: DraftActionState = {};
 
@@ -17,6 +20,8 @@ const PRIMARY =
   "bg-foreground text-background inline-flex h-9 items-center rounded-md px-4 text-sm font-medium disabled:opacity-60";
 const SECONDARY =
   "border-border inline-flex h-9 items-center rounded-md border px-4 text-sm font-medium disabled:opacity-60";
+const TEXTAREA =
+  "border-border bg-background w-full rounded-md border px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2";
 
 /** Asks once before an act that changes state for other people. */
 function confirmOr(message: string) {
@@ -31,6 +36,7 @@ function Feedback({ state }: { state: DraftActionState }) {
     state.code === "generation_in_progress" ||
     state.code === "no_provider" ||
     state.code === "blocked" ||
+    state.code === "brief_superseded" ||
     state.code === "nothing_changed";
   return (
     <div
@@ -185,7 +191,7 @@ export function RequestReviewButton({
       action={action}
       className="space-y-2"
       onSubmit={confirmOr(
-        "Request editorial review of the current revision? An SEO lead, admin or owner will be able to return it with a note.",
+        "Request editorial review of the current revision? An SEO lead, admin or owner will approve exactly this revision, or return it with a note.",
       )}
     >
       <input type="hidden" name="__websiteId" value={websiteId} />
@@ -203,7 +209,7 @@ export function RequestReviewButton({
         <span className="text-muted-foreground text-xs">
           {blocked
             ? (reason ?? "Not available for this revision.")
-            : "Marks the current revision as ready for an editor. Warnings are shown to them, not hidden."}
+            : "Pins the current revision for an editor. Warnings are shown to them, not hidden."}
         </span>
       </div>
       <Feedback state={state} />
@@ -243,14 +249,165 @@ export function ReturnToDraftingForm({
         rows={3}
         required
         placeholder="What needs to change before this can be reviewed again."
-        className="border-border bg-background w-full rounded-md border px-3 py-2 text-sm focus-visible:outline-2 focus-visible:outline-offset-2"
+        className={TEXTAREA}
       />
       <div className="flex flex-wrap items-center gap-3">
         <button type="submit" disabled={pending} className={SECONDARY}>
           {pending ? "Returning…" : "Return with this note"}
         </button>
         <span className="text-muted-foreground text-xs">
-          The note is recorded and shown on the draft. Approval is not part of this step.
+          The note is recorded on the review and shown on the draft.
+        </span>
+      </div>
+      <Feedback state={state} />
+    </form>
+  );
+}
+
+/**
+ * Approves exactly the requested revision (M4.5). The form says which
+ * revision and hash it will pin, takes an optional note, and - when a newer
+ * brief has been approved meanwhile - requires the reviewer to acknowledge
+ * it. Disabled with the authoritative reason when the server would refuse.
+ */
+export function ApproveDraftForm({
+  websiteId,
+  workItemId,
+  draftId,
+  revisionNumber,
+  revisionHash,
+  disabled,
+  reason,
+  needsBriefAcknowledgement,
+  briefVersion,
+  approvedBriefVersion,
+}: {
+  websiteId: string;
+  workItemId: string;
+  draftId: string;
+  revisionNumber: number;
+  revisionHash: string;
+  disabled: boolean;
+  reason?: string | null;
+  needsBriefAcknowledgement: boolean;
+  briefVersion: number;
+  approvedBriefVersion?: number | null;
+}) {
+  const [state, action, pending] = useActionState(approveDraftAction, initial);
+
+  return (
+    <form
+      action={action}
+      className="border-border space-y-3 rounded-lg border p-3"
+      onSubmit={confirmOr(
+        `Approve revision ${revisionNumber} (${shortHash(revisionHash)}) exactly as it is? The work item becomes ready for QA, and nothing edits this draft until a person reopens it.`,
+      )}
+    >
+      <input type="hidden" name="__websiteId" value={websiteId} />
+      <input type="hidden" name="__workItemId" value={workItemId} />
+      <input type="hidden" name="__draftId" value={draftId} />
+      <div>
+        <p className="text-sm font-medium">Approve revision {revisionNumber}</p>
+        <p className="text-muted-foreground text-xs">
+          Exactly this revision, <span className="font-mono">{shortHash(revisionHash)}</span>,
+          written to Brief v{briefVersion}. A later revision will need a new review.
+        </p>
+      </div>
+      <div className="space-y-1">
+        <label htmlFor="approve-note" className="text-sm font-medium">
+          Approval note <span className="text-muted-foreground font-normal">· optional</span>
+        </label>
+        <textarea
+          id="approve-note"
+          name="note"
+          rows={2}
+          placeholder="Anything QA or the editor should know."
+          className={TEXTAREA}
+          disabled={disabled}
+        />
+      </div>
+      {needsBriefAcknowledgement ? (
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="acknowledgeBriefMismatch"
+            required
+            disabled={disabled}
+            className="mt-1"
+          />
+          <span>
+            I have read Brief v{approvedBriefVersion ?? "?"}, the newer approved version, and I
+            approve this draft against Brief v{briefVersion} anyway. This is recorded with the
+            approval.
+          </span>
+        </label>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-3">
+        <button
+          type="submit"
+          disabled={pending || disabled}
+          aria-disabled={disabled}
+          className={PRIMARY}
+        >
+          {pending ? "Approving…" : `Approve revision ${revisionNumber}`}
+        </button>
+        <span className="text-muted-foreground text-xs">
+          {disabled
+            ? (reason ?? "Not available.")
+            : "Sets the standing approval and hands the work item to QA. QA itself runs in a later milestone."}
+        </span>
+      </div>
+      <Feedback state={state} />
+    </form>
+  );
+}
+
+/**
+ * Reopens an approved draft for revision (M4.5). A reason is required; the
+ * approval stays in history and is marked no longer current.
+ */
+export function ReopenDraftForm({
+  websiteId,
+  workItemId,
+  draftId,
+  approvedRevisionNumber,
+}: {
+  websiteId: string;
+  workItemId: string;
+  draftId: string;
+  approvedRevisionNumber: number | null;
+}) {
+  const [state, action, pending] = useActionState(reopenDraftAction, initial);
+
+  return (
+    <form
+      action={action}
+      className="space-y-2"
+      onSubmit={confirmOr(
+        `Reopen this draft for revision? The approval of revision ${approvedRevisionNumber ?? "?"} will no longer be current, the work item goes back to drafting, and Edit and Generate become available again. The approval stays in history.`,
+      )}
+    >
+      <input type="hidden" name="__websiteId" value={websiteId} />
+      <input type="hidden" name="__workItemId" value={workItemId} />
+      <input type="hidden" name="__draftId" value={draftId} />
+      <label htmlFor="reopen-reason" className="text-sm font-medium">
+        Reopen for revision
+      </label>
+      <textarea
+        id="reopen-reason"
+        name="reason"
+        rows={2}
+        required
+        placeholder="Why the approved draft needs to change."
+        className={TEXTAREA}
+      />
+      <div className="flex flex-wrap items-center gap-3">
+        <button type="submit" disabled={pending} className={SECONDARY}>
+          {pending ? "Reopening…" : "Reopen with this reason"}
+        </button>
+        <span className="text-muted-foreground text-xs">
+          Makes Edit and Generate available again. The standing approval becomes no longer current;
+          it stays in history with the reason.
         </span>
       </div>
       <Feedback state={state} />

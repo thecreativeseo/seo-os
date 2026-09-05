@@ -1950,7 +1950,7 @@ export type DraftView = {
 };
 
 async function buildView(context: TenantContext, draft: DraftWithBrief): Promise<DraftView> {
-  const [current, approved, revisionCount, returned, reviews, approvedBy] = await Promise.all([
+  const [current, approved, revisionCount, reviews, approvedBy] = await Promise.all([
     draft.currentRevisionId
       ? prisma.contentRevision.findFirst({
           where: { id: draft.currentRevisionId, ...websiteScope(context) },
@@ -1966,16 +1966,6 @@ async function buildView(context: TenantContext, draft: DraftWithBrief): Promise
       select: { id: true, version: true },
     }),
     prisma.contentRevision.count({ where: { contentDraftId: draft.id } }),
-    prisma.auditEvent.findFirst({
-      where: {
-        entityType: "ContentDraft",
-        entityId: draft.id,
-        action: "DECLINE",
-        websiteId: context.website.id,
-      },
-      orderBy: { createdAt: "desc" },
-      include: { actor: { select: { email: true } } },
-    }),
     prisma.contentDraftReview.findMany({
       where: { contentDraftId: draft.id, ...websiteScope(context) },
       orderBy: { createdAt: "desc" },
@@ -1987,7 +1977,8 @@ async function buildView(context: TenantContext, draft: DraftWithBrief): Promise
   ]);
 
   const { brief, ...rest } = draft;
-  const note = (returned?.afterSnapshotJson as { note?: unknown } | null)?.note;
+  // The latest return, from the review row that recorded it (M4.5).
+  const returned = reviews.find((row) => row.status === "RETURNED") ?? null;
   const approvedRow = draft.approvedReviewId
     ? (reviews.find((row) => row.id === draft.approvedReviewId) ?? null)
     : null;
@@ -2018,8 +2009,8 @@ async function buildView(context: TenantContext, draft: DraftWithBrief): Promise
     current,
     revisionCount,
     lastReturn:
-      returned && typeof note === "string"
-        ? { note, by: returned.actor?.email ?? null, at: returned.createdAt }
+      returned && returned.note && returned.decidedAt
+        ? { note: returned.note, by: returned.decidedBy?.email ?? null, at: returned.decidedAt }
         : null,
     review: {
       open: reviews.find((row) => row.status === "REQUESTED") ?? null,

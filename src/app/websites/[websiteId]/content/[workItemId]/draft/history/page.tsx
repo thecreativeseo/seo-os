@@ -6,15 +6,18 @@ import { getContentWorkItem } from "@/server/services/content-work";
 import { getDraft, getDraftForWorkItem, listRevisions } from "@/server/services/content-draft";
 import { EmptyState, PageHeader } from "@/components/governance/primitives";
 import { DemoBadge } from "@/components/metrics/primitives";
-import { StatusBadge, humanize } from "@/components/diagnosis/primitives";
+import { humanize } from "@/components/diagnosis/primitives";
+import { DraftStatusBadge } from "@/components/execution/status";
 
 export const metadata = { title: "Revision history · SEO OS" };
 
 /**
- * Every revision of a draft, newest first (docs/P4_SPEC.md §10; M4.4 §8):
- * who or what wrote it and from which revision, when, how long, what the
- * server found, the change summary and a short provenance line. The current
- * revision is marked; earlier ones open read-only.
+ * Every revision of a draft, newest first (docs/P4_SPEC.md §10; M4.4 §8,
+ * M4.5): who or what wrote it and from which revision, when, how long, what
+ * the server found, the change summary, a short provenance line, and what
+ * review did with it - approved (and whether that approval still stands),
+ * returned with a note, or a request withdrawn. The current revision is
+ * marked; earlier ones open read-only.
  */
 export default async function RevisionHistoryPage({
   params,
@@ -60,7 +63,7 @@ export default async function RevisionHistoryPage({
             Compare revisions
           </Link>
         ) : null}
-        <StatusBadge status={view.draft.status} />
+        <DraftStatusBadge status={view.draft.status} />
         {view.draft.status === "SUPERSEDED" ? (
           <span className="text-xs">Superseded draft: history is kept as it was.</span>
         ) : null}
@@ -75,6 +78,7 @@ export default async function RevisionHistoryPage({
         >
           {revisions.map((revision) => {
             const current = revision.id === view.draft.currentRevisionId;
+            const review = revision.review;
             return (
               <li
                 key={revision.id}
@@ -105,8 +109,51 @@ export default async function RevisionHistoryPage({
                   ) : (
                     <span className="text-muted-foreground text-xs">read-only</span>
                   )}
+                  {review?.status === "APPROVED" ? (
+                    review.current ? (
+                      <span className="inline-flex items-center rounded-md border border-emerald-700/40 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                        Approved
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center rounded-md border border-amber-700/40 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400">
+                        Approval no longer current
+                      </span>
+                    )
+                  ) : review?.status === "RETURNED" ? (
+                    <span className="border-border inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium">
+                      Returned to drafting
+                    </span>
+                  ) : review?.status === "INVALIDATED" ? (
+                    <span className="border-border text-muted-foreground inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium">
+                      Review request withdrawn
+                    </span>
+                  ) : null}
                 </div>
                 <p className="break-words">{revision.changeSummary}</p>
+                {review?.status === "APPROVED" ? (
+                  <p className="text-xs">
+                    {review.current ? "Approved" : "Was approved"} by {review.decidedBy ?? "—"} on{" "}
+                    {review.decidedAt ? review.decidedAt.toLocaleString("en-GB") : "—"}
+                    {review.note ? (
+                      <span className="text-muted-foreground"> · “{review.note}”</span>
+                    ) : null}
+                    {!review.current ? (
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · the draft was reopened or superseded afterwards; the approval stays in
+                        history
+                      </span>
+                    ) : null}
+                  </p>
+                ) : review?.status === "RETURNED" ? (
+                  <p className="text-xs">
+                    Returned by {review.decidedBy ?? "—"} on{" "}
+                    {review.decidedAt ? review.decidedAt.toLocaleString("en-GB") : "—"}
+                    {review.note ? (
+                      <span className="text-muted-foreground"> · “{review.note}”</span>
+                    ) : null}
+                  </p>
+                ) : null}
                 <p className="text-muted-foreground text-xs">
                   {revision.createdAt.toLocaleString("en-GB")} · {revision.wordCount ?? "?"} words ·{" "}
                   {revision.findings.blocking} blocking · {revision.findings.warning} warning ·{" "}

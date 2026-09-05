@@ -6,8 +6,9 @@ import { listApprovedNotStarted, listContentWorkItems } from "@/server/services/
 import { EmptyState, PageHeader } from "@/components/governance/primitives";
 import { DemoBadge } from "@/components/metrics/primitives";
 import { PriorityBadge } from "@/components/opportunity/primitives";
-import { StatusBadge, humanize } from "@/components/diagnosis/primitives";
+import { humanize } from "@/components/diagnosis/primitives";
 import { StartContentWorkButton } from "@/components/execution/controls";
+import { WorkItemStatusBadge } from "@/components/execution/status";
 
 export const metadata = { title: "Content Work · SEO OS" };
 
@@ -234,7 +235,7 @@ export default async function ContentWorkPage({
                       )}
                     </td>
                     <td className="px-3 py-2">
-                      <StatusBadge status={item.status} />
+                      <WorkItemStatusBadge status={item.status} />
                     </td>
                   </tr>
                 ))}

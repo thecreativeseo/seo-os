@@ -3,13 +3,15 @@ import type { ReconciledClaim } from "@/lib/content/reconcile";
 import type { ContentDraftStatus } from "@/generated/prisma/client";
 
 /**
- * The draft workflow as a person reads it (docs/P4_SPEC.md §9-§12; M4.4).
+ * The draft workflow as a person reads it (docs/P4_SPEC.md §9-§12; M4.4, M4.5).
  *
  * Pure functions between the services and the screens: what a finding
  * means and what to do about it, which controls a person may use in a
  * given state and why not otherwise, how a claim's support is described
  * without evidence ids, how the drafts list is filtered, and the plain
  * sentence for each state. The screens render these; the tests read them.
+ * None of it is authorization: the services decide, these only keep a
+ * screen from offering what would be refused.
  */
 
 // ---------------------------------------------------------------------------
@@ -157,6 +159,45 @@ export function reviewBlockers(findings: DraftFinding[]): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Labels
+// ---------------------------------------------------------------------------
+
+function words(value: string): string {
+  const lower = value.toLowerCase().replaceAll("_", " ");
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+
+/** A work item's status in words. QA reads "Ready for QA" until M5 runs checks. */
+export function workItemStatusLabel(status: string): string {
+  switch (status) {
+    case "QA":
+      return "Ready for QA";
+    case "AWAITING_EDITOR_REVIEW":
+      return "Awaiting editor review";
+    case "APPROVED_FOR_CMS":
+      return "Approved for CMS";
+    case "CMS_DRAFT_CREATED":
+      return "CMS draft created";
+    default:
+      return words(status);
+  }
+}
+
+/** A draft's status in words. */
+export function draftStatusLabel(status: string): string {
+  switch (status) {
+    case "APPROVED":
+      return "Approved for QA";
+    case "AWAITING_EDITOR_REVIEW":
+      return "Awaiting review";
+    case "AWAITING_QA":
+      return "Awaiting QA";
+    default:
+      return words(status);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Controls, by state and role
 // ---------------------------------------------------------------------------
 
@@ -166,12 +207,16 @@ export type ControlsInput = {
   draftStatus: ContentDraftStatus;
   /** The work item is still DRAFTING (later stages close the draft to changes). */
   itemDrafting: boolean;
+  /** The work item is QA - an approved draft, ready for QA (M4.5). */
+  itemReadyForQa?: boolean;
   /** The pinned brief is still the approved version. */
   briefCurrent: boolean;
   hasRevision: boolean;
   /** The current revision has blocking findings. */
   blocking: boolean;
   aiConfigured: boolean;
+  /** A review request is open for the current revision (M4.5). */
+  hasOpenRequest?: boolean;
 };
 
 export type DraftControls = {
@@ -186,9 +231,21 @@ export type DraftControls = {
   requestReviewReason: string | null;
   canReturn: boolean;
   canStartFromNewBrief: boolean;
+  /** M4.5: approve the requested revision. */
+  canApprove: boolean;
+  /** Why Approve is not offered or is disabled, when it is not - the same reason the server gives. */
+  approveReason: string | null;
+  /** The approve form must carry an acknowledgement of the newer brief (D6). */
+  needsBriefAcknowledgement: boolean;
+  /** M4.5: reopen an approved draft for revision. */
+  canReopen: boolean;
+  reopenReason: string | null;
 };
 
 const CLOSED_STATUSES: ContentDraftStatus[] = ["SUPERSEDED", "ARCHIVED"];
+
+export const APPROVED_READ_ONLY_REASON =
+  "This draft is approved and ready for QA. Reopen it for revision to edit or generate again; the approval stays in history.";
 
 /**
  * Which controls a screen shows, matching the service rules. The server
@@ -196,17 +253,21 @@ const CLOSED_STATUSES: ContentDraftStatus[] = ["SUPERSEDED", "ARCHIVED"];
  */
 export function draftControls(input: ControlsInput): DraftControls {
   const closed = CLOSED_STATUSES.includes(input.draftStatus);
+  const approved = input.draftStatus === "APPROVED";
+  const itemOpen = input.itemDrafting || (approved && Boolean(input.itemReadyForQa));
   const readOnlyReason = closed
     ? input.draftStatus === "SUPERSEDED"
       ? "This draft is superseded: a later draft was started from a newer approved brief. It is kept as it was and cannot be changed."
       : "This draft is archived and cannot be changed."
-    : !input.itemDrafting
+    : !itemOpen
       ? "The work item has moved past drafting; the draft is read-only here."
-      : !input.canWrite
-        ? "You can read this draft. Editing needs a member's access or above."
-        : null;
-  const open = !closed && input.itemDrafting;
-  const writer = open && input.canWrite;
+      : approved
+        ? APPROVED_READ_ONLY_REASON
+        : !input.canWrite
+          ? "You can read this draft. Editing needs a member's access or above."
+          : null;
+  const open = !closed && itemOpen;
+  const writer = open && input.canWrite && !approved;
 
   const canEdit = writer;
   const canGenerate =
@@ -233,6 +294,39 @@ export function draftControls(input: ControlsInput): DraftControls {
           ? "The current revision has blocking findings. Save a revision that resolves them first."
           : null;
 
+  const awaiting = input.draftStatus === "AWAITING_EDITOR_REVIEW";
+  const canApprove =
+    open &&
+    input.canReview &&
+    awaiting &&
+    input.hasRevision &&
+    !input.blocking &&
+    input.hasOpenRequest !== false;
+  const approveReason = !open
+    ? readOnlyReason
+    : !input.canReview
+      ? "Approval needs an SEO lead, admin or owner."
+      : approved
+        ? "This draft is already approved."
+        : !awaiting
+          ? "No review has been requested for this draft. A draft is approved from a review request."
+          : !input.hasRevision
+            ? "Nothing to approve yet."
+            : input.blocking
+              ? "The current revision has blocking findings. It cannot be approved until a new revision resolves them."
+              : input.hasOpenRequest === false
+                ? "The review request for this draft is no longer open. Request review again."
+                : null;
+
+  const canReopen = open && input.canWrite && approved;
+  const reopenReason = !approved
+    ? null
+    : !open
+      ? readOnlyReason
+      : !input.canWrite
+        ? "Reopening needs a member's access or above."
+        : null;
+
   return {
     readOnly: !canEdit,
     readOnlyReason,
@@ -241,8 +335,13 @@ export function draftControls(input: ControlsInput): DraftControls {
     generateReason,
     canRequestReview,
     requestReviewReason,
-    canReturn: open && input.canReview && input.draftStatus === "AWAITING_EDITOR_REVIEW",
+    canReturn: open && input.canReview && awaiting,
     canStartFromNewBrief: open && input.canWrite && !input.briefCurrent,
+    canApprove,
+    approveReason: canApprove ? null : approveReason,
+    needsBriefAcknowledgement: awaiting && !input.briefCurrent,
+    canReopen,
+    reopenReason: canReopen ? null : reopenReason,
   };
 }
 
@@ -348,6 +447,7 @@ export const DRAFT_STATUS_FILTERS = [
   "all",
   "DRAFTING",
   "AWAITING_EDITOR_REVIEW",
+  "APPROVED",
   "SUPERSEDED",
 ] as const;
 export type DraftStatusFilter = (typeof DRAFT_STATUS_FILTERS)[number];
@@ -359,6 +459,8 @@ export type DraftFilters = {
   contentType: string;
   blocking: boolean;
   awaitingReview: boolean;
+  /** M4.5: approved drafts, ready for QA. */
+  approved: boolean;
   superseded: boolean;
   author: DraftAuthorFilter;
 };
@@ -368,6 +470,7 @@ export const DEFAULT_DRAFT_FILTERS: DraftFilters = {
   contentType: "all",
   blocking: false,
   awaitingReview: false,
+  approved: false,
   superseded: false,
   author: "all",
 };
@@ -389,6 +492,7 @@ export function parseDraftFilters(query: Record<string, string | undefined>): Dr
     contentType,
     blocking: flag(query.blocking),
     awaitingReview: flag(query.awaiting),
+    approved: flag(query.approved),
     superseded: flag(query.superseded),
     author,
   };
@@ -400,6 +504,7 @@ export function draftFiltersToQuery(filters: DraftFilters): Record<string, strin
   if (filters.contentType !== "all") query.type = filters.contentType;
   if (filters.blocking) query.blocking = "1";
   if (filters.awaitingReview) query.awaiting = "1";
+  if (filters.approved) query.approved = "1";
   if (filters.superseded) query.superseded = "1";
   if (filters.author !== "all") query.author = filters.author;
   return query;
@@ -421,6 +526,7 @@ export function applyDraftFilters<T extends DraftListRowLike>(
     if (filters.contentType !== "all" && row.contentType !== filters.contentType) return false;
     if (filters.blocking && !row.blocking) return false;
     if (filters.awaitingReview && row.status !== "AWAITING_EDITOR_REVIEW") return false;
+    if (filters.approved && row.status !== "APPROVED") return false;
     if (filters.superseded && row.status !== "SUPERSEDED") return false;
     if (filters.author !== "all" && row.authorKind !== filters.author) return false;
     return true;
@@ -439,15 +545,32 @@ export type DraftStateKind =
   | "no_revision"
   | "blocking"
   | "awaiting_review"
+  | "approved_for_qa"
+  | "returned"
+  | "approval_not_current"
   | "newer_brief"
   | "superseded"
   | "stale_evidence";
 
 export type DraftStateText = { title: string; body: string };
 
+export type DraftStateDetail = {
+  briefVersion?: number;
+  approvedVersion?: number;
+  count?: number;
+  revisionNumber?: number;
+  by?: string | null;
+  at?: Date | null;
+  note?: string | null;
+};
+
+function when(at: Date | null | undefined): string {
+  return at ? ` on ${at.toLocaleString("en-GB")}` : "";
+}
+
 export function draftStateText(
   kind: DraftStateKind,
-  detail: { briefVersion?: number; approvedVersion?: number; count?: number } = {},
+  detail: DraftStateDetail = {},
 ): DraftStateText {
   switch (kind) {
     case "no_drafts":
@@ -482,8 +605,25 @@ export function draftStateText(
       };
     case "awaiting_review":
       return {
-        title: "Review requested",
-        body: "An editor with SEO lead access or above reviews the current revision. Saving a new revision sends the draft back to drafting.",
+        title: `Awaiting review${detail.revisionNumber ? ` of revision ${detail.revisionNumber}` : ""}`,
+        body: "An editor with SEO lead access or above approves exactly this revision, or returns the draft with a note. Saving a new revision sends the draft back to drafting and withdraws the request.",
+      };
+    case "approved_for_qa":
+      return {
+        title: `Approved for QA${detail.revisionNumber ? ` · revision ${detail.revisionNumber}` : ""}`,
+        body: `Approved${detail.by ? ` by ${detail.by}` : ""}${when(detail.at)}. The work item is ready for QA; QA itself runs in a later milestone. Nothing edits this draft until a person reopens it for revision.${detail.note ? ` Note: “${detail.note}”` : ""}`,
+      };
+    case "returned":
+      return {
+        title: `Returned to drafting${detail.by ? ` by ${detail.by}` : ""}${when(detail.at)}`,
+        body: detail.note
+          ? `“${detail.note}”`
+          : "The reviewer sent the draft back. Save a new revision and request review again.",
+      };
+    case "approval_not_current":
+      return {
+        title: `Approval no longer current${detail.revisionNumber ? ` · revision ${detail.revisionNumber} was approved` : ""}`,
+        body: `The draft was reopened for revision${detail.note ? `: “${detail.note}”` : ""}. The earlier approval stays in history; the current revision needs a new review and approval before QA.`,
       };
     case "newer_brief":
       return {

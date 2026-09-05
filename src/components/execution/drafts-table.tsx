@@ -2,12 +2,14 @@ import Link from "next/link";
 
 import type { DraftListRow } from "@/server/services/content-draft";
 import { DemoBadge } from "@/components/metrics/primitives";
-import { StatusBadge, humanize } from "@/components/diagnosis/primitives";
+import { humanize } from "@/components/diagnosis/primitives";
+import { DraftStatusBadge } from "@/components/execution/status";
 
 /**
- * The drafts of a website, one row each (M4.4 §2). Every state is written
- * as a word - "Review requested", "Blocking", "Newer brief v3" - so a row
- * reads the same in a screenshot as on the screen.
+ * The drafts of a website, one row each (M4.4 §2, M4.5). Every state is
+ * written as a word - "Review requested", "Approved for QA", "Blocking",
+ * "Newer brief v3" - so a row reads the same in a screenshot as on the
+ * screen.
  */
 export function DraftsTable({
   rows,
@@ -75,10 +77,15 @@ export function DraftsTable({
               </td>
               <td className="px-3 py-2">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <StatusBadge status={row.status} />
+                  <DraftStatusBadge status={row.status} />
                   {row.awaitingReview ? (
                     <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-900 dark:bg-amber-900/40 dark:text-amber-200">
                       Review requested
+                    </span>
+                  ) : null}
+                  {row.status === "APPROVED" ? (
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-200">
+                      Ready for QA
                     </span>
                   ) : null}
                 </div>
@@ -95,6 +102,11 @@ export function DraftsTable({
                           : "Author not recorded"}
                       {row.revisionCount > 1 ? ` · ${row.revisionCount} revisions` : ""}
                     </div>
+                    {row.approvedRevisionNumber ? (
+                      <div className="text-xs text-emerald-800 dark:text-emerald-300">
+                        Approved revision {row.approvedRevisionNumber}
+                      </div>
+                    ) : null}
                   </>
                 ) : (
                   <span className="text-muted-foreground text-xs">No revision yet</span>
