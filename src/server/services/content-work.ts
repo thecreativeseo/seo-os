@@ -9,7 +9,11 @@ import {
 import { REQUIRED, hasRole } from "@/server/auth/roles";
 import { SYSTEM_AUTH_USER_ID } from "@/server/jobs/system-context";
 import type { RecommendationModifications } from "@/server/services/decision";
-import { OPEN_WORK_ITEM_STATUSES } from "@/lib/execution/statuses";
+import {
+  OPEN_WORK_ITEM_STATUSES,
+  WORK_ITEM_TRANSITIONS,
+  canTransition,
+} from "@/lib/execution/statuses";
 import { Prisma } from "@/generated/prisma/client";
 import type {
   ContentWorkItem,
@@ -45,7 +49,8 @@ export class ContentWorkError extends Error {
       | "not_approved"
       | "no_decision"
       | "not_eligible"
-      | "already_started",
+      | "already_started"
+      | "invalid_transition",
     /** For already_started: the item that already exists, so the screen can link to it. */
     readonly existingItemId?: string,
   ) {
@@ -320,6 +325,56 @@ export async function startFromRecommendation(
     }
     throw error;
   }
+}
+
+/**
+ * Moves a work item along one edge of its state machine (§6), inside the
+ * caller's transaction, with the audit event beside it. The only way a status
+ * changes: services call this, never update the column directly, so every
+ * status the queue shows is one the machine allows and the trail explains.
+ */
+export async function transitionWorkItem(
+  tx: Prisma.TransactionClient,
+  context: TenantContext,
+  itemId: string,
+  to: ContentWorkItemStatus,
+  note?: string,
+): Promise<ContentWorkItem> {
+  const item = await tx.contentWorkItem.findFirst({
+    where: { id: itemId, ...websiteScope(context) },
+  });
+
+  if (!item) {
+    throw new ContentWorkError("That work item is not available.", "not_found");
+  }
+
+  if (item.status === to) return item;
+
+  if (!canTransition(WORK_ITEM_TRANSITIONS, item.status, to)) {
+    throw new ContentWorkError(
+      `A work item cannot go from ${item.status} to ${to}.`,
+      "invalid_transition",
+    );
+  }
+
+  const updated = await tx.contentWorkItem.update({
+    where: { id: item.id },
+    data: {
+      status: to,
+      ...(to === "VERIFIED" ? { completedAt: new Date() } : {}),
+      ...(to === "ARCHIVED" ? { archivedAt: new Date() } : {}),
+    },
+  });
+
+  await recordAudit(tx, context, {
+    entityType: "ContentWorkItem",
+    entityId: item.id,
+    action: to === "ARCHIVED" ? "ARCHIVE" : "UPDATE",
+    before: { status: item.status },
+    after: { status: to, ...(note ? { note } : {}) },
+  });
+
+  return updated;
 }
 
 // ---------------------------------------------------------------------------

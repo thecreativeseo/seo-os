@@ -3,6 +3,8 @@ import { notFound } from "next/navigation";
 
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { getContentWorkItem } from "@/server/services/content-work";
+import { currentBrief, listBriefVersions } from "@/server/services/content-brief";
+import { REQUIRED, hasRole } from "@/server/auth/roles";
 import { PageHeader } from "@/components/governance/primitives";
 import { DemoBadge } from "@/components/metrics/primitives";
 import { PriorityBadge } from "@/components/opportunity/primitives";
@@ -24,6 +26,15 @@ export default async function ContentWorkItemPage({
 
   const item = await getContentWorkItem(context, workItemId);
   if (!item) notFound();
+
+  const [brief, versions] = await Promise.all([
+    currentBrief(context, item.id),
+    listBriefVersions(context, item.id),
+  ]);
+  const awaiting = versions.filter((row) => row.status === "AWAITING_REVIEW").length;
+  const canWrite = hasRole(context.membership.role, REQUIRED.WRITE);
+  const briefable =
+    item.status === "QUEUED" || item.status === "BRIEFING" || item.status === "DRAFTING";
 
   return (
     <main className="space-y-8">
@@ -107,11 +118,61 @@ export default async function ContentWorkItemPage({
         </dl>
       </section>
 
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm font-medium">Brief</h2>
+          <Link
+            href={`/websites/${websiteId}/content/${item.id}/brief`}
+            className="text-sm hover:underline"
+          >
+            {brief ? "Open the brief" : "Brief"}
+          </Link>
+        </div>
+        {brief ? (
+          <div className="border-border space-y-2 rounded-lg border p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-xs">v{brief.version}</span>
+              <StatusBadge status={brief.status} />
+              <span className="text-muted-foreground text-xs">
+                {versions.length} version{versions.length === 1 ? "" : "s"}
+                {awaiting > 0 ? ` · ${awaiting} awaiting review` : ""}
+              </span>
+            </div>
+            <p className="text-sm font-medium">{brief.title}</p>
+            {brief.status === "AWAITING_REVIEW" ? (
+              <p className="text-sm">
+                <span className="font-medium">Review pending.</span> An SEO lead, admin or owner
+                needs to approve it before drafting begins.
+              </p>
+            ) : brief.status === "APPROVED" ? (
+              <p className="text-muted-foreground text-sm">
+                Approved. Drafting is the next step and starts when a person chooses to.
+              </p>
+            ) : (
+              <p className="text-muted-foreground text-sm">A draft, not yet sent for review.</p>
+            )}
+          </div>
+        ) : (
+          <p className="border-border text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
+            No brief yet.{" "}
+            {canWrite && briefable ? (
+              <Link
+                href={`/websites/${websiteId}/content/${item.id}/brief`}
+                className="text-foreground hover:underline"
+              >
+                Generate one from the evidence, or write it by hand.
+              </Link>
+            ) : null}
+          </p>
+        )}
+      </section>
+
       <section className="space-y-2">
         <h2 className="text-sm font-medium">Next</h2>
         <p className="text-muted-foreground border-border rounded-lg border border-dashed p-4 text-sm">
-          The brief comes next. Briefing, drafting, QA and CMS steps are being built milestone by
-          milestone; this item will pick them up as they land.
+          {brief?.status === "APPROVED"
+            ? "Drafting from the approved brief arrives with the next milestone; nothing starts by itself."
+            : "An approved brief comes first. Drafting, QA and CMS steps follow in later milestones."}
         </p>
       </section>
 

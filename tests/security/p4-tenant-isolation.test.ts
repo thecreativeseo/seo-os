@@ -12,6 +12,17 @@ import {
   listContentWorkItems,
   startFromRecommendation,
 } from "@/server/services/content-work";
+import {
+  approveBrief,
+  createManualBrief,
+  generateBrief,
+  getBrief,
+  getBriefEvidence,
+  listBriefVersions,
+  requestBriefReview,
+  saveBrief,
+  type BriefInput,
+} from "@/server/services/content-brief";
 
 /**
  * P4 tenant isolation (P4_ACCEPTANCE_CRITERIA, "Security attack tests").
@@ -25,7 +36,23 @@ import {
 const organizationIds: string[] = [];
 const userIds: string[] = [];
 
-type Tenant = TenantContext & { recommendationId: string; itemId: string };
+type Tenant = TenantContext & { recommendationId: string; itemId: string; briefId: string };
+
+const briefInput: BriefInput = {
+  title: "A brief",
+  contentType: "GUIDE",
+  searchIntent: null,
+  primaryConversion: null,
+  audience: "Someone",
+  customerProblem: "Something",
+  desiredOutcome: "Anything",
+  recommendedAngle: null,
+  keyQuestions: [],
+  requiredSections: [],
+  optionalSections: [],
+  externalEvidenceRequirements: [],
+  brandVoiceNotes: null,
+};
 
 async function makeTenant(label: string): Promise<Tenant> {
   const suffix = crypto.randomUUID().slice(0, 8);
@@ -84,8 +111,9 @@ async function makeTenant(label: string): Promise<Tenant> {
   });
   await decide(context, started.id, { decision: "APPROVED" });
   const item = await startFromRecommendation(context, started.id);
+  const brief = await createManualBrief(context, item.id, briefInput);
 
-  return { ...context, recommendationId: recommendation.id, itemId: item.id };
+  return { ...context, recommendationId: recommendation.id, itemId: item.id, briefId: brief.id };
 }
 
 let a: Tenant;
@@ -141,5 +169,29 @@ describe("content work across tenants", () => {
     ).rejects.toMatchObject({ code: "forbidden" });
 
     expect(await contentWorkForRecommendation(a, a.recommendationId)).toBeNull();
+  });
+});
+
+describe("briefs across tenants", () => {
+  it("cannot be generated for, read from, or listed for another tenant's work item", async () => {
+    await expect(generateBrief(a, b.itemId)).rejects.toMatchObject({ code: "not_found" });
+    expect(await getBrief(a, b.briefId)).toBeNull();
+    expect(await getBriefEvidence(a, b.briefId)).toBeNull();
+    expect(await listBriefVersions(a, b.itemId)).toEqual([]);
+    expect(await listBriefVersions(b, b.itemId)).toHaveLength(1);
+  });
+
+  it("cannot be edited, sent for review, or approved across tenants", async () => {
+    await expect(
+      saveBrief(a, b.briefId, { ...briefInput, title: "Hijacked" }),
+    ).rejects.toMatchObject({
+      code: "not_found",
+    });
+    await expect(requestBriefReview(a, b.briefId)).rejects.toMatchObject({ code: "not_found" });
+    await expect(approveBrief(a, b.briefId)).rejects.toMatchObject({ code: "not_found" });
+
+    const untouched = await prisma.contentBrief.findUniqueOrThrow({ where: { id: b.briefId } });
+    expect(untouched.status).toBe("DRAFT");
+    expect(untouched.title).toBe("A brief");
   });
 });

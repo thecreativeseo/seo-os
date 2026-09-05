@@ -6,6 +6,7 @@ import { websiteScope, type TenantContext } from "@/server/auth/guards";
 import { buildEvidenceId, parseEvidenceId } from "@/lib/evidence/id";
 import { reliabilityRank, renderEvidence, type Evidence } from "@/lib/evidence/types";
 import {
+  CONTENT_BRIEF_POLICY,
   PAGE_DIAGNOSIS_POLICY,
   type RetrievalPolicyDefinition,
 } from "@/lib/evidence/retrieval-policy";
@@ -369,7 +370,277 @@ export async function assemblePageDiagnosisPackage(
     ...previous.map((diagnosis) => buildEvidenceId({ kind: "diag", diagnosisId: diagnosis.id })),
   );
 
-  // --- Resolve, deduplicate, cap --------------------------------------------
+  return finalise(context, {
+    policy,
+    target: { type: "PAGE", id: page.id },
+    purpose: "DIAGNOSE_PAGE",
+    candidates,
+    notes,
+    contextVersionId: contextVersion?.id ?? null,
+    windows,
+  });
+}
+
+/** What the brief assembler needs to know about a work item. */
+export type BriefSubject = {
+  id: string;
+  type: string;
+  recommendationId: string;
+  decisionId: string;
+  pageId: string | null;
+  keywordId: string | null;
+  topicId: string | null;
+};
+
+/**
+ * Assembles the evidence for briefing one work item (docs/P4_SPEC.md §8).
+ *
+ * The same discipline as the diagnosis package - deterministic candidate IDs,
+ * website-scoped resolution, budgets from a named policy, a manifest of what
+ * was left out - over a different selection: governance in full, the keyword
+ * and topic the work serves, the target page as it stands, and the diagnosis,
+ * opportunity and decision the work item was started from. Brand facts enter
+ * only when APPROVED; nothing PROPOSED or INFERRED is in a brief's evidence.
+ */
+export async function assembleContentBriefPackage(
+  context: TenantContext,
+  item: BriefSubject,
+  options: { policy?: RetrievalPolicyDefinition } = {},
+): Promise<AssembledPackage> {
+  const policy = options.policy ?? CONTENT_BRIEF_POLICY;
+  const { windows } = await resolveWebsiteWindows(context, "28d");
+
+  const candidates: string[] = [];
+  const notes: string[] = [];
+
+  // --- Governance, in full ---------------------------------------------------
+  const contextVersion = await prisma.businessContextVersion.findFirst({
+    where: { status: "APPROVED", businessContext: { websiteId: context.website.id } },
+    orderBy: { versionNumber: "desc" },
+  });
+
+  if (contextVersion) {
+    candidates.push(buildEvidenceId({ kind: "ctx", contextVersionId: contextVersion.id }));
+  } else {
+    notes.push(
+      "No approved Business Context. The brief has no canonical audience, claims or prohibited claims to draw on.",
+    );
+  }
+
+  const goals = await prisma.businessGoal.findMany({
+    where: { ...websiteScope(context), status: "ACTIVE", archivedAt: null },
+    orderBy: { createdAt: "desc" },
+    take: policy.budgets.BUSINESS_GOAL?.max ?? 5,
+  });
+  candidates.push(...goals.map((goal) => buildEvidenceId({ kind: "goal", goalId: goal.id })));
+
+  const facts = await prisma.brandFact.findMany({
+    where: { ...websiteScope(context), approvalStatus: "APPROVED", archivedAt: null },
+    orderBy: { updatedAt: "desc" },
+    take: policy.budgets.BRAND_FACT?.max ?? 20,
+  });
+  candidates.push(...facts.map((fact) => buildEvidenceId({ kind: "fact", brandFactId: fact.id })));
+  if (facts.length === 0) {
+    notes.push(
+      "No approved Brand Facts. The piece may make no business claims until some are approved.",
+    );
+  }
+
+  const rules = await prisma.seoRule.findMany({
+    where: { ...websiteScope(context), active: true, archivedAt: null },
+    orderBy: [{ severity: "asc" }, { createdAt: "desc" }],
+    take: policy.budgets.SEO_RULE?.max ?? 15,
+  });
+  candidates.push(...rules.map((rule) => buildEvidenceId({ kind: "rule", seoRuleId: rule.id })));
+
+  // --- What this work came from ----------------------------------------------
+  const recommendation = await prisma.recommendation.findFirst({
+    where: { id: item.recommendationId, ...websiteScope(context) },
+    select: { diagnosisId: true, opportunityId: true },
+  });
+
+  if (recommendation?.diagnosisId) {
+    candidates.push(buildEvidenceId({ kind: "diag", diagnosisId: recommendation.diagnosisId }));
+  } else {
+    notes.push(
+      "The recommendation did not come from a diagnosis; there are no findings to answer.",
+    );
+  }
+  if (recommendation?.opportunityId) {
+    candidates.push(buildEvidenceId({ kind: "opp", opportunityId: recommendation.opportunityId }));
+  }
+  candidates.push(buildEvidenceId({ kind: "dec", decisionId: item.decisionId }));
+
+  // --- The keyword, the topic, the page ---------------------------------------
+  const keywordIds = new Set<string>();
+  if (item.keywordId) keywordIds.add(item.keywordId);
+
+  if (item.pageId) {
+    const page = await prisma.page.findFirst({
+      where: { id: item.pageId, ...websiteScope(context) },
+    });
+
+    if (page) {
+      for (const window of [windows.current, windows.previous]) {
+        candidates.push(
+          buildEvidenceId({
+            kind: "gsc",
+            subject: "page",
+            subjectId: page.id,
+            start: window.start,
+            end: window.end,
+          }),
+        );
+      }
+
+      const content = await prisma.pageContentSnapshot.findFirst({
+        where: { pageId: page.id, ...websiteScope(context) },
+        orderBy: { capturedAt: "desc" },
+      });
+      if (content) {
+        candidates.push(
+          buildEvidenceId({ kind: "content", pageId: page.id, contentHash: content.contentHash }),
+        );
+      } else {
+        notes.push(
+          "No content captured for the target page. A brief cannot say what stays and what changes without it.",
+        );
+      }
+
+      const owned = await prisma.keywordPageOwnership.findMany({
+        where: { ...websiteScope(context), pageId: page.id, status: "ACTIVE", archivedAt: null },
+        orderBy: [{ ownershipType: "asc" }, { assignedAt: "desc" }],
+        take: policy.budgets.KEYWORD_OWNERSHIP?.max ?? 12,
+      });
+      candidates.push(...owned.map((own) => buildEvidenceId({ kind: "own", ownershipId: own.id })));
+      for (const own of owned) keywordIds.add(own.keywordId);
+    } else {
+      notes.push("The target page is no longer available.");
+    }
+  } else {
+    notes.push(
+      "No target page: this is new content, so there is nothing to refresh and no baseline.",
+    );
+  }
+
+  if (item.topicId) {
+    candidates.push(buildEvidenceId({ kind: "topic", topicId: item.topicId, keywordId: null }));
+    const mapped = await prisma.topicKeyword.findMany({
+      where: { topicId: item.topicId, topic: { websiteId: context.website.id } },
+      take: policy.budgets.TOPIC_MAPPING?.max ?? 6,
+    });
+    candidates.push(
+      ...mapped.map((mapping) =>
+        buildEvidenceId({ kind: "topic", topicId: mapping.topicId, keywordId: mapping.keywordId }),
+      ),
+    );
+    for (const mapping of mapped) keywordIds.add(mapping.keywordId);
+  }
+
+  if (keywordIds.size === 0) {
+    notes.push(
+      "No keyword is named for this work. Demand, ownership and link targets cannot be shown.",
+    );
+  } else {
+    const ids = [...keywordIds];
+
+    // Who owns these keywords: the target page, and the pages a link can point at.
+    const ownerships = await prisma.keywordPageOwnership.findMany({
+      where: {
+        ...websiteScope(context),
+        keywordId: { in: ids },
+        status: "ACTIVE",
+        archivedAt: null,
+      },
+      orderBy: [{ ownershipType: "asc" }, { assignedAt: "desc" }],
+      take: policy.budgets.KEYWORD_OWNERSHIP?.max ?? 12,
+    });
+    candidates.push(
+      ...ownerships.map((own) => buildEvidenceId({ kind: "own", ownershipId: own.id })),
+    );
+
+    const metrics = await prisma.keywordMetricsSnapshot.findMany({
+      where: { ...websiteScope(context), keywordId: { in: ids } },
+      orderBy: { capturedAt: "desc" },
+      take: policy.budgets.KEYWORD_METRIC?.max ?? 10,
+    });
+    candidates.push(
+      ...metrics.map((metric) =>
+        buildEvidenceId({
+          kind: "kwm",
+          keywordId: metric.keywordId,
+          provider: metric.sourceProvider,
+          capturedAt: isoDate(metric.capturedAt),
+        }),
+      ),
+    );
+    if (metrics.length === 0) {
+      notes.push("No keyword demand data. Import a Semrush or Ahrefs export to supply it.");
+    }
+
+    const rankings = await prisma.rankingSnapshot.findMany({
+      where: { ...websiteScope(context), keywordId: { in: ids } },
+      orderBy: { capturedAt: "desc" },
+      take: policy.budgets.RANKING_SNAPSHOT?.max ?? 6,
+    });
+    candidates.push(
+      ...rankings.map((rank) =>
+        buildEvidenceId({
+          kind: "rank",
+          keywordId: rank.keywordId,
+          provider: rank.sourceProvider,
+          capturedAt: isoDate(rank.capturedAt),
+        }),
+      ),
+    );
+
+    const competitors = await prisma.competitorKeywordSnapshot.findMany({
+      where: { ...websiteScope(context), keywordId: { in: ids } },
+      orderBy: { capturedAt: "desc" },
+      take: policy.budgets.COMPETITOR_OBSERVATION?.max ?? 6,
+    });
+    candidates.push(
+      ...competitors.map((snapshot) =>
+        buildEvidenceId({
+          kind: "comp",
+          competitorId: snapshot.competitorId,
+          keywordId: snapshot.keywordId,
+          provider: snapshot.sourceProvider,
+          capturedAt: isoDate(snapshot.capturedAt),
+        }),
+      ),
+    );
+  }
+
+  return finalise(context, {
+    policy,
+    target: { type: "CONTENT_WORK_ITEM", id: item.id },
+    purpose: "GENERATE_BRIEF",
+    candidates,
+    notes,
+    contextVersionId: contextVersion?.id ?? null,
+    windows,
+  });
+}
+
+type FinaliseInput = {
+  policy: RetrievalPolicyDefinition;
+  target: { type: string; id: string };
+  purpose: string;
+  candidates: string[];
+  notes: string[];
+  contextVersionId: string | null;
+  windows: { current: { start: string; end: string }; previous: { start: string; end: string } };
+};
+
+/**
+ * The part every package shares: resolve each candidate under the tenant's
+ * scope, drop what does not round-trip, order deterministically, apply the
+ * policy's budgets, write the manifest, persist. Which records are candidates
+ * is the assembler's business; what happens to them is not.
+ */
+async function finalise(context: TenantContext, input: FinaliseInput): Promise<AssembledPackage> {
+  const { policy, candidates, notes, windows } = input;
 
   const seen = new Set<string>();
   const evidence: Evidence[] = [];
@@ -408,11 +679,12 @@ export async function assemblePageDiagnosisPackage(
   const manifest = buildManifest(policy, windows, capped, droppedByCategory, notes, perCategory);
 
   const stored = await persist(context, {
-    page,
+    target: input.target,
+    purpose: input.purpose,
     policy,
     evidence: capped,
     manifest,
-    contextVersionId: contextVersion?.id ?? null,
+    contextVersionId: input.contextVersionId,
     periodStart: windows.previous.start,
     periodEnd: windows.current.end,
   });
@@ -518,7 +790,8 @@ export function hashPackage(policy: RetrievalPolicyDefinition, evidence: Evidenc
 async function persist(
   context: TenantContext,
   input: {
-    page: { id: string };
+    target: { type: string; id: string };
+    purpose: string;
     policy: RetrievalPolicyDefinition;
     evidence: Evidence[];
     manifest: RetrievalManifest;
@@ -533,9 +806,9 @@ async function persist(
     const created = await tx.evidencePackage.create({
       data: {
         websiteId: context.website.id,
-        targetType: "PAGE",
-        targetId: input.page.id,
-        purpose: "DIAGNOSE_PAGE",
+        targetType: input.target.type,
+        targetId: input.target.id,
+        purpose: input.purpose,
         contextVersionId: input.contextVersionId,
         periodStart: new Date(`${input.periodStart}T00:00:00.000Z`),
         periodEnd: new Date(`${input.periodEnd}T00:00:00.000Z`),
@@ -571,7 +844,8 @@ async function persist(
       entityId: created.id,
       action: "CREATE",
       after: {
-        targetId: input.page.id,
+        targetType: input.target.type,
+        targetId: input.target.id,
         evidenceCount: input.evidence.length,
         policy: `${input.policy.name}@${input.policy.version}`,
         contentHash: created.contentHash,

@@ -104,7 +104,89 @@ export const PAGE_DIAGNOSIS_POLICY: RetrievalPolicyDefinition = {
   ],
 };
 
-export const RETRIEVAL_POLICIES: readonly RetrievalPolicyDefinition[] = [PAGE_DIAGNOSIS_POLICY];
+/**
+ * What a content brief may be built from (docs/P4_SPEC.md §8).
+ *
+ * Governance first and in full - the approved context, the goals, every
+ * approved fact and every active rule - because a brief is mostly a statement
+ * of constraints. Then what the work is about: the keyword and its demand,
+ * who owns it, the topic, the target page and what it says today, and the
+ * diagnosis and decision the recommendation came from. Measurements are kept
+ * small: a brief is not a diagnosis, and the diagnosis it rests on already
+ * read them.
+ */
+export const CONTENT_BRIEF_POLICY: RetrievalPolicyDefinition = {
+  name: "content-brief",
+  version: 1,
+  description:
+    "Evidence gathered for briefing one piece of content work: the approved context, " +
+    "facts and rules it must respect, the keyword and topic it serves, the page it " +
+    "changes or joins, and the diagnosis and decision that asked for it.",
+  windowDays: 28,
+  maxEvidence: 90,
+  maxContentChars: 6_000,
+  budgets: {
+    BUSINESS_CONTEXT: {
+      max: 1,
+      rationale: "The current approved version only. Superseded context is not evidence.",
+    },
+    BUSINESS_GOAL: {
+      max: 5,
+      rationale: "Active goals, so the brief can say what the piece is for.",
+    },
+    BRAND_FACT: {
+      max: 20,
+      rationale: "Every approved fact: the only sources a claim in the piece may rest on.",
+    },
+    SEO_RULE: {
+      max: 15,
+      rationale: "Every active rule. A brief that omits one invites a QA block.",
+    },
+    KEYWORD_METRIC: { max: 10, rationale: "Demand for the primary keyword and its neighbours." },
+    RANKING_SNAPSHOT: { max: 6, rationale: "Where the target page stands today on its keywords." },
+    KEYWORD_OWNERSHIP: {
+      max: 12,
+      rationale: "Which pages own which keywords: the target, and the pages a link can point at.",
+    },
+    TOPIC_MAPPING: { max: 6, rationale: "The topic this piece belongs to and its neighbours." },
+    GSC_METRIC: {
+      max: 4,
+      rationale: "Page totals for both windows, so a refresh knows its baseline.",
+    },
+    COMPETITOR_OBSERVATION: {
+      max: 6,
+      rationale: "Who else ranks for the primary keyword. Overlap only.",
+    },
+    PAGE_CONTENT: {
+      max: 1,
+      rationale: "What the target page says now, so a refresh changes it rather than restarts it.",
+    },
+    PREVIOUS_DIAGNOSIS: {
+      max: 1,
+      rationale: "The diagnosis the recommendation came from: the findings the brief answers.",
+    },
+    PREVIOUS_CHANGE: {
+      max: 4,
+      rationale:
+        "The opportunity and the decision behind this work, so the brief knows what was approved.",
+    },
+  },
+  rules: [
+    "Business Context: the current APPROVED version, never a draft; its prohibited claims and avoid-topics are canonical.",
+    "Brand Facts: APPROVED only. A proposed or rejected fact is not a fact the piece may use.",
+    "SEO Rules: every active rule, BLOCKING first.",
+    "Keyword: the work item's keyword, its latest demand snapshot per provider, and the pages that own it.",
+    "Topic: the work item's topic and the keywords mapped to it.",
+    "Page: the target page's latest content snapshot, its ownership records, and its last two measurement windows.",
+    "History: the diagnosis, opportunity and decision this work item was started from.",
+    "Everything is scoped to this website. Nothing else is reachable.",
+  ],
+};
+
+export const RETRIEVAL_POLICIES: readonly RetrievalPolicyDefinition[] = [
+  PAGE_DIAGNOSIS_POLICY,
+  CONTENT_BRIEF_POLICY,
+];
 
 export function findPolicy(name: string, version?: number): RetrievalPolicyDefinition | null {
   const candidates = RETRIEVAL_POLICIES.filter((policy) => policy.name === name);
