@@ -14,7 +14,14 @@ import {
   saveBrief,
   type BriefInput,
 } from "@/server/services/content-brief";
-import { generateRevision, startDraft } from "@/server/services/content-draft";
+import {
+  ContentDraftError,
+  generateRevision,
+  requestDraftReview,
+  saveRevision,
+  startDraft,
+  startDraftFromBrief,
+} from "@/server/services/content-draft";
 import type { ContentWorkItem } from "@/generated/prisma/client";
 
 /**
@@ -32,6 +39,15 @@ import type { ContentWorkItem } from "@/generated/prisma/client";
  *   and v2 approved - so v1 is SUPERSEDED and inspectable;
  *   a NEW_CONTENT work item whose brief v1 is AWAITING_REVIEW;
  *   the P3 stories' approved recommendations started, one with a draft brief.
+ *
+ * Stories (M4.2, M4.3):
+ *   the refresh item's draft: a deliberately bad AI revision v1, stored and
+ *   flagged, which blocks review; a hand-written v2 that clears it; review
+ *   requested, so the draft is AWAITING_EDITOR_REVIEW;
+ *   a third item whose brief v1 was approved and drafted (AI v1), then edited
+ *   into v2 and approved - the mismatch - and a person started a draft from
+ *   v2: the first draft is SUPERSEDED and inspectable, the second generated
+ *   from v2 and a fresh package.
  */
 
 export type P4DemoOptions = {
@@ -42,13 +58,37 @@ export type P4DemoOptions = {
 export type P4DemoResult = {
   refreshItemId: string;
   newContentItemId: string;
+  compareItemId: string;
   startedFromP3: number;
   briefs: { version: number; status: string; workItemId: string }[];
-  /** M4.2: the refresh draft's revisions - one clean, one deliberately flagged. */
-  revisions: { revisionNumber: number; blocking: boolean }[];
+  /** The refresh draft's revisions: AI v1 flagged and blocking, human v2 clean. */
+  revisions: { revisionNumber: number; blocking: boolean; author: "AI" | "HUMAN" }[];
+  /** The refresh draft, awaiting editorial review. */
+  reviewDraftId: string;
+  /** The supersession story: the old draft kept, the new one pinned to v2. */
+  supersession: { oldDraftId: string; newDraftId: string };
 };
 
 const DEFAULT_REFRESH_PATH = "/blog/cohort-analysis-guide";
+const REFRESH_TITLE = "Refresh the cohort analysis guide for teams choosing a tool";
+const COMPARE_TITLE = "Compare cohort analysis tools for teams outgrowing spreadsheets";
+
+/** The good draft of the refresh story - what the stub writes, and what the person restores. */
+const GOOD_REFRESH_BODY = [
+  "# Cohort analysis, from first cohort to first decision",
+  "",
+  "## What a cohort is",
+  "",
+  "A cohort is a group of users who share a starting moment. Comparing cohorts shows whether the product is getting better at keeping people, week by week.",
+  "",
+  "## Walkthrough",
+  "",
+  "Pick a start event, group users by the week they did it, and count how many come back in each following week. The curve that falls and flattens is your retention.",
+  "",
+  "## Choosing a tool",
+  "",
+  "A spreadsheet works for one product and one question. Past that, a tool that refreshes cohorts on its own saves the week you would spend rebuilding them. See [cohort reports](/product/cohort-reports).",
+].join("\n");
 
 function citableIds(request: GenerateStructuredRequest<unknown>): string[] {
   return [...(request.untrustedData ?? "").matchAll(/^\[([^\]]+)\]/gm)].map((match) => match[1]!);
@@ -66,11 +106,14 @@ function scriptFor(request: GenerateStructuredRequest<unknown>): ContentBriefOut
   const ctx = byKind(ids, "ctx");
   const owns = byKind(ids, "own");
   const isNew = request.task.includes("Target page: none");
+  const isCompare = request.task.includes(COMPARE_TITLE);
 
   return {
-    title: isNew
-      ? "Cohort retention benchmarks: what good looks like by stage"
-      : "Cohort analysis guide, refreshed for teams choosing a tool",
+    title: isCompare
+      ? "Cohort analysis tools compared: spreadsheet, product analytics, or a dedicated tool"
+      : isNew
+        ? "Cohort retention benchmarks: what good looks like by stage"
+        : "Cohort analysis guide, refreshed for teams choosing a tool",
     content_type: "GUIDE",
     search_intent: isNew ? "INFORMATIONAL" : "COMMERCIAL",
     primary_conversion: "Start a free trial",
@@ -127,36 +170,20 @@ function scriptFor(request: GenerateStructuredRequest<unknown>): ContentBriefOut
 }
 
 /**
- * The scripted draft for the refresh story. The first pass is what a good
- * model does with the brief; the second is deliberately bad - a claim the
- * context prohibits, a figure nobody approved, a link off the site - so the
- * stored, flagged revision shows what the server catches on the way in.
+ * The scripted draft. For the refresh story the model is deliberately bad -
+ * a figure nobody approved, a topic the context says to avoid, a link off
+ * the site - so the stored, flagged revision shows what the server catches
+ * on the way in, and why review is refused until a person fixes it. For any
+ * other item it writes what a good model does with the brief.
  */
-function draftScriptFor(
-  request: GenerateStructuredRequest<unknown>,
-  pass: number,
-): ContentDraftOutput {
+function draftScriptFor(request: GenerateStructuredRequest<unknown>): ContentDraftOutput {
   const ids = citableIds(request);
   const facts = byKind(ids, "fact");
   const owns = byKind(ids, "own");
-  const good = pass === 1;
+  const good = !request.task.includes(REFRESH_TITLE);
 
   const body = good
-    ? [
-        "# Cohort analysis, from first cohort to first decision",
-        "",
-        "## What a cohort is",
-        "",
-        "A cohort is a group of users who share a starting moment. Comparing cohorts shows whether the product is getting better at keeping people, week by week.",
-        "",
-        "## Walkthrough",
-        "",
-        "Pick a start event, group users by the week they did it, and count how many come back in each following week. The curve that falls and flattens is your retention.",
-        "",
-        "## Choosing a tool",
-        "",
-        "A spreadsheet works for one product and one question. Past that, a tool that refreshes cohorts on its own saves the week you would spend rebuilding them. See [cohort reports](/product/cohort-reports).",
-      ].join("\n")
+    ? GOOD_REFRESH_BODY
     : [
         "# Cohort analysis, guaranteed to lift retention",
         "",
@@ -197,7 +224,9 @@ function draftScriptFor(
       : [],
     sections_covered: ["What a cohort is", "Walkthrough", "Choosing a tool"],
     open_questions: good ? [] : ["A verified customer count, if one is ever to be quoted."],
-    change_summary: good ? "First draft from the approved brief." : "Second pass, regenerated.",
+    change_summary: good
+      ? "First draft from the approved brief."
+      : "First draft from the approved brief.",
   };
 }
 
@@ -278,8 +307,27 @@ export async function seedP4Demo(
     reason: "Approved, with figures to come from an approved source only.",
   });
 
+  // A third, for the superseded-brief story.
+  const compareRecommendation = await prisma.recommendation.create({
+    data: {
+      websiteId: context.website.id,
+      type: "CONTENT_CREATE",
+      status: "AWAITING_REVIEW",
+      priority: "MEDIUM",
+      title: COMPARE_TITLE,
+      summary: "A comparison page for teams deciding whether they need a cohort tool at all.",
+      rationale: "The commercial question the guide raises has no page that answers it.",
+      createdByUserId: context.user.id,
+    },
+  });
+  await decide(context, compareRecommendation.id, {
+    decision: "APPROVED",
+    reason: "Approved; keep it honest about when a spreadsheet is enough.",
+  });
+
   const refreshItem = await startFromRecommendation(context, refreshRecommendation.id);
   const newItem = await startFromRecommendation(context, newRecommendation.id);
+  const compareItem = await startFromRecommendation(context, compareRecommendation.id);
 
   // The P3 stories' approved recommendations, started so the queue has depth.
   const p3Started: ContentWorkItem[] = [];
@@ -287,7 +335,7 @@ export async function seedP4Demo(
     where: {
       websiteId: context.website.id,
       status: { in: ["APPROVED", "MODIFIED"] },
-      id: { notIn: [refreshRecommendation.id, newRecommendation.id] },
+      id: { notIn: [refreshRecommendation.id, newRecommendation.id, compareRecommendation.id] },
       createdByAiRunId: { not: null },
     },
   });
@@ -299,16 +347,13 @@ export async function seedP4Demo(
     }
   }
 
-  let draftPasses = 0;
   installStubProvider({
-    respond: (request) => {
-      if (request.schemaName === "content_draft") {
-        draftPasses += 1;
-        return draftScriptFor(request, draftPasses);
-      }
-      return scriptFor(request);
-    },
+    respond: (request) =>
+      request.schemaName === "content_draft" ? draftScriptFor(request) : scriptFor(request),
   });
+
+  let reviewDraftId = "";
+  let supersession = { oldDraftId: "", newDraftId: "" };
 
   try {
     // Story 1: refresh - v1 approved, edited into v2, v2 approved, v1 superseded.
@@ -357,15 +402,90 @@ export async function seedP4Demo(
       await generateBrief(context, firstP3.id);
     }
 
-    // M4.2: the refresh item drafts from its approved brief - a clean first
-    // revision, then a deliberately bad second one that is stored and flagged.
-    const { draft } = await startDraft(context, refreshItem.id);
-    for (const token of ["demo-refresh-1", "demo-refresh-2"]) {
-      const outcome = await generateRevision(context, draft.id, { generationToken: token });
-      if (!outcome.ok) {
-        throw new DemoSeedError(`The refresh draft failed: ${outcome.message}`, "run_failed");
-      }
+    // M4.2 / M4.3, story A: the refresh draft. AI v1 is deliberately bad and
+    // stored flagged; review is refused; a person writes v2 and clears it;
+    // review is requested.
+    const { draft: refreshDraft } = await startDraft(context, refreshItem.id);
+    const bad = await generateRevision(context, refreshDraft.id, {
+      generationToken: "demo-refresh-1",
+    });
+    if (!bad.ok) {
+      throw new DemoSeedError(`The refresh draft failed: ${bad.message}`, "run_failed");
     }
+    try {
+      await requestDraftReview(context, refreshDraft.id);
+      throw new DemoSeedError(
+        "The flagged revision was accepted for review; the demo expects it refused.",
+        "run_failed",
+      );
+    } catch (error) {
+      if (!(error instanceof ContentDraftError) || error.code !== "blocked") throw error;
+    }
+    await saveRevision(context, refreshDraft.id, {
+      title: "Cohort analysis, from first cohort to first decision",
+      slug: "cohort-analysis-guide",
+      excerpt: "How to run a cohort analysis and decide whether you need a tool for it.",
+      metaTitle: "Cohort Analysis Guide | Investor Demo",
+      metaDescription: "Set up a cohort, read the retention curve, and choose a tool.",
+      bodyMarkdown: GOOD_REFRESH_BODY,
+      changeSummary:
+        "Removed the customer count and the external study nobody approved; rebuilt the walkthrough and the tool section from the brief.",
+    });
+    await requestDraftReview(context, refreshDraft.id);
+    reviewDraftId = refreshDraft.id;
+
+    // Story B: the compare item. Brief v1 approved and drafted; then v2
+    // approved, so the draft is on a superseded brief; a person starts a
+    // draft from v2 - the old one is kept, superseded; the new one is
+    // generated from v2 and a fresh package.
+    const compareV1 = await generateBrief(context, compareItem.id);
+    if (!compareV1.ok) {
+      throw new DemoSeedError(`The compare brief failed: ${compareV1.error.message}`, "run_failed");
+    }
+    await approveBrief(context, compareV1.brief.id);
+    const { draft: compareDraftA } = await startDraft(context, compareItem.id);
+    const firstPass = await generateRevision(context, compareDraftA.id, {
+      generationToken: "demo-compare-a-1",
+    });
+    if (!firstPass.ok) {
+      throw new DemoSeedError(`The compare draft failed: ${firstPass.message}`, "run_failed");
+    }
+    const compareV2 = await saveBrief(context, compareV1.brief.id, {
+      title: compareV1.brief.title,
+      contentType: compareV1.brief.contentType,
+      searchIntent: compareV1.brief.searchIntent,
+      primaryConversion: compareV1.brief.primaryConversion,
+      audience: compareV1.brief.audience,
+      customerProblem: compareV1.brief.customerProblem,
+      desiredOutcome: compareV1.brief.desiredOutcome,
+      recommendedAngle:
+        "Lead with the honest case for a spreadsheet, then the point where it breaks.",
+      keyQuestions: [
+        "When is a spreadsheet enough?",
+        "What does a dedicated tool add?",
+        "How do the options compare on cost?",
+      ],
+      requiredSections:
+        (compareV1.brief.requiredSectionsJson as BriefInput["requiredSections"]) ?? [],
+      optionalSections:
+        (compareV1.brief.optionalSectionsJson as BriefInput["optionalSections"]) ?? [],
+      externalEvidenceRequirements:
+        (compareV1.brief.externalEvidenceRequirementsJson as string[]) ?? [],
+      brandVoiceNotes: compareV1.brief.brandVoiceNotes,
+    });
+    await approveBrief(context, compareV2.brief.id);
+    const { draft: compareDraftB } = await startDraftFromBrief(
+      context,
+      compareItem.id,
+      compareV2.brief.id,
+    );
+    const secondPass = await generateRevision(context, compareDraftB.id, {
+      generationToken: "demo-compare-b-1",
+    });
+    if (!secondPass.ok) {
+      throw new DemoSeedError(`The compare draft failed: ${secondPass.message}`, "run_failed");
+    }
+    supersession = { oldDraftId: compareDraftA.id, newDraftId: compareDraftB.id };
   } finally {
     resetProvider();
   }
@@ -377,14 +497,15 @@ export async function seedP4Demo(
   });
 
   const revisions = await prisma.contentRevision.findMany({
-    where: { websiteId: context.website.id, draft: { contentWorkItemId: refreshItem.id } },
+    where: { websiteId: context.website.id, contentDraftId: reviewDraftId },
     orderBy: { revisionNumber: "asc" },
-    select: { revisionNumber: true, constraintFindingsJson: true },
+    select: { revisionNumber: true, constraintFindingsJson: true, createdByAiRunId: true },
   });
 
   return {
     refreshItemId: refreshItem.id,
     newContentItemId: newItem.id,
+    compareItemId: compareItem.id,
     startedFromP3: p3Started.length,
     briefs: briefs.map((row) => ({
       version: row.version,
@@ -394,6 +515,9 @@ export async function seedP4Demo(
     revisions: revisions.map((row) => ({
       revisionNumber: row.revisionNumber,
       blocking: Boolean((row.constraintFindingsJson as { blocking?: boolean } | null)?.blocking),
+      author: row.createdByAiRunId ? "AI" : "HUMAN",
     })),
+    reviewDraftId,
+    supersession,
   };
 }

@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 import { prisma } from "@/server/db/prisma";
 import { recordAudit } from "@/server/audit/record";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
@@ -23,12 +25,22 @@ import {
   type DraftFinding,
   type MachineRule,
 } from "@/lib/content/constraints";
-import { renderMarkdown, wordCount } from "@/lib/content/markdown";
+import { plainText, renderMarkdown, wordCount } from "@/lib/content/markdown";
 import { reconcileBriefClaims, type ReconciledClaim } from "@/lib/content/reconcile";
+import {
+  diffLines,
+  revisionChanges,
+  type DiffLine,
+  type RevisionChanges,
+  type RevisionFields,
+} from "@/lib/content/diff";
 import { revisionHash } from "@/lib/execution/hash";
+import { DRAFT_TRANSITIONS, canTransition } from "@/lib/execution/statuses";
+import { buildEvidenceId, parseEvidenceId } from "@/lib/evidence/id";
 import type { Evidence } from "@/lib/evidence/types";
 import {
   CONTENT_DRAFT_SCHEMA_NAME,
+  SLUG_PATTERN,
   contentDraftSchema,
   type ContentDraftOutput,
 } from "@/lib/ai/schemas/content-draft";
@@ -37,36 +49,57 @@ import type {
   AiRun,
   ContentBrief,
   ContentDraft,
+  ContentDraftStatus,
   ContentRevision,
   ContentWorkItem,
   EvidenceCategory,
 } from "@/generated/prisma/client";
 
 /**
- * ContentDraftService (docs/P4_SPEC.md §9-§11; M4 plan, M4.2).
+ * ContentDraftService (docs/P4_SPEC.md §9-§11; M4 plan, M4.2 and M4.3).
  *
  * A draft is written from an approved brief and nothing else. The brief is
  * pinned to the draft by id - an immutable APPROVED row - and is never moved
- * to a newer version behind anyone's back. What is true is decided at
- * generation time by a fresh content-draft package: a claim the brief allowed
- * is offered to the model only if its fact is still approved, and is marked
- * STALE for the editor if not.
+ * to a newer version behind anyone's back. When a newer version is approved
+ * the draft stays where it is, generation against the old version stops, and
+ * a person may start a separate draft from the new one; the old draft is then
+ * SUPERSEDED with every revision still inspectable.
  *
- * Every revision is immutable and carries what made it: the run, the
- * package, the token of the request that asked for it, the claims it makes
- * with their support, and what the server found and removed on the way in.
- * A revision with blocking findings is still stored - history is not edited
- * to look better - and the draft stays DRAFTING until a person does more.
+ * What is true is decided at the moment of writing: for a generation, by a
+ * fresh content-draft package; for a hand-written revision, by the facts
+ * approved right now. A claim the brief allowed is offered only while its
+ * fact is still approved, and is marked STALE for the editor if not.
+ *
+ * Every revision is immutable and carries what made it: the run or the
+ * person, the package, the token of the request that asked for it, the claims
+ * it makes with their support, what the server found and removed, and the
+ * revision it was written from. A revision with blocking findings is still
+ * stored - history is not edited to look better - and it cannot go to review
+ * until a later revision clears them.
  */
 
 export class ContentDraftError extends Error {
+  readonly findings: DraftFinding[];
+  readonly issues: string[];
+
   constructor(
     message: string,
     readonly code:
-      "not_found" | "forbidden" | "invalid_state" | "brief_not_approved" | "version_conflict",
+      | "not_found"
+      | "forbidden"
+      | "invalid_state"
+      | "invalid_input"
+      | "brief_not_approved"
+      | "brief_superseded"
+      | "nothing_changed"
+      | "blocked"
+      | "version_conflict",
+    details: { findings?: DraftFinding[]; issues?: string[] } = {},
   ) {
     super(message);
     this.name = "ContentDraftError";
+    this.findings = details.findings ?? [];
+    this.issues = details.issues ?? [];
   }
 }
 
@@ -79,6 +112,11 @@ export const GENERATION_FAILED_MESSAGE =
 
 /** How long a RUNNING run holds the work item before it is treated as abandoned. */
 export const RUNNING_GUARD_MS = 10 * 60 * 1000;
+
+/** Draft statuses a person can still write into. */
+const EDITABLE_STATUSES: ContentDraftStatus[] = ["DRAFTING", "AWAITING_EDITOR_REVIEW"];
+/** Draft statuses that count as "the draft" for a work item. */
+const OPEN_STATUSES: ContentDraftStatus[] = ["DRAFTING", "AWAITING_EDITOR_REVIEW"];
 
 // ---------------------------------------------------------------------------
 // What a revision stores in its JSON columns
@@ -105,7 +143,7 @@ export type RevisionFindings = {
   links: RevisionLink[];
   openQuestions: string[];
   sectionsCovered: string[];
-  /** Brief claims that were stale at generation time, so the editor sees them. */
+  /** Brief claims that were stale at writing time, so the editor sees them. */
   staleClaims: ReconciledClaim[];
 };
 
@@ -113,12 +151,26 @@ export type RevisionFindings = {
 // Guards
 // ---------------------------------------------------------------------------
 
-function requireHumanWriter(context: TenantContext): void {
+function requireHuman(context: TenantContext, what: string): void {
   if (context.user.authUserId === SYSTEM_AUTH_USER_ID) {
-    throw new ContentDraftError("Drafting is started by a person, not by a job.", "forbidden");
+    throw new ContentDraftError(`${what} is done by a person, not by a job.`, "forbidden");
   }
+}
+
+function requireHumanWriter(context: TenantContext): void {
+  requireHuman(context, "Drafting");
   if (!hasRole(context.membership.role, REQUIRED.WRITE)) {
     throw new ContentDraftError("You do not have permission to draft content.", "forbidden");
+  }
+}
+
+function requireHumanReviewer(context: TenantContext): void {
+  requireHuman(context, "Reviewing");
+  if (!hasRole(context.membership.role, REQUIRED.REVIEW)) {
+    throw new ContentDraftError(
+      "Returning a draft to drafting needs an SEO lead, admin or owner.",
+      "forbidden",
+    );
   }
 }
 
@@ -133,7 +185,7 @@ async function draftingItem(context: TenantContext, workItemId: string): Promise
     throw new ContentDraftError(
       item.status === "QUEUED" || item.status === "BRIEFING"
         ? "Drafting starts once a brief has been approved."
-        : `Drafting is not open for work that is ${item.status.toLowerCase().replace(/_/g, " ")}.`,
+        : `Drafting is not open for work that is ${statusWords(item.status)}.`,
       "invalid_state",
     );
   }
@@ -154,6 +206,23 @@ async function approvedBrief(context: TenantContext, workItemId: string): Promis
   return brief;
 }
 
+type DraftWithBrief = ContentDraft & { brief: ContentBrief };
+
+async function scopedDraft(context: TenantContext, draftId: string): Promise<DraftWithBrief> {
+  const draft = await prisma.contentDraft.findFirst({
+    where: { id: draftId, ...websiteScope(context) },
+    include: { brief: true },
+  });
+  if (!draft) {
+    throw new ContentDraftError("That draft is not available.", "not_found");
+  }
+  return draft;
+}
+
+function statusWords(status: string): string {
+  return status.toLowerCase().replace(/_/g, " ");
+}
+
 // ---------------------------------------------------------------------------
 // The container (§9)
 // ---------------------------------------------------------------------------
@@ -163,7 +232,8 @@ export type StartDraftResult = { draft: ContentDraft; brief: ContentBrief; creat
 /**
  * One draft per work item and approved brief version. Returns the open draft
  * when there is one - even if a newer brief version has since been approved;
- * that mismatch is surfaced by the reader, never resolved silently here.
+ * that mismatch is surfaced by the reader and resolved only by
+ * startDraftFromBrief, never here.
  */
 export async function startDraft(
   context: TenantContext,
@@ -174,11 +244,7 @@ export async function startDraft(
   const brief = await approvedBrief(context, item.id);
 
   const existing = await prisma.contentDraft.findFirst({
-    where: {
-      contentWorkItemId: item.id,
-      status: { notIn: ["SUPERSEDED", "ARCHIVED"] },
-      ...websiteScope(context),
-    },
+    where: { contentWorkItemId: item.id, status: { in: OPEN_STATUSES }, ...websiteScope(context) },
     orderBy: { createdAt: "desc" },
     include: { brief: true },
   });
@@ -211,6 +277,94 @@ export async function startDraft(
   });
 
   return { draft, brief, created: true };
+}
+
+export type StartFromBriefResult = StartDraftResult & { supersededDraftIds: string[] };
+
+/**
+ * The explicit act of moving on to a newer approved brief (M4.3, superseded
+ * brief rule). A new draft is pinned to that version; the open draft(s) for
+ * the work item become SUPERSEDED with every revision kept. Nothing is copied
+ * across: the new draft starts from the new brief and, when generated, a
+ * fresh package. The audit trail links old and new both ways.
+ */
+export async function startDraftFromBrief(
+  context: TenantContext,
+  workItemId: string,
+  briefId: string,
+): Promise<StartFromBriefResult> {
+  requireHumanWriter(context);
+  const item = await draftingItem(context, workItemId);
+
+  const brief = await prisma.contentBrief.findFirst({
+    where: { id: briefId, contentWorkItemId: item.id, ...websiteScope(context) },
+  });
+  if (!brief) {
+    throw new ContentDraftError("That brief version is not available.", "not_found");
+  }
+  if (brief.status !== "APPROVED") {
+    throw new ContentDraftError(
+      `Brief v${brief.version} is ${statusWords(brief.status)}; a draft can only start from the approved version.`,
+      "brief_not_approved",
+    );
+  }
+
+  const open = await prisma.contentDraft.findMany({
+    where: { contentWorkItemId: item.id, status: { in: OPEN_STATUSES }, ...websiteScope(context) },
+    orderBy: { createdAt: "asc" },
+  });
+  const already = open.find((row) => row.briefId === brief.id);
+  if (already) {
+    return { draft: already, brief, created: false, supersededDraftIds: [] };
+  }
+
+  const draft = await prisma.$transaction(async (tx) => {
+    const created = await tx.contentDraft.create({
+      data: {
+        websiteId: context.website.id,
+        contentWorkItemId: item.id,
+        briefId: brief.id,
+        status: "DRAFTING",
+        createdByUserId: context.user.id,
+      },
+    });
+
+    for (const previous of open) {
+      if (!canTransition(DRAFT_TRANSITIONS, previous.status, "SUPERSEDED")) {
+        throw new ContentDraftError(
+          `The draft that is ${statusWords(previous.status)} cannot be superseded.`,
+          "invalid_state",
+        );
+      }
+      await tx.contentDraft.update({
+        where: { id: previous.id },
+        data: { status: "SUPERSEDED" },
+      });
+      await recordAudit(tx, context, {
+        entityType: "ContentDraft",
+        entityId: previous.id,
+        action: "SUPERSEDE",
+        before: { status: previous.status, briefId: previous.briefId },
+        after: { status: "SUPERSEDED", supersededByDraftId: created.id, briefId: brief.id },
+      });
+    }
+
+    await recordAudit(tx, context, {
+      entityType: "ContentDraft",
+      entityId: created.id,
+      action: "CREATE",
+      after: {
+        workItemId: item.id,
+        briefId: brief.id,
+        briefVersion: brief.version,
+        previousDraftIds: open.map((row) => row.id),
+      },
+    });
+
+    return created;
+  });
+
+  return { draft, brief, created: true, supersededDraftIds: open.map((row) => row.id) };
 }
 
 // ---------------------------------------------------------------------------
@@ -378,10 +532,32 @@ async function activeRulesFrom(
   return { rules, machine };
 }
 
+/** The website's active rules that carry a machine check - for hand-written revisions. */
+async function activeMachineRules(context: TenantContext): Promise<MachineRule[]> {
+  const rows = await prisma.seoRule.findMany({
+    where: { ...websiteScope(context), active: true, archivedAt: null },
+    select: { id: true, severity: true, checkJson: true },
+  });
+  return rows
+    .filter((row) => row.checkJson !== null)
+    .map((row) => ({ ruleId: row.id, severity: row.severity, check: row.checkJson }));
+}
+
+function prohibitedPhrasesOf(prohibited: ProhibitedClaim[]): string[] {
+  return prohibited.filter((claim) => claim.source !== "AVOID_TOPIC").map((claim) => claim.text);
+}
+
+function avoidTopicsOf(prohibited: ProhibitedClaim[]): string[] {
+  return prohibited
+    .filter((claim) => claim.source === "AVOID_TOPIC")
+    .map((claim) => claim.text.replace(/^Avoid the topic:\s*/i, ""));
+}
+
 /**
  * Generates the next revision of a draft from its pinned brief and a fresh
  * package. Inline: the caller waits. Idempotent by token, guarded against
- * concurrent runs, honest when nothing can run.
+ * concurrent runs, honest when nothing can run. Refused once the pinned
+ * brief has been superseded: the person starts a draft from the new version.
  */
 export async function generateRevision(
   context: TenantContext,
@@ -394,25 +570,28 @@ export async function generateRevision(
     throw new ContentDraftError("A generation request needs a token.", "invalid_state");
   }
 
-  const draft = await prisma.contentDraft.findFirst({
-    where: { id: draftId, ...websiteScope(context) },
-    include: { brief: true },
-  });
-  if (!draft) {
-    throw new ContentDraftError("That draft is not available.", "not_found");
-  }
+  const draft = await scopedDraft(context, draftId);
   if (draft.status !== "DRAFTING") {
     throw new ContentDraftError(
-      `This draft is ${draft.status.toLowerCase().replace(/_/g, " ")}; nothing can be generated for it.`,
+      draft.status === "AWAITING_EDITOR_REVIEW"
+        ? "Review has been requested for this draft. Return it to drafting, or save a hand-written revision, before generating again."
+        : `This draft is ${statusWords(draft.status)}; nothing can be generated for it.`,
       "invalid_state",
     );
   }
   const item = await draftingItem(context, draft.contentWorkItemId);
   const brief = draft.brief;
-  // The pin is an approved version. A later version superseding it does not
-  // un-approve it: the draft is of that version until a person starts one
-  // from the new brief (M4.3). Archived or never-approved briefs are refused.
-  if (!brief.approvedAt || (brief.status !== "APPROVED" && brief.status !== "SUPERSEDED")) {
+  if (brief.status === "SUPERSEDED") {
+    const newer = await prisma.contentBrief.findFirst({
+      where: { contentWorkItemId: item.id, status: "APPROVED", ...websiteScope(context) },
+      select: { version: true },
+    });
+    throw new ContentDraftError(
+      `This draft was created from brief v${brief.version}, which has been superseded${newer ? ` by v${newer.version}` : ""}. Generation against it is closed; start a draft from the approved version.`,
+      "brief_superseded",
+    );
+  }
+  if (brief.status !== "APPROVED") {
     throw new ContentDraftError(
       "The brief this draft is pinned to is not an approved version.",
       "brief_not_approved",
@@ -588,12 +767,8 @@ export async function generateRevision(
     metaDescription: output.meta_description,
     excerpt: output.excerpt,
     bodyMarkdown: output.body_markdown,
-    prohibitedPhrases: prohibited
-      .filter((claim) => claim.source !== "AVOID_TOPIC")
-      .map((claim) => claim.text),
-    avoidTopics: prohibited
-      .filter((claim) => claim.source === "AVOID_TOPIC")
-      .map((claim) => claim.text.replace(/^Avoid the topic:\s*/i, "")),
+    prohibitedPhrases: prohibitedPhrasesOf(prohibited),
+    avoidTopics: avoidTopicsOf(prohibited),
     staleClaims: reconciled.stale.map((claim) => claim.text),
     approvedClaimTexts: [
       ...reconciled.valid.map((claim) => claim.text),
@@ -672,6 +847,7 @@ export async function generateRevision(
         after: {
           draftId: draft.id,
           revisionNumber,
+          author: "AI",
           aiRunId: result.run.id,
           evidencePackageId: assembled.package.id,
           wordCount: revision.wordCount,
@@ -679,11 +855,7 @@ export async function generateRevision(
             supported: claims.filter((claim) => claim.status === "SUPPORTED").length,
             unsupported: claims.filter((claim) => claim.status === "UNSUPPORTED").length,
           },
-          findings: {
-            blocking: checked.findings.filter((row) => row.severity === "BLOCKING").length,
-            warning: checked.findings.filter((row) => row.severity === "WARNING").length,
-            info: checked.findings.filter((row) => row.severity === "INFO").length,
-          },
+          findings: countFindings(checked.findings),
           citations: {
             malformed: audit.malformed.length,
             outsidePackage: audit.outsidePackage.length,
@@ -735,7 +907,473 @@ export async function generateRevision(
 }
 
 // ---------------------------------------------------------------------------
-// Reading (§10, §12)
+// Hand-written revisions (M4.3 §1)
+// ---------------------------------------------------------------------------
+
+export const revisionInputSchema = z.object({
+  title: z.string().trim().min(1, "A title is required.").max(200),
+  slug: z
+    .string()
+    .trim()
+    .max(200)
+    .regex(SLUG_PATTERN, "A slug is lowercase words joined by hyphens.")
+    .nullable(),
+  excerpt: z.string().trim().max(1000).nullable(),
+  metaTitle: z.string().trim().max(200).nullable(),
+  metaDescription: z.string().trim().max(500).nullable(),
+  bodyMarkdown: z.string().min(1, "The body is required.").max(80_000),
+  changeSummary: z.string().trim().min(1, "Say what changed.").max(500),
+});
+
+export type RevisionInput = z.input<typeof revisionInputSchema>;
+
+/** Empty strings from a form mean "not set". */
+function normaliseInput(input: RevisionInput): RevisionInput {
+  const orNull = (value: string | null | undefined) =>
+    typeof value === "string" && value.trim().length > 0 ? value : null;
+  return {
+    title: input.title,
+    slug: orNull(input.slug),
+    excerpt: orNull(input.excerpt),
+    metaTitle: orNull(input.metaTitle),
+    metaDescription: orNull(input.metaDescription),
+    bodyMarkdown: input.bodyMarkdown,
+    changeSummary: input.changeSummary,
+  };
+}
+
+function countFindings(findings: DraftFinding[]): {
+  blocking: number;
+  warning: number;
+  info: number;
+} {
+  return {
+    blocking: findings.filter((row) => row.severity === "BLOCKING").length,
+    warning: findings.filter((row) => row.severity === "WARNING").length,
+    info: findings.filter((row) => row.severity === "INFO").length,
+  };
+}
+
+/**
+ * What is true right now for a set of evidence ids: the brand facts among
+ * them that are APPROVED, and the business context version among them that
+ * is the approved one. Anything else is not current, whatever a brief or an
+ * earlier revision said.
+ */
+async function currentTruth(
+  context: TenantContext,
+  evidenceIds: (string | null | undefined)[],
+): Promise<Map<string, string>> {
+  const factIds: string[] = [];
+  const versionIds: string[] = [];
+  for (const raw of evidenceIds) {
+    const parsed = raw ? parseEvidenceId(raw) : null;
+    if (!parsed) continue;
+    if (parsed.kind === "fact") factIds.push(parsed.brandFactId);
+    if (parsed.kind === "ctx") versionIds.push(parsed.contextVersionId);
+  }
+
+  const truth = new Map<string, string>();
+  if (factIds.length > 0) {
+    const facts = await prisma.brandFact.findMany({
+      where: { id: { in: factIds }, ...websiteScope(context), approvalStatus: "APPROVED" },
+      select: { id: true },
+    });
+    for (const fact of facts) {
+      truth.set(buildEvidenceId({ kind: "fact", brandFactId: fact.id }), "BRAND_FACT");
+    }
+  }
+  if (versionIds.length > 0) {
+    const versions = await prisma.businessContextVersion.findMany({
+      where: {
+        id: { in: versionIds },
+        status: "APPROVED",
+        businessContext: { websiteId: context.website.id },
+      },
+      select: { id: true },
+    });
+    for (const version of versions) {
+      truth.set(buildEvidenceId({ kind: "ctx", contextVersionId: version.id }), "BUSINESS_CONTEXT");
+    }
+  }
+  return truth;
+}
+
+function normaliseText(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The claims a hand-written revision makes: those the brief allows and those
+ * the previous revision declared, kept when their words are still in the
+ * text, each judged against what is approved now.
+ */
+function carriedClaims(input: {
+  previous: RevisionClaim[];
+  valid: ReconciledClaim[];
+  truth: Map<string, string>;
+  text: string;
+}): RevisionClaim[] {
+  const haystack = normaliseText(input.text);
+  const candidates = new Map<string, RevisionClaim>();
+  for (const claim of input.valid) {
+    candidates.set(normaliseText(claim.text), {
+      text: claim.text,
+      evidenceId: claim.evidenceId,
+      status: "SUPPORTED",
+      reason: null,
+    });
+  }
+  for (const claim of input.previous) {
+    const key = normaliseText(claim.text);
+    if (!candidates.has(key)) candidates.set(key, claim);
+  }
+
+  const claims: RevisionClaim[] = [];
+  for (const [key, claim] of candidates) {
+    if (!key || !haystack.includes(key)) continue;
+    if (claim.evidenceId && input.truth.has(claim.evidenceId)) {
+      claims.push({ ...claim, status: "SUPPORTED", reason: null });
+    } else if (claim.evidenceId) {
+      claims.push({
+        ...claim,
+        status: "UNSUPPORTED",
+        reason:
+          claim.status === "UNSUPPORTED" && claim.reason
+            ? claim.reason
+            : "The cited fact is no longer approved.",
+      });
+    } else {
+      claims.push({
+        ...claim,
+        status: "UNSUPPORTED",
+        reason: claim.reason ?? "No fact was cited.",
+      });
+    }
+  }
+  return claims;
+}
+
+export type SaveRevisionResult = {
+  revision: ContentRevision;
+  draft: ContentDraft;
+  /** True when the draft was awaiting review and this edit sent it back to drafting. */
+  returnedToDrafting: boolean;
+};
+
+/**
+ * A person's revision. Always a new immutable row, written from the current
+ * one; never an edit in place. Checked like a generated one, with the
+ * human-mode link rule: safe http(s) links are kept and flagged, unsafe
+ * schemes and rule-prohibited links are removed. If the draft was awaiting
+ * review, it is drafting again: what the reviewer was looking at has changed.
+ */
+export async function saveRevision(
+  context: TenantContext,
+  draftId: string,
+  rawInput: RevisionInput,
+): Promise<SaveRevisionResult> {
+  requireHumanWriter(context);
+
+  const parsed = revisionInputSchema.safeParse(normaliseInput(rawInput));
+  if (!parsed.success) {
+    throw new ContentDraftError("The revision could not be saved as entered.", "invalid_input", {
+      issues: parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
+    });
+  }
+  const input = parsed.data;
+
+  const draft = await scopedDraft(context, draftId);
+  if (!EDITABLE_STATUSES.includes(draft.status)) {
+    throw new ContentDraftError(
+      `This draft is ${statusWords(draft.status)}; it can be read but not written to.`,
+      "invalid_state",
+    );
+  }
+  await draftingItem(context, draft.contentWorkItemId);
+  const brief = draft.brief;
+
+  const current = draft.currentRevisionId
+    ? await prisma.contentRevision.findFirst({
+        where: { id: draft.currentRevisionId, ...websiteScope(context) },
+      })
+    : null;
+  const previousClaims = current ? revisionClaims(current) : [];
+
+  // What is true now, for everything the brief and the last revision cited.
+  const briefClaims = asArray<CitedClaim>(brief.approvedClaimsJson);
+  const truth = await currentTruth(context, [
+    ...briefClaims.map((claim) => claim.evidenceId),
+    ...previousClaims.map((claim) => claim.evidenceId),
+  ]);
+  const reconciled = reconcileBriefClaims(briefClaims, truth);
+  const prohibited = asArray<ProhibitedClaim>(brief.prohibitedClaimsJson);
+  const links = asArray<LinkTarget>(brief.internalLinkTargetsJson);
+
+  const checked = checkDraftConstraints({
+    mode: "human",
+    title: input.title,
+    metaTitle: input.metaTitle,
+    metaDescription: input.metaDescription,
+    excerpt: input.excerpt,
+    bodyMarkdown: input.bodyMarkdown,
+    prohibitedPhrases: prohibitedPhrasesOf(prohibited),
+    avoidTopics: avoidTopicsOf(prohibited),
+    staleClaims: reconciled.stale.map((claim) => claim.text),
+    approvedClaimTexts: reconciled.valid.map((claim) => claim.text),
+    allowedLinkPaths: links
+      .map((link) => link.path)
+      .filter((path): path is string => Boolean(path)),
+    siteHost: context.website.normalizedDomain,
+    rules: await activeMachineRules(context),
+  });
+
+  const content = {
+    title: input.title,
+    slug: input.slug,
+    excerpt: input.excerpt,
+    bodyMarkdown: checked.bodyMarkdown,
+    metaTitle: input.metaTitle,
+    metaDescription: input.metaDescription,
+    schemaJson: null,
+  };
+  const contentHash = revisionHash(content);
+  if (current && current.contentHash === contentHash) {
+    throw new ContentDraftError(
+      "Nothing changed. The text is the same as the current revision.",
+      "nothing_changed",
+    );
+  }
+
+  const claims = carriedClaims({
+    previous: previousClaims,
+    valid: reconciled.valid,
+    truth,
+    text: plainText([content.title, content.excerpt ?? "", content.bodyMarkdown].join("\n\n")),
+  });
+  const findings: RevisionFindings = {
+    version: 1,
+    findings: checked.findings,
+    blocking: checked.blocking,
+    links: [],
+    openQuestions: [],
+    sectionsCovered: [],
+    staleClaims: reconciled.stale,
+  };
+  const returnedToDrafting = draft.status === "AWAITING_EDITOR_REVIEW";
+  if (returnedToDrafting && !canTransition(DRAFT_TRANSITIONS, draft.status, "DRAFTING")) {
+    throw new ContentDraftError("This draft cannot return to drafting from here.", "invalid_state");
+  }
+
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const last = await tx.contentRevision.findFirst({
+        where: { contentDraftId: draft.id },
+        orderBy: { revisionNumber: "desc" },
+        select: { revisionNumber: true },
+      });
+      const revisionNumber = (last?.revisionNumber ?? 0) + 1;
+
+      const revision = await tx.contentRevision.create({
+        data: {
+          websiteId: context.website.id,
+          contentDraftId: draft.id,
+          revisionNumber,
+          title: content.title,
+          slug: content.slug,
+          excerpt: content.excerpt,
+          bodyMarkdown: content.bodyMarkdown,
+          metaTitle: content.metaTitle,
+          metaDescription: content.metaDescription,
+          changeSummary: input.changeSummary,
+          contentHash,
+          createdByUserId: context.user.id,
+          basedOnRevisionNumber: current?.revisionNumber ?? null,
+          claimsJson: claims as unknown as Prisma.InputJsonValue,
+          constraintFindingsJson: findings as unknown as Prisma.InputJsonValue,
+          wordCount: wordCount(content.bodyMarkdown),
+        },
+      });
+
+      const updatedDraft = await tx.contentDraft.update({
+        where: { id: draft.id },
+        data: {
+          currentRevisionId: revision.id,
+          ...(returnedToDrafting ? { status: "DRAFTING" as const } : {}),
+        },
+      });
+
+      // CONTENT_REVISION_CREATED (§36).
+      await recordAudit(tx, context, {
+        entityType: "ContentRevision",
+        entityId: revision.id,
+        action: "CREATE",
+        after: {
+          draftId: draft.id,
+          revisionNumber,
+          author: "HUMAN",
+          basedOnRevisionNumber: current?.revisionNumber ?? null,
+          wordCount: revision.wordCount,
+          findings: countFindings(checked.findings),
+          claims: {
+            supported: claims.filter((claim) => claim.status === "SUPPORTED").length,
+            unsupported: claims.filter((claim) => claim.status === "UNSUPPORTED").length,
+          },
+        },
+      });
+      if (returnedToDrafting) {
+        await recordAudit(tx, context, {
+          entityType: "ContentDraft",
+          entityId: draft.id,
+          action: "UPDATE",
+          before: { status: draft.status },
+          after: {
+            status: "DRAFTING",
+            reason: "The content under review changed.",
+            revisionId: revision.id,
+          },
+        });
+      }
+
+      return { revision, draft: updatedDraft, returnedToDrafting };
+    });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      throw new ContentDraftError(
+        "Another revision was created at the same moment. Reload and try again.",
+        "version_conflict",
+      );
+    }
+    throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Review request, and the way back (M4.3 §5, §6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sends the current revision for editorial review. Refused while the
+ * current revision has blocking findings: the person sees exactly which, and
+ * clears them with a new revision. Warnings do not stand in the way.
+ */
+export async function requestDraftReview(
+  context: TenantContext,
+  draftId: string,
+): Promise<ContentDraft> {
+  requireHumanWriter(context);
+  const draft = await scopedDraft(context, draftId);
+  if (draft.status === "AWAITING_EDITOR_REVIEW") {
+    throw new ContentDraftError("Review has already been requested.", "invalid_state");
+  }
+  if (draft.status !== "DRAFTING") {
+    throw new ContentDraftError(
+      `This draft is ${statusWords(draft.status)}; it cannot go for review.`,
+      "invalid_state",
+    );
+  }
+  await draftingItem(context, draft.contentWorkItemId);
+
+  const current = draft.currentRevisionId
+    ? await prisma.contentRevision.findFirst({
+        where: { id: draft.currentRevisionId, ...websiteScope(context) },
+      })
+    : null;
+  if (!current) {
+    throw new ContentDraftError(
+      "Nothing to review yet. Generate or write a revision first.",
+      "invalid_state",
+    );
+  }
+
+  const blocking = (revisionFindings(current)?.findings ?? []).filter(
+    (finding) => finding.severity === "BLOCKING",
+  );
+  if (blocking.length > 0) {
+    throw new ContentDraftError(
+      `Revision ${current.revisionNumber} has ${blocking.length} blocking finding${blocking.length === 1 ? "" : "s"}. Resolve them in a new revision before requesting review.`,
+      "blocked",
+      { findings: blocking },
+    );
+  }
+
+  if (!canTransition(DRAFT_TRANSITIONS, draft.status, "AWAITING_EDITOR_REVIEW")) {
+    throw new ContentDraftError("This draft cannot go for review from here.", "invalid_state");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.contentDraft.update({
+      where: { id: draft.id },
+      data: { status: "AWAITING_EDITOR_REVIEW" },
+    });
+    await recordAudit(tx, context, {
+      entityType: "ContentDraft",
+      entityId: draft.id,
+      action: "UPDATE",
+      before: { status: draft.status },
+      after: {
+        status: "AWAITING_EDITOR_REVIEW",
+        revisionId: current.id,
+        revisionNumber: current.revisionNumber,
+        briefVersion: draft.brief.version,
+        briefSuperseded: draft.brief.status !== "APPROVED",
+      },
+    });
+    return updated;
+  });
+}
+
+/**
+ * A reviewer sends the draft back with a note. The note is required: a
+ * draft returned without a reason tells the editor nothing. It lives in the
+ * audit trail and is shown on the draft.
+ */
+export async function returnDraftToDrafting(
+  context: TenantContext,
+  draftId: string,
+  note: string,
+): Promise<ContentDraft> {
+  requireHumanReviewer(context);
+  const draft = await scopedDraft(context, draftId);
+  if (draft.status !== "AWAITING_EDITOR_REVIEW") {
+    throw new ContentDraftError(
+      `This draft is ${statusWords(draft.status)}; only a draft awaiting review can be returned.`,
+      "invalid_state",
+    );
+  }
+  const trimmed = note.trim();
+  if (!trimmed) {
+    throw new ContentDraftError("Say why the draft is going back.", "invalid_input", {
+      issues: ["note: A note is required."],
+    });
+  }
+  if (trimmed.length > 2000) {
+    throw new ContentDraftError("Keep the note under 2,000 characters.", "invalid_input", {
+      issues: ["note: Too long."],
+    });
+  }
+  if (!canTransition(DRAFT_TRANSITIONS, draft.status, "DRAFTING")) {
+    throw new ContentDraftError("This draft cannot return to drafting from here.", "invalid_state");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.contentDraft.update({
+      where: { id: draft.id },
+      data: { status: "DRAFTING" },
+    });
+    await recordAudit(tx, context, {
+      entityType: "ContentDraft",
+      entityId: draft.id,
+      action: "DECLINE",
+      before: { status: draft.status },
+      after: { status: "DRAFTING", note: trimmed, revisionId: draft.currentRevisionId },
+    });
+    return updated;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Reading (§10, §12; M4.3 §2-§4)
 // ---------------------------------------------------------------------------
 
 const REVISION_INCLUDE = {
@@ -767,6 +1405,8 @@ const REVISION_INCLUDE = {
 
 export type RevisionView = Prisma.ContentRevisionGetPayload<{ include: typeof REVISION_INCLUDE }>;
 
+export type ReturnNote = { note: string; by: string | null; at: Date };
+
 export type DraftView = {
   draft: ContentDraft;
   /** The exact approved brief version the draft is pinned to. */
@@ -775,25 +1415,12 @@ export type DraftView = {
   briefMismatch: { approvedVersion: number; approvedBriefId: string } | null;
   current: RevisionView | null;
   revisionCount: number;
+  /** The latest time a reviewer sent the draft back, with their note. */
+  lastReturn: ReturnNote | null;
 };
 
-/** The open draft for a work item, with its pinned brief and current revision. */
-export async function getDraftForWorkItem(
-  context: TenantContext,
-  workItemId: string,
-): Promise<DraftView | null> {
-  const draft = await prisma.contentDraft.findFirst({
-    where: {
-      contentWorkItemId: workItemId,
-      status: { notIn: ["SUPERSEDED", "ARCHIVED"] },
-      ...websiteScope(context),
-    },
-    orderBy: { createdAt: "desc" },
-    include: { brief: true },
-  });
-  if (!draft) return null;
-
-  const [current, approved, revisionCount] = await Promise.all([
+async function buildView(context: TenantContext, draft: DraftWithBrief): Promise<DraftView> {
+  const [current, approved, revisionCount, returned] = await Promise.all([
     draft.currentRevisionId
       ? prisma.contentRevision.findFirst({
           where: { id: draft.currentRevisionId, ...websiteScope(context) },
@@ -801,13 +1428,28 @@ export async function getDraftForWorkItem(
         })
       : Promise.resolve(null),
     prisma.contentBrief.findFirst({
-      where: { contentWorkItemId: workItemId, status: "APPROVED", ...websiteScope(context) },
+      where: {
+        contentWorkItemId: draft.contentWorkItemId,
+        status: "APPROVED",
+        ...websiteScope(context),
+      },
       select: { id: true, version: true },
     }),
     prisma.contentRevision.count({ where: { contentDraftId: draft.id } }),
+    prisma.auditEvent.findFirst({
+      where: {
+        entityType: "ContentDraft",
+        entityId: draft.id,
+        action: "DECLINE",
+        websiteId: context.website.id,
+      },
+      orderBy: { createdAt: "desc" },
+      include: { actor: { select: { email: true } } },
+    }),
   ]);
 
   const { brief, ...rest } = draft;
+  const note = (returned?.afterSnapshotJson as { note?: unknown } | null)?.note;
   return {
     draft: rest,
     brief,
@@ -817,7 +1459,72 @@ export async function getDraftForWorkItem(
         : null,
     current,
     revisionCount,
+    lastReturn:
+      returned && typeof note === "string"
+        ? { note, by: returned.actor?.email ?? null, at: returned.createdAt }
+        : null,
   };
+}
+
+/** The open draft for a work item, with its pinned brief and current revision. */
+export async function getDraftForWorkItem(
+  context: TenantContext,
+  workItemId: string,
+): Promise<DraftView | null> {
+  const draft = await prisma.contentDraft.findFirst({
+    where: {
+      contentWorkItemId: workItemId,
+      status: { in: OPEN_STATUSES },
+      ...websiteScope(context),
+    },
+    orderBy: { createdAt: "desc" },
+    include: { brief: true },
+  });
+  return draft ? buildView(context, draft) : null;
+}
+
+/** Any draft by id - open or superseded - for inspection. */
+export async function getDraft(context: TenantContext, draftId: string): Promise<DraftView | null> {
+  const draft = await prisma.contentDraft.findFirst({
+    where: { id: draftId, ...websiteScope(context) },
+    include: { brief: true },
+  });
+  return draft ? buildView(context, draft) : null;
+}
+
+export type DraftSummary = {
+  id: string;
+  status: ContentDraftStatus;
+  briefId: string;
+  briefVersion: number;
+  revisionCount: number;
+  currentTitle: string | null;
+  createdAt: Date;
+};
+
+/** Every draft a work item has had, oldest first, so superseded ones stay reachable. */
+export async function listDraftsForWorkItem(
+  context: TenantContext,
+  workItemId: string,
+): Promise<DraftSummary[]> {
+  const rows = await prisma.contentDraft.findMany({
+    where: { contentWorkItemId: workItemId, ...websiteScope(context) },
+    orderBy: { createdAt: "asc" },
+    include: {
+      brief: { select: { version: true } },
+      currentRevision: { select: { title: true } },
+      _count: { select: { revisions: true } },
+    },
+  });
+  return rows.map((row) => ({
+    id: row.id,
+    status: row.status,
+    briefId: row.briefId,
+    briefVersion: row.brief.version,
+    revisionCount: row._count.revisions,
+    currentTitle: row.currentRevision?.title ?? null,
+    createdAt: row.createdAt,
+  }));
 }
 
 export async function getRevision(
@@ -828,6 +1535,124 @@ export async function getRevision(
     where: { id: revisionId, ...websiteScope(context) },
     include: REVISION_INCLUDE,
   });
+}
+
+export type RevisionAuthor = { kind: "AI" | "HUMAN" | "UNKNOWN"; label: string };
+
+/** Who wrote a revision, for a screen. */
+export function describeAuthor(
+  revision: Pick<RevisionView, "createdByAiRun" | "createdBy" | "createdByUserId">,
+  viewerUserId?: string,
+): RevisionAuthor {
+  if (revision.createdByAiRun) {
+    return {
+      kind: "AI",
+      label: `Generated by AI (${revision.createdByAiRun.provider} · ${revision.createdByAiRun.model})`,
+    };
+  }
+  if (revision.createdBy) {
+    const who =
+      viewerUserId && revision.createdByUserId === viewerUserId ? "you" : revision.createdBy.email;
+    return { kind: "HUMAN", label: `Edited by ${who}` };
+  }
+  return { kind: "UNKNOWN", label: "Author not recorded" };
+}
+
+export type RevisionSummary = {
+  id: string;
+  revisionNumber: number;
+  basedOnRevisionNumber: number | null;
+  author: RevisionAuthor;
+  createdAt: Date;
+  wordCount: number | null;
+  findings: { blocking: number; warning: number; info: number };
+  changeSummary: string;
+  contentHash: string;
+  /** One line: provider, model, prompt and schema versions, package - or the person. */
+  provenance: string;
+};
+
+/** The lineage of a draft, newest first. */
+export async function listRevisions(
+  context: TenantContext,
+  draftId: string,
+  viewerUserId?: string,
+): Promise<RevisionSummary[]> {
+  const rows = await prisma.contentRevision.findMany({
+    where: { contentDraftId: draftId, ...websiteScope(context) },
+    orderBy: { revisionNumber: "desc" },
+    include: REVISION_INCLUDE,
+  });
+  return rows.map((row) => {
+    const author = describeAuthor(row, viewerUserId);
+    const provenance = row.createdByAiRun
+      ? `${row.createdByAiRun.provider} · ${row.createdByAiRun.model} · prompt v${row.createdByAiRun.promptTemplateVersion} · schema v${row.createdByAiRun.outputSchemaVersion}${row.evidencePackage ? ` · package ${row.evidencePackage.contentHash.slice(0, 19)}…` : ""}`
+      : row.createdBy
+        ? `Hand-written by ${row.createdBy.email}`
+        : "Not recorded";
+    return {
+      id: row.id,
+      revisionNumber: row.revisionNumber,
+      basedOnRevisionNumber: row.basedOnRevisionNumber,
+      author,
+      createdAt: row.createdAt,
+      wordCount: row.wordCount,
+      findings: countFindings(revisionFindings(row)?.findings ?? []),
+      changeSummary: row.changeSummary,
+      contentHash: row.contentHash,
+      provenance,
+    };
+  });
+}
+
+export type RevisionComparison = {
+  from: RevisionView;
+  to: RevisionView;
+  changes: RevisionChanges;
+  diff: DiffLine[];
+};
+
+function fieldsOf(revision: ContentRevision): RevisionFields {
+  return {
+    title: revision.title,
+    slug: revision.slug,
+    excerpt: revision.excerpt,
+    bodyMarkdown: revision.bodyMarkdown,
+    metaTitle: revision.metaTitle,
+    metaDescription: revision.metaDescription,
+  };
+}
+
+/**
+ * Two revisions of the same draft, side by side. Both ids must name revisions
+ * of that draft in this website; anything else - another draft, another
+ * tenant, a made-up id - is simply not found.
+ */
+export async function compareRevisions(
+  context: TenantContext,
+  draftId: string,
+  fromRevisionId: string,
+  toRevisionId: string,
+): Promise<RevisionComparison | null> {
+  if (fromRevisionId === toRevisionId) return null;
+  const rows = await prisma.contentRevision.findMany({
+    where: {
+      id: { in: [fromRevisionId, toRevisionId] },
+      contentDraftId: draftId,
+      ...websiteScope(context),
+    },
+    include: REVISION_INCLUDE,
+  });
+  const from = rows.find((row) => row.id === fromRevisionId);
+  const to = rows.find((row) => row.id === toRevisionId);
+  if (!from || !to) return null;
+
+  return {
+    from,
+    to,
+    changes: revisionChanges(fieldsOf(from), fieldsOf(to)),
+    diff: diffLines(from.bodyMarkdown, to.bodyMarkdown),
+  };
 }
 
 /** Sanitized HTML of a revision's body, for the preview. */

@@ -112,18 +112,30 @@ describe("the P4 demo seed", () => {
 
       const first = await seedP4Demo(tenant);
       const statuses = first.briefs.map((row) => row.status).sort();
-      expect(statuses).toEqual(["APPROVED", "AWAITING_REVIEW", "SUPERSEDED"]);
+      expect(statuses).toEqual([
+        "APPROVED",
+        "APPROVED",
+        "AWAITING_REVIEW",
+        "SUPERSEDED",
+        "SUPERSEDED",
+      ]);
 
       const items = await prisma.contentWorkItem.findMany({
         where: { websiteId: tenant.website.id },
         orderBy: { createdAt: "asc" },
       });
-      expect(items.map((row) => row.type).sort()).toEqual(["CONTENT_REFRESH", "NEW_CONTENT"]);
+      expect(items.map((row) => row.type).sort()).toEqual([
+        "CONTENT_REFRESH",
+        "NEW_CONTENT",
+        "NEW_CONTENT",
+      ]);
 
-      const refresh = items.find((row) => row.type === "CONTENT_REFRESH")!;
-      const created = items.find((row) => row.type === "NEW_CONTENT")!;
+      const refresh = items.find((row) => row.id === first.refreshItemId)!;
+      const created = items.find((row) => row.id === first.newContentItemId)!;
+      const compare = items.find((row) => row.id === first.compareItemId)!;
       expect(refresh.status).toBe("DRAFTING");
       expect(created.status).toBe("BRIEFING");
+      expect(compare.status).toBe("DRAFTING");
 
       const refreshBriefs = await prisma.contentBrief.findMany({
         where: { contentWorkItemId: refresh.id },
@@ -136,27 +148,54 @@ describe("the P4 demo seed", () => {
       expect(refreshBriefs[0]!.createdByAiRunId).not.toBeNull();
       expect(refreshBriefs[1]!.createdByUserId).toBe(tenant.user.id);
 
-      // M4.2: the refresh item has one draft, pinned to the approved v2, with a
-      // clean first revision and a deliberately flagged second one.
+      // M4.2 / M4.3: the refresh draft - AI v1 flagged and blocking, human v2
+      // clean, review requested.
       expect(first.revisions).toEqual([
-        { revisionNumber: 1, blocking: false },
-        { revisionNumber: 2, blocking: true },
+        { revisionNumber: 1, blocking: true, author: "AI" },
+        { revisionNumber: 2, blocking: false, author: "HUMAN" },
       ]);
-      const draft = await prisma.contentDraft.findFirstOrThrow({
-        where: { contentWorkItemId: refresh.id },
+      const draft = await prisma.contentDraft.findUniqueOrThrow({
+        where: { id: first.reviewDraftId },
         include: { revisions: { orderBy: { revisionNumber: "asc" } } },
       });
+      expect(draft.contentWorkItemId).toBe(refresh.id);
       expect(draft.briefId).toBe(refreshBriefs[1]!.id);
-      expect(draft.status).toBe("DRAFTING");
-      expect(draft.revisions.map((row) => row.createdByAiRunId !== null)).toEqual([true, true]);
-      expect(draft.revisions[1]!.bodyMarkdown).not.toContain("https://research.example");
+      expect(draft.status).toBe("AWAITING_EDITOR_REVIEW");
+      expect(draft.revisions[0]!.bodyMarkdown).not.toContain("https://research.example");
+      expect(draft.revisions[1]!.createdByUserId).toBe(tenant.user.id);
+      expect(draft.revisions[1]!.basedOnRevisionNumber).toBe(1);
+      expect(draft.currentRevisionId).toBe(draft.revisions[1]!.id);
       expect(await prisma.contentDraft.count({ where: { contentWorkItemId: created.id } })).toBe(0);
+
+      // The supersession story: the old draft kept and superseded, the new one on v2.
+      const old = await prisma.contentDraft.findUniqueOrThrow({
+        where: { id: first.supersession.oldDraftId },
+        include: { brief: true, _count: { select: { revisions: true } } },
+      });
+      const fresh = await prisma.contentDraft.findUniqueOrThrow({
+        where: { id: first.supersession.newDraftId },
+        include: { brief: true, revisions: true },
+      });
+      expect(old.contentWorkItemId).toBe(compare.id);
+      expect([old.status, old.brief.version, old.brief.status, old._count.revisions]).toEqual([
+        "SUPERSEDED",
+        1,
+        "SUPERSEDED",
+        1,
+      ]);
+      expect([fresh.status, fresh.brief.version, fresh.brief.status]).toEqual([
+        "DRAFTING",
+        2,
+        "APPROVED",
+      ]);
+      expect(fresh.revisions).toHaveLength(1);
+      expect(fresh.revisions[0]!.evidencePackageId).not.toBeNull();
 
       // Run again: the stories are rebuilt, not duplicated.
       const second = await seedP4Demo(tenant);
       expect(second.briefs.map((row) => row.status).sort()).toEqual(statuses);
       expect(await prisma.contentWorkItem.count({ where: { websiteId: tenant.website.id } })).toBe(
-        2,
+        3,
       );
     },
     SEED_TIMEOUT,

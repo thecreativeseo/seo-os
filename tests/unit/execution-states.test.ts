@@ -93,6 +93,12 @@ describe("the rules the spec spells out", () => {
     expect(canTransition(DRAFT_TRANSITIONS, "APPROVED", "AWAITING_QA")).toBe(true);
   });
 
+  it("lets a drafting draft go to editorial review and come back (M4.3)", () => {
+    expect(canTransition(DRAFT_TRANSITIONS, "DRAFTING", "AWAITING_EDITOR_REVIEW")).toBe(true);
+    expect(canTransition(DRAFT_TRANSITIONS, "AWAITING_EDITOR_REVIEW", "DRAFTING")).toBe(true);
+    expect(canTransition(DRAFT_TRANSITIONS, "DRAFTING", "APPROVED")).toBe(false);
+  });
+
   it("agrees with the partial unique indexes about what counts as open or active", () => {
     const closed = Object.values(ContentWorkItemStatus).filter(
       (status) => !OPEN_WORK_ITEM_STATUSES.includes(status),

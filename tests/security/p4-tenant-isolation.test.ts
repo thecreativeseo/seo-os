@@ -24,11 +24,21 @@ import {
   type BriefInput,
 } from "@/server/services/content-brief";
 import {
+  compareRevisions,
   generateRevision,
+  getDraft,
   getDraftForWorkItem,
   getRevision,
+  listDraftsForWorkItem,
+  listRevisions,
+  requestDraftReview,
+  returnDraftToDrafting,
+  saveRevision,
   startDraft,
+  startDraftFromBrief,
+  type RevisionInput,
 } from "@/server/services/content-draft";
+import { systemContextFor } from "@/server/jobs/system-context";
 
 /**
  * P4 tenant isolation (P4_ACCEPTANCE_CRITERIA, "Security attack tests").
@@ -220,5 +230,77 @@ describe("drafts across tenants", () => {
     });
     expect(revisionCount).toBe(0);
     expect(await getRevision(a, crypto.randomUUID())).toBeNull();
+  });
+});
+
+describe("revisions, review and supersession across tenants", () => {
+  const revision = (changeSummary: string, body: string): RevisionInput => ({
+    title: "B's page",
+    slug: null,
+    excerpt: null,
+    metaTitle: null,
+    metaDescription: null,
+    bodyMarkdown: body,
+    changeSummary,
+  });
+
+  it("cannot read, edit, compare, review or supersede another tenant's draft", async () => {
+    const bView = await getDraftForWorkItem(b, b.itemId);
+    const bDraft = bView!.draft;
+    const first = await saveRevision(
+      b,
+      bDraft.id,
+      revision("First, by hand.", "# B\n\nWritten by B."),
+    );
+    const second = await saveRevision(
+      b,
+      bDraft.id,
+      revision("Second.", "# B\n\nWritten by B, twice."),
+    );
+
+    // Reads come back empty.
+    expect(await getRevision(a, first.revision.id)).toBeNull();
+    expect(await listRevisions(a, bDraft.id)).toEqual([]);
+    expect(await getDraft(a, bDraft.id)).toBeNull();
+    expect(await listDraftsForWorkItem(a, b.itemId)).toEqual([]);
+    expect(await compareRevisions(a, bDraft.id, first.revision.id, second.revision.id)).toBeNull();
+
+    // Writes are refused as not found.
+    await expect(saveRevision(a, bDraft.id, revision("Hijack.", "# A"))).rejects.toMatchObject({
+      code: "not_found",
+    });
+    await expect(requestDraftReview(a, bDraft.id)).rejects.toMatchObject({ code: "not_found" });
+    await expect(returnDraftToDrafting(a, bDraft.id, "Mine now.")).rejects.toMatchObject({
+      code: "not_found",
+    });
+
+    // Manipulated ids: a made-up revision, and a revision of another draft.
+    expect(await compareRevisions(b, bDraft.id, first.revision.id, crypto.randomUUID())).toBeNull();
+    await approveBrief(a, a.briefId);
+    const { draft: aDraft } = await startDraft(a, a.itemId);
+    expect(await compareRevisions(a, aDraft.id, first.revision.id, second.revision.id)).toBeNull();
+
+    // A brief from another tenant cannot start a draft here.
+    await expect(startDraftFromBrief(a, a.itemId, b.briefId)).rejects.toMatchObject({
+      code: "not_found",
+    });
+
+    // Roles and actors: a member cannot return a draft; a job cannot write or request review.
+    await requestDraftReview(b, bDraft.id);
+    const member = { ...b, membership: { ...b.membership, role: "MEMBER" as const } };
+    await expect(returnDraftToDrafting(member, bDraft.id, "No.")).rejects.toMatchObject({
+      code: "forbidden",
+    });
+    const system = await systemContextFor(b.website.id);
+    await expect(saveRevision(system, bDraft.id, revision("Job.", "# job"))).rejects.toMatchObject({
+      code: "forbidden",
+    });
+    await expect(requestDraftReview(system, bDraft.id)).rejects.toMatchObject({
+      code: "forbidden",
+    });
+
+    const untouched = await prisma.contentDraft.findUniqueOrThrow({ where: { id: bDraft.id } });
+    expect(untouched.status).toBe("AWAITING_EDITOR_REVIEW");
+    expect(await prisma.contentRevision.count({ where: { contentDraftId: bDraft.id } })).toBe(2);
   });
 });

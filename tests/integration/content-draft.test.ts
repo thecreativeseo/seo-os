@@ -673,11 +673,16 @@ describe("generating a revision", () => {
     expect(view?.brief.version).toBe(1);
     expect(view?.briefMismatch).toEqual({ approvedVersion: 2, approvedBriefId: v2.id });
 
-    const stub = useStubProvider({ responses: [answer(tenant)] });
-    const outcome = await generateRevision(tenant, draft.id, { generationToken: "token-pin" });
-    expect(outcome.ok).toBe(true);
-    expect(stub.requests[0]!.task).toContain("APPROVED BRIEF v1");
-    expect(stub.requests[0]!.task).not.toContain("A different brief");
+    // Generation against the superseded pin is closed (M4.3 rule); the draft
+    // itself is untouched and a person may start a draft from v2 explicitly.
+    useStubProvider({ responses: [answer(tenant)] });
+    await expect(
+      generateRevision(tenant, draft.id, { generationToken: "token-pin" }),
+    ).rejects.toMatchObject({ code: "brief_superseded" });
+    expect(await prisma.contentRevision.count({ where: { contentDraftId: draft.id } })).toBe(0);
+    expect((await prisma.contentDraft.findUniqueOrThrow({ where: { id: draft.id } })).briefId).toBe(
+      brief.id,
+    );
   });
 
   it("stores a revision with blocking findings rather than hiding it, and the draft stays DRAFTING", async () => {
