@@ -228,6 +228,8 @@ model User {
   createdDrafts             ContentDraft[]           @relation("ContentDraftCreator")
   approvedDrafts            ContentDraft[]           @relation("ContentDraftApprover")
   createdRevisions          ContentRevision[]        @relation("ContentRevisionCreator")
+  requestedDraftReviews     ContentDraftReview[]     @relation("DraftReviewRequester")
+  decidedDraftReviews       ContentDraftReview[]     @relation("DraftReviewDecider")
   reviewedLinkSuggestions   InternalLinkSuggestion[] @relation("LinkSuggestionReviewer")
   createdPublishingPolicies PublishingPolicy[]       @relation("PublishingPolicyCreator")
   updatedPublishingPolicies PublishingPolicy[]       @relation("PublishingPolicyUpdater")
@@ -387,6 +389,7 @@ model Website {
   contentBriefs           ContentBrief[]
   contentDrafts           ContentDraft[]
   contentRevisions        ContentRevision[]
+  contentDraftReviews     ContentDraftReview[]
   contentQaResults        ContentQaResult[]
   internalLinkSuggestions InternalLinkSuggestion[]
   publishingPolicies      PublishingPolicy[]
@@ -2360,6 +2363,16 @@ enum ContentBriefStatus {
   ARCHIVED
 }
 
+/// M4.5: one review cycle of a draft. REQUESTED is decided exactly once -
+/// APPROVED or RETURNED by a person, or INVALIDATED when the content changed
+/// or the draft was superseded underneath it - and a decided row never changes.
+enum ContentDraftReviewStatus {
+  REQUESTED
+  APPROVED
+  RETURNED
+  INVALIDATED
+}
+
 enum ContentDraftStatus {
   DRAFTING
   AWAITING_QA
@@ -2521,6 +2534,7 @@ model ContentWorkItem {
 
   briefs          ContentBrief[]
   drafts          ContentDraft[]
+  draftReviews    ContentDraftReview[]
   linkSuggestions InternalLinkSuggestion[]
   executions      Execution[]
 
@@ -2571,17 +2585,18 @@ model ContentBrief {
   approvedAt                       DateTime?          @map("approved_at")
   archivedAt                       DateTime?          @map("archived_at")
 
-  website         Website          @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  contentWorkItem ContentWorkItem  @relation(fields: [contentWorkItemId], references: [id], onDelete: Cascade)
-  targetPage      Page?            @relation("ContentBriefTargetPage", fields: [targetPageId], references: [id], onDelete: SetNull)
-  primaryKeyword  Keyword?         @relation(fields: [primaryKeywordId], references: [id], onDelete: SetNull)
-  topic           Topic?           @relation(fields: [topicId], references: [id], onDelete: SetNull)
-  businessGoal    BusinessGoal?    @relation(fields: [businessGoalId], references: [id], onDelete: SetNull)
-  evidencePackage EvidencePackage? @relation("ContentBriefPackage", fields: [evidencePackageId], references: [id], onDelete: SetNull)
-  createdByAiRun  AiRun?           @relation("ContentBriefRun", fields: [createdByAiRunId], references: [id], onDelete: SetNull)
-  createdBy       User?            @relation("ContentBriefCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  approvedBy      User?            @relation("ContentBriefApprover", fields: [approvedByUserId], references: [id], onDelete: Restrict)
+  website         Website              @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  contentWorkItem ContentWorkItem      @relation(fields: [contentWorkItemId], references: [id], onDelete: Cascade)
+  targetPage      Page?                @relation("ContentBriefTargetPage", fields: [targetPageId], references: [id], onDelete: SetNull)
+  primaryKeyword  Keyword?             @relation(fields: [primaryKeywordId], references: [id], onDelete: SetNull)
+  topic           Topic?               @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  businessGoal    BusinessGoal?        @relation(fields: [businessGoalId], references: [id], onDelete: SetNull)
+  evidencePackage EvidencePackage?     @relation("ContentBriefPackage", fields: [evidencePackageId], references: [id], onDelete: SetNull)
+  createdByAiRun  AiRun?               @relation("ContentBriefRun", fields: [createdByAiRunId], references: [id], onDelete: SetNull)
+  createdBy       User?                @relation("ContentBriefCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  approvedBy      User?                @relation("ContentBriefApprover", fields: [approvedByUserId], references: [id], onDelete: Restrict)
   drafts          ContentDraft[]
+  draftReviews    ContentDraftReview[]
 
   @@unique([contentWorkItemId, version])
   @@index([websiteId, status])
@@ -2600,6 +2615,10 @@ model ContentDraft {
   approvedRevisionHash String?            @map("approved_revision_hash")
   approvedByUserId     String?            @map("approved_by_user_id") @db.Uuid
   approvedAt           DateTime?          @map("approved_at")
+  /// M4.5: the review row the standing approval rests on. Set only from an
+  /// APPROVED review, only to that review's revision; cleared on reopen or
+  /// supersession. The row itself is immutable history.
+  approvedReviewId     String?            @map("approved_review_id") @db.Uuid
   status               ContentDraftStatus @default(DRAFTING)
   createdByAiRunId     String?            @map("created_by_ai_run_id") @db.Uuid
   createdByUserId      String?            @map("created_by_user_id") @db.Uuid
@@ -2607,15 +2626,17 @@ model ContentDraft {
   updatedAt            DateTime           @updatedAt @map("updated_at")
   archivedAt           DateTime?          @map("archived_at")
 
-  website          Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  contentWorkItem  ContentWorkItem   @relation(fields: [contentWorkItemId], references: [id], onDelete: Cascade)
-  brief            ContentBrief      @relation(fields: [briefId], references: [id], onDelete: Cascade)
-  currentRevision  ContentRevision?  @relation("DraftCurrentRevision", fields: [currentRevisionId], references: [id], onDelete: SetNull)
-  approvedRevision ContentRevision?  @relation("DraftApprovedRevision", fields: [approvedRevisionId], references: [id], onDelete: SetNull)
-  approvedBy       User?             @relation("ContentDraftApprover", fields: [approvedByUserId], references: [id], onDelete: Restrict)
-  createdByAiRun   AiRun?            @relation("ContentDraftRun", fields: [createdByAiRunId], references: [id], onDelete: SetNull)
-  createdBy        User?             @relation("ContentDraftCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  revisions        ContentRevision[] @relation("DraftRevisions")
+  website          Website              @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  contentWorkItem  ContentWorkItem      @relation(fields: [contentWorkItemId], references: [id], onDelete: Cascade)
+  brief            ContentBrief         @relation(fields: [briefId], references: [id], onDelete: Cascade)
+  currentRevision  ContentRevision?     @relation("DraftCurrentRevision", fields: [currentRevisionId], references: [id], onDelete: SetNull)
+  approvedRevision ContentRevision?     @relation("DraftApprovedRevision", fields: [approvedRevisionId], references: [id], onDelete: SetNull)
+  approvedReview   ContentDraftReview?  @relation("DraftApprovedReview", fields: [approvedReviewId], references: [id], onDelete: SetNull)
+  approvedBy       User?                @relation("ContentDraftApprover", fields: [approvedByUserId], references: [id], onDelete: Restrict)
+  createdByAiRun   AiRun?               @relation("ContentDraftRun", fields: [createdByAiRunId], references: [id], onDelete: SetNull)
+  createdBy        User?                @relation("ContentDraftCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  revisions        ContentRevision[]    @relation("DraftRevisions")
+  reviews          ContentDraftReview[] @relation("DraftReviews")
 
   @@index([websiteId, status])
   @@index([contentWorkItemId])
@@ -2656,20 +2677,69 @@ model ContentRevision {
   /// M4: idempotency. The token the generating request carried; a retry with the same token returns this row.
   generationToken        String?  @map("generation_token")
 
-  website           Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
-  draft             ContentDraft      @relation("DraftRevisions", fields: [contentDraftId], references: [id], onDelete: Cascade)
-  evidencePackage   EvidencePackage?  @relation("ContentRevisionPackage", fields: [evidencePackageId], references: [id], onDelete: SetNull)
-  createdByAiRun    AiRun?            @relation("ContentRevisionRun", fields: [createdByAiRunId], references: [id], onDelete: SetNull)
-  createdBy         User?             @relation("ContentRevisionCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
-  currentForDrafts  ContentDraft[]    @relation("DraftCurrentRevision")
-  approvedForDrafts ContentDraft[]    @relation("DraftApprovedRevision")
+  website           Website              @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  draft             ContentDraft         @relation("DraftRevisions", fields: [contentDraftId], references: [id], onDelete: Cascade)
+  evidencePackage   EvidencePackage?     @relation("ContentRevisionPackage", fields: [evidencePackageId], references: [id], onDelete: SetNull)
+  createdByAiRun    AiRun?               @relation("ContentRevisionRun", fields: [createdByAiRunId], references: [id], onDelete: SetNull)
+  createdBy         User?                @relation("ContentRevisionCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  currentForDrafts  ContentDraft[]       @relation("DraftCurrentRevision")
+  approvedForDrafts ContentDraft[]       @relation("DraftApprovedRevision")
   qaResults         ContentQaResult[]
   executions        Execution[]
   publishApprovals  PublishApproval[]
+  reviews           ContentDraftReview[]
 
   @@unique([contentDraftId, revisionNumber])
   @@index([websiteId, createdAt])
   @@map("content_revision")
+}
+
+/// M4.5: the record of one review cycle (docs/P4_SPEC.md §9, §25, §36).
+/// Pinned at request time to the exact revision - id, number and content hash -
+/// and to the draft's pinned brief version. A person with REVIEW decides it
+/// once; a content change or a supersession invalidates an open request. A
+/// decided row is immutable (content_draft_review_decided_immutable). At most
+/// one REQUESTED row per draft (content_draft_review_open_per_draft, in SQL).
+model ContentDraftReview {
+  id                        String                   @id @default(uuid()) @db.Uuid
+  websiteId                 String                   @map("website_id") @db.Uuid
+  contentWorkItemId         String                   @map("content_work_item_id") @db.Uuid
+  contentDraftId            String                   @map("content_draft_id") @db.Uuid
+  contentRevisionId         String                   @map("content_revision_id") @db.Uuid
+  revisionNumber            Int                      @map("revision_number")
+  /// Copied from the revision's content_hash; approval binds to it.
+  revisionHash              String                   @map("revision_hash")
+  briefId                   String                   @map("brief_id") @db.Uuid
+  briefVersion              Int                      @map("brief_version")
+  /// True when a newer brief version had been approved by the time of the decision.
+  briefSupersededAtDecision Boolean                  @default(false) @map("brief_superseded_at_decision")
+  /// The reviewer's explicit acknowledgement of that newer version (D6).
+  briefMismatchAcknowledged Boolean                  @default(false) @map("brief_mismatch_acknowledged")
+  status                    ContentDraftReviewStatus @default(REQUESTED)
+  requestedByUserId         String                   @map("requested_by_user_id") @db.Uuid
+  requestedAt               DateTime                 @default(now()) @map("requested_at")
+  decidedByUserId           String?                  @map("decided_by_user_id") @db.Uuid
+  decidedAt                 DateTime?                @map("decided_at")
+  /// Required for RETURNED, optional for APPROVED.
+  note                      String?
+  /// The decider authored the reviewed revision (D7: recorded, not refused).
+  selfDecided               Boolean                  @default(false) @map("self_decided")
+  /// For INVALIDATED: content_changed | draft_superseded.
+  invalidatedReason         String?                  @map("invalidated_reason")
+  createdAt                 DateTime                 @default(now()) @map("created_at")
+
+  website           Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  contentWorkItem   ContentWorkItem @relation(fields: [contentWorkItemId], references: [id], onDelete: Cascade)
+  draft             ContentDraft    @relation("DraftReviews", fields: [contentDraftId], references: [id], onDelete: Cascade)
+  revision          ContentRevision @relation(fields: [contentRevisionId], references: [id], onDelete: Cascade)
+  brief             ContentBrief    @relation(fields: [briefId], references: [id], onDelete: Cascade)
+  requestedBy       User            @relation("DraftReviewRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  decidedBy         User?           @relation("DraftReviewDecider", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+  approvedForDrafts ContentDraft[]  @relation("DraftApprovedReview")
+
+  @@index([contentDraftId, createdAt])
+  @@index([websiteId, status])
+  @@map("content_draft_review")
 }
 
 /// One checker's verdict on one revision (§12).

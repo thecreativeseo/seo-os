@@ -7,6 +7,7 @@ import { REQUIRED, hasRole } from "@/server/auth/roles";
 import { isAiConfigured } from "@/server/ai/registry";
 import { SYSTEM_AUTH_USER_ID } from "@/server/jobs/system-context";
 import { runAgent } from "@/server/services/ai-run";
+import { transitionWorkItem } from "@/server/services/content-work";
 import {
   assembleContentDraftPackage,
   renderPackage,
@@ -36,7 +37,7 @@ import {
   type RevisionFields,
 } from "@/lib/content/diff";
 import { revisionHash } from "@/lib/execution/hash";
-import { DRAFT_TRANSITIONS, canTransition } from "@/lib/execution/statuses";
+import { DRAFT_TRANSITIONS, REVIEW_TRANSITIONS, canTransition } from "@/lib/execution/statuses";
 import { buildEvidenceId, parseEvidenceId } from "@/lib/evidence/id";
 import type { Evidence } from "@/lib/evidence/types";
 import {
@@ -50,6 +51,8 @@ import type {
   AiRun,
   ContentBrief,
   ContentDraft,
+  ContentDraftReview,
+  ContentDraftReviewStatus,
   ContentDraftStatus,
   ContentRevision,
   ContentWorkItem,
@@ -57,7 +60,7 @@ import type {
 } from "@/generated/prisma/client";
 
 /**
- * ContentDraftService (docs/P4_SPEC.md §9-§11; M4 plan, M4.2 and M4.3).
+ * ContentDraftService (docs/P4_SPEC.md §9-§12, §25; M4 plan, M4.2-M4.5).
  *
  * A draft is written from an approved brief and nothing else. The brief is
  * pinned to the draft by id - an immutable APPROVED row - and is never moved
@@ -71,12 +74,13 @@ import type {
  * approved right now. A claim the brief allowed is offered only while its
  * fact is still approved, and is marked STALE for the editor if not.
  *
- * Every revision is immutable and carries what made it: the run or the
- * person, the package, the token of the request that asked for it, the claims
- * it makes with their support, what the server found and removed, and the
- * revision it was written from. A revision with blocking findings is still
- * stored - history is not edited to look better - and it cannot go to review
- * until a later revision clears them.
+ * Every revision is immutable and carries what made it. Review is a record
+ * of its own (M4.5): a request pins the exact revision by id and hash and
+ * the exact brief version; a person with REVIEW decides it once - approved
+ * or returned - and the row never changes again. Approval sets the draft's
+ * standing pointer to that one revision and hands the work item to QA;
+ * nothing edits an approved draft until a person reopens it, which clears
+ * the pointer and leaves the approval in history where it was.
  */
 
 export class ContentDraftError extends Error {
@@ -110,14 +114,16 @@ export const IN_PROGRESS_MESSAGE =
   "A draft is already being generated for this work item. Wait for it to finish, then reload.";
 export const GENERATION_FAILED_MESSAGE =
   "The draft could not be generated. Nothing was stored; the run is recorded with its reason.";
+export const APPROVED_LOCKED_MESSAGE =
+  "This draft is approved. Reopen it for revision first; the approval stays in history.";
 
 /** How long a RUNNING run holds the work item before it is treated as abandoned. */
 export const RUNNING_GUARD_MS = 10 * 60 * 1000;
 
-/** Draft statuses a person can still write into. */
+/** Draft statuses a person can still write into. An approved draft is not one until reopened. */
 const EDITABLE_STATUSES: ContentDraftStatus[] = ["DRAFTING", "AWAITING_EDITOR_REVIEW"];
 /** Draft statuses that count as "the draft" for a work item. */
-const OPEN_STATUSES: ContentDraftStatus[] = ["DRAFTING", "AWAITING_EDITOR_REVIEW"];
+const OPEN_STATUSES: ContentDraftStatus[] = ["DRAFTING", "AWAITING_EDITOR_REVIEW", "APPROVED"];
 
 // ---------------------------------------------------------------------------
 // What a revision stores in its JSON columns
@@ -165,28 +171,32 @@ function requireHumanWriter(context: TenantContext): void {
   }
 }
 
-function requireHumanReviewer(context: TenantContext): void {
+function requireHumanReviewer(context: TenantContext, what: string): void {
   requireHuman(context, "Reviewing");
   if (!hasRole(context.membership.role, REQUIRED.REVIEW)) {
-    throw new ContentDraftError(
-      "Returning a draft to drafting needs an SEO lead, admin or owner.",
-      "forbidden",
-    );
+    throw new ContentDraftError(`${what} needs an SEO lead, admin or owner.`, "forbidden");
   }
 }
 
-async function draftingItem(context: TenantContext, workItemId: string): Promise<ContentWorkItem> {
+async function scopedItem(context: TenantContext, workItemId: string): Promise<ContentWorkItem> {
   const item = await prisma.contentWorkItem.findFirst({
     where: { id: workItemId, ...websiteScope(context) },
   });
   if (!item) {
     throw new ContentDraftError("That work item is not available.", "not_found");
   }
+  return item;
+}
+
+async function draftingItem(context: TenantContext, workItemId: string): Promise<ContentWorkItem> {
+  const item = await scopedItem(context, workItemId);
   if (item.status !== "DRAFTING") {
     throw new ContentDraftError(
       item.status === "QUEUED" || item.status === "BRIEFING"
         ? "Drafting starts once a brief has been approved."
-        : `Drafting is not open for work that is ${statusWords(item.status)}.`,
+        : item.status === "QA"
+          ? "The draft is approved and ready for QA. Reopen it for revision to change it."
+          : `Drafting is not open for work that is ${statusWords(item.status)}.`,
       "invalid_state",
     );
   }
@@ -232,28 +242,29 @@ export type StartDraftResult = { draft: ContentDraft; brief: ContentBrief; creat
 
 /**
  * One draft per work item and approved brief version. Returns the open draft
- * when there is one - even if a newer brief version has since been approved;
- * that mismatch is surfaced by the reader and resolved only by
- * startDraftFromBrief, never here.
+ * when there is one - drafting, under review, or approved - even if a newer
+ * brief version has since been approved; that mismatch is surfaced by the
+ * reader and resolved only by startDraftFromBrief, never here.
  */
 export async function startDraft(
   context: TenantContext,
   workItemId: string,
 ): Promise<StartDraftResult> {
   requireHumanWriter(context);
-  const item = await draftingItem(context, workItemId);
-  const brief = await approvedBrief(context, item.id);
+  const item = await scopedItem(context, workItemId);
 
   const existing = await prisma.contentDraft.findFirst({
     where: { contentWorkItemId: item.id, status: { in: OPEN_STATUSES }, ...websiteScope(context) },
     orderBy: { createdAt: "desc" },
     include: { brief: true },
   });
-
   if (existing) {
     const { brief: pinned, ...draft } = existing;
     return { draft, brief: pinned, created: false };
   }
+
+  await draftingItem(context, item.id);
+  const brief = await approvedBrief(context, item.id);
 
   const draft = await prisma.$transaction(async (tx) => {
     const created = await tx.contentDraft.create({
@@ -287,7 +298,8 @@ export type StartFromBriefResult = StartDraftResult & { supersededDraftIds: stri
  * brief rule). A new draft is pinned to that version; the open draft(s) for
  * the work item become SUPERSEDED with every revision kept. Nothing is copied
  * across: the new draft starts from the new brief and, when generated, a
- * fresh package. The audit trail links old and new both ways.
+ * fresh package. An open review request is invalidated; a standing approval
+ * stops applying (its row stays in history) and the work item leaves QA.
  */
 export async function startDraftFromBrief(
   context: TenantContext,
@@ -295,7 +307,15 @@ export async function startDraftFromBrief(
   briefId: string,
 ): Promise<StartFromBriefResult> {
   requireHumanWriter(context);
-  const item = await draftingItem(context, workItemId);
+  const item = await scopedItem(context, workItemId);
+  if (item.status !== "DRAFTING" && item.status !== "QA") {
+    throw new ContentDraftError(
+      item.status === "QUEUED" || item.status === "BRIEFING"
+        ? "Drafting starts once a brief has been approved."
+        : `Drafting is not open for work that is ${statusWords(item.status)}.`,
+      "invalid_state",
+    );
+  }
 
   const brief = await prisma.contentBrief.findFirst({
     where: { id: briefId, contentWorkItemId: item.id, ...websiteScope(context) },
@@ -337,17 +357,45 @@ export async function startDraftFromBrief(
           "invalid_state",
         );
       }
+      await invalidateOpenRequests(tx, context, previous.id, "draft_superseded");
       await tx.contentDraft.update({
         where: { id: previous.id },
-        data: { status: "SUPERSEDED" },
+        data: {
+          status: "SUPERSEDED",
+          approvedRevisionId: null,
+          approvedRevisionHash: null,
+          approvedByUserId: null,
+          approvedAt: null,
+          approvedReviewId: null,
+        },
       });
+      if (previous.approvedReviewId) {
+        await recordAudit(tx, context, {
+          entityType: "ContentDraftReview",
+          entityId: previous.approvedReviewId,
+          action: "RETIRE",
+          after: {
+            reason: "draft_superseded",
+            draftId: previous.id,
+            supersededByDraftId: created.id,
+          },
+        });
+      }
       await recordAudit(tx, context, {
         entityType: "ContentDraft",
         entityId: previous.id,
         action: "SUPERSEDE",
-        before: { status: previous.status, briefId: previous.briefId },
+        before: {
+          status: previous.status,
+          briefId: previous.briefId,
+          approvedReviewId: previous.approvedReviewId,
+        },
         after: { status: "SUPERSEDED", supersededByDraftId: created.id, briefId: brief.id },
       });
+    }
+
+    if (item.status === "QA") {
+      await transitionWorkItem(tx, context, item.id, "DRAFTING", "approved draft superseded");
     }
 
     await recordAudit(tx, context, {
@@ -558,7 +606,8 @@ function avoidTopicsOf(prohibited: ProhibitedClaim[]): string[] {
  * Generates the next revision of a draft from its pinned brief and a fresh
  * package. Inline: the caller waits. Idempotent by token, guarded against
  * concurrent runs, honest when nothing can run. Refused once the pinned
- * brief has been superseded: the person starts a draft from the new version.
+ * brief has been superseded, while review is requested, and while the draft
+ * is approved: the person acts first.
  */
 export async function generateRevision(
   context: TenantContext,
@@ -576,7 +625,9 @@ export async function generateRevision(
     throw new ContentDraftError(
       draft.status === "AWAITING_EDITOR_REVIEW"
         ? "Review has been requested for this draft. Return it to drafting, or save a hand-written revision, before generating again."
-        : `This draft is ${statusWords(draft.status)}; nothing can be generated for it.`,
+        : draft.status === "APPROVED"
+          ? APPROVED_LOCKED_MESSAGE
+          : `This draft is ${statusWords(draft.status)}; nothing can be generated for it.`,
       "invalid_state",
     );
   }
@@ -1067,7 +1118,9 @@ export type SaveRevisionResult = {
  * one; never an edit in place. Checked like a generated one, with the
  * human-mode link rule: safe http(s) links are kept and flagged, unsafe
  * schemes and rule-prohibited links are removed. If the draft was awaiting
- * review, it is drafting again: what the reviewer was looking at has changed.
+ * review, it is drafting again and the open request is invalidated: what
+ * the reviewer was looking at has changed. An approved draft is refused
+ * until a person reopens it.
  */
 export async function saveRevision(
   context: TenantContext,
@@ -1085,6 +1138,9 @@ export async function saveRevision(
   const input = parsed.data;
 
   const draft = await scopedDraft(context, draftId);
+  if (draft.status === "APPROVED") {
+    throw new ContentDraftError(APPROVED_LOCKED_MESSAGE, "invalid_state");
+  }
   if (!EDITABLE_STATUSES.includes(draft.status)) {
     throw new ContentDraftError(
       `This draft is ${statusWords(draft.status)}; it can be read but not written to.`,
@@ -1223,6 +1279,7 @@ export async function saveRevision(
         },
       });
       if (returnedToDrafting) {
+        await invalidateOpenRequests(tx, context, draft.id, "content_changed");
         await recordAudit(tx, context, {
           entityType: "ContentDraft",
           entityId: draft.id,
@@ -1250,13 +1307,48 @@ export async function saveRevision(
 }
 
 // ---------------------------------------------------------------------------
-// Review request, and the way back (M4.3 §5, §6)
+// Review: request, return, approve, reopen (M4.3 §5-§6; M4.5 D1-D8)
 // ---------------------------------------------------------------------------
+
+/** Open requests of a draft stop applying: the content changed or the draft was superseded. */
+async function invalidateOpenRequests(
+  tx: Prisma.TransactionClient,
+  context: TenantContext,
+  draftId: string,
+  reason: "content_changed" | "draft_superseded",
+): Promise<void> {
+  const open = await tx.contentDraftReview.findMany({
+    where: { contentDraftId: draftId, status: "REQUESTED", websiteId: context.website.id },
+    select: { id: true, contentRevisionId: true, revisionNumber: true },
+  });
+  for (const request of open) {
+    if (!canTransition(REVIEW_TRANSITIONS, "REQUESTED", "INVALIDATED")) {
+      throw new ContentDraftError("A review request cannot be invalidated.", "invalid_state");
+    }
+    await tx.contentDraftReview.update({
+      where: { id: request.id },
+      data: { status: "INVALIDATED", invalidatedReason: reason },
+    });
+    await recordAudit(tx, context, {
+      entityType: "ContentDraftReview",
+      entityId: request.id,
+      action: "UPDATE",
+      before: { status: "REQUESTED" },
+      after: {
+        status: "INVALIDATED",
+        reason,
+        revisionId: request.contentRevisionId,
+        revisionNumber: request.revisionNumber,
+      },
+    });
+  }
+}
 
 /**
  * Sends the current revision for editorial review. Refused while the
  * current revision has blocking findings: the person sees exactly which, and
- * clears them with a new revision. Warnings do not stand in the way.
+ * clears them with a new revision. Warnings do not stand in the way. The
+ * request is a row pinned to the exact revision and the pinned brief (D2).
  */
 export async function requestDraftReview(
   context: TenantContext,
@@ -1266,6 +1358,9 @@ export async function requestDraftReview(
   const draft = await scopedDraft(context, draftId);
   if (draft.status === "AWAITING_EDITOR_REVIEW") {
     throw new ContentDraftError("Review has already been requested.", "invalid_state");
+  }
+  if (draft.status === "APPROVED") {
+    throw new ContentDraftError("This draft is already approved.", "invalid_state");
   }
   if (draft.status !== "DRAFTING") {
     throw new ContentDraftError(
@@ -1302,39 +1397,88 @@ export async function requestDraftReview(
     throw new ContentDraftError("This draft cannot go for review from here.", "invalid_state");
   }
 
-  return prisma.$transaction(async (tx) => {
-    const updated = await tx.contentDraft.update({
-      where: { id: draft.id },
-      data: { status: "AWAITING_EDITOR_REVIEW" },
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const request = await tx.contentDraftReview.create({
+        data: {
+          websiteId: context.website.id,
+          contentWorkItemId: draft.contentWorkItemId,
+          contentDraftId: draft.id,
+          contentRevisionId: current.id,
+          revisionNumber: current.revisionNumber,
+          revisionHash: current.contentHash,
+          briefId: draft.briefId,
+          briefVersion: draft.brief.version,
+          status: "REQUESTED",
+          requestedByUserId: context.user.id,
+        },
+      });
+      const updated = await tx.contentDraft.update({
+        where: { id: draft.id },
+        data: { status: "AWAITING_EDITOR_REVIEW" },
+      });
+      await recordAudit(tx, context, {
+        entityType: "ContentDraftReview",
+        entityId: request.id,
+        action: "CREATE",
+        after: {
+          draftId: draft.id,
+          revisionId: current.id,
+          revisionNumber: current.revisionNumber,
+          revisionHash: current.contentHash,
+          briefId: draft.briefId,
+          briefVersion: draft.brief.version,
+        },
+      });
+      await recordAudit(tx, context, {
+        entityType: "ContentDraft",
+        entityId: draft.id,
+        action: "UPDATE",
+        before: { status: draft.status },
+        after: {
+          status: "AWAITING_EDITOR_REVIEW",
+          reviewId: request.id,
+          revisionId: current.id,
+          revisionNumber: current.revisionNumber,
+          briefVersion: draft.brief.version,
+          briefSuperseded: draft.brief.status !== "APPROVED",
+        },
+      });
+      return updated;
     });
-    await recordAudit(tx, context, {
-      entityType: "ContentDraft",
-      entityId: draft.id,
-      action: "UPDATE",
-      before: { status: draft.status },
-      after: {
-        status: "AWAITING_EDITOR_REVIEW",
-        revisionId: current.id,
-        revisionNumber: current.revisionNumber,
-        briefVersion: draft.brief.version,
-        briefSuperseded: draft.brief.status !== "APPROVED",
-      },
-    });
-    return updated;
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      throw new ContentDraftError(
+        "A review request for this draft is already open. Reload and try again.",
+        "version_conflict",
+      );
+    }
+    throw error;
+  }
+}
+
+/** The one open request of a draft, when there is one. */
+async function openRequestOf(
+  tx: Prisma.TransactionClient,
+  context: TenantContext,
+  draftId: string,
+): Promise<ContentDraftReview | null> {
+  return tx.contentDraftReview.findFirst({
+    where: { contentDraftId: draftId, status: "REQUESTED", websiteId: context.website.id },
   });
 }
 
 /**
  * A reviewer sends the draft back with a note. The note is required: a
- * draft returned without a reason tells the editor nothing. It lives in the
- * audit trail and is shown on the draft.
+ * draft returned without a reason tells the editor nothing. The open request
+ * is decided as RETURNED; the note lives on it and in the audit trail.
  */
 export async function returnDraftToDrafting(
   context: TenantContext,
   draftId: string,
   note: string,
 ): Promise<ContentDraft> {
-  requireHumanReviewer(context);
+  requireHumanReviewer(context, "Returning a draft to drafting");
   const draft = await scopedDraft(context, draftId);
   if (draft.status !== "AWAITING_EDITOR_REVIEW") {
     throw new ContentDraftError(
@@ -1358,6 +1502,36 @@ export async function returnDraftToDrafting(
   }
 
   return prisma.$transaction(async (tx) => {
+    const request = await openRequestOf(tx, context, draft.id);
+    if (request) {
+      const reviewed = await tx.contentRevision.findFirst({
+        where: { id: request.contentRevisionId },
+        select: { createdByUserId: true },
+      });
+      await tx.contentDraftReview.update({
+        where: { id: request.id },
+        data: {
+          status: "RETURNED",
+          decidedByUserId: context.user.id,
+          decidedAt: new Date(),
+          note: trimmed,
+          selfDecided: reviewed?.createdByUserId === context.user.id,
+          briefSupersededAtDecision: draft.brief.status !== "APPROVED",
+        },
+      });
+      await recordAudit(tx, context, {
+        entityType: "ContentDraftReview",
+        entityId: request.id,
+        action: "DECLINE",
+        before: { status: "REQUESTED" },
+        after: {
+          status: "RETURNED",
+          revisionId: request.contentRevisionId,
+          revisionNumber: request.revisionNumber,
+          note: trimmed,
+        },
+      });
+    }
     const updated = await tx.contentDraft.update({
       where: { id: draft.id },
       data: { status: "DRAFTING" },
@@ -1367,14 +1541,341 @@ export async function returnDraftToDrafting(
       entityId: draft.id,
       action: "DECLINE",
       before: { status: draft.status },
-      after: { status: "DRAFTING", note: trimmed, revisionId: draft.currentRevisionId },
+      after: {
+        status: "DRAFTING",
+        note: trimmed,
+        revisionId: draft.currentRevisionId,
+        reviewId: request?.id ?? null,
+      },
     });
     return updated;
   });
 }
 
+/**
+ * The claims of a revision judged against the facts approved right now, as
+ * findings: a supported claim whose fact was revoked since, or a brief claim
+ * that went stale and still stands in the text (D5).
+ */
+async function staleClaimFindings(
+  context: TenantContext,
+  brief: ContentBrief,
+  revision: ContentRevision,
+): Promise<DraftFinding[]> {
+  const claims = revisionClaims(revision);
+  const briefClaims = asArray<CitedClaim>(brief.approvedClaimsJson);
+  const truth = await currentTruth(context, [
+    ...claims.map((claim) => claim.evidenceId),
+    ...briefClaims.map((claim) => claim.evidenceId),
+  ]);
+
+  const findings: DraftFinding[] = [];
+  for (const claim of claims) {
+    if (claim.status === "SUPPORTED" && claim.evidenceId && !truth.has(claim.evidenceId)) {
+      findings.push({
+        kind: "STALE_CLAIM",
+        severity: "BLOCKING",
+        message: `The fact behind "${claim.text}" is no longer approved.`,
+        excerpt: claim.text,
+      });
+    }
+  }
+  const text = normaliseText(
+    plainText([revision.title, revision.excerpt ?? "", revision.bodyMarkdown].join("\n\n")),
+  );
+  for (const stale of reconcileBriefClaims(briefClaims, truth).stale) {
+    const key = normaliseText(stale.text);
+    if (!key || !text.includes(key)) continue;
+    if (findings.some((finding) => finding.excerpt === stale.text)) continue;
+    findings.push({
+      kind: "STALE_CLAIM",
+      severity: "BLOCKING",
+      message: `This claim rests on a fact that is no longer approved: "${stale.text}".`,
+      excerpt: stale.text,
+    });
+  }
+  return findings;
+}
+
+export type ApproveDraftInput = {
+  /** Optional (D8). Kept on the review row and in the audit event. */
+  note?: string | null;
+  /** Required when a newer brief version has been approved since the draft was pinned (D6). */
+  acknowledgeBriefMismatch?: boolean;
+};
+
+export type ApproveDraftResult = {
+  draft: ContentDraft;
+  review: ContentDraftReview;
+  revision: ContentRevision;
+  workItem: ContentWorkItem;
+};
+
+/**
+ * Approves exactly the revision that was requested for review (D1, D2).
+ *
+ * Refused unless: the caller has REVIEW and is a person; the draft is
+ * awaiting review with one open request; that request still names the
+ * draft's current revision and its hash still matches; the revision has no
+ * blocking finding, and none of its claims went stale since it was written;
+ * and, when a newer brief version has been approved meanwhile, the reviewer
+ * has said so explicitly.
+ *
+ * Atomic: the decision on the review row, the draft's standing pointer and
+ * status, the work item's move to QA, and every audit write happen in one
+ * transaction or not at all.
+ */
+export async function approveDraft(
+  context: TenantContext,
+  draftId: string,
+  input: ApproveDraftInput = {},
+): Promise<ApproveDraftResult> {
+  requireHumanReviewer(context, "Approving a draft");
+  const draft = await scopedDraft(context, draftId);
+  if (draft.status === "APPROVED") {
+    throw new ContentDraftError("This draft is already approved.", "invalid_state");
+  }
+  if (draft.status === "SUPERSEDED" || draft.status === "ARCHIVED") {
+    throw new ContentDraftError(
+      `This draft is ${statusWords(draft.status)} and cannot be approved.`,
+      "invalid_state",
+    );
+  }
+  if (draft.status !== "AWAITING_EDITOR_REVIEW") {
+    throw new ContentDraftError(
+      "No review has been requested for this draft. A draft is approved from a review request.",
+      "invalid_state",
+    );
+  }
+  const item = await draftingItem(context, draft.contentWorkItemId);
+
+  const note = (input.note ?? "").trim();
+  if (note.length > 2000) {
+    throw new ContentDraftError("Keep the note under 2,000 characters.", "invalid_input", {
+      issues: ["note: Too long."],
+    });
+  }
+
+  const request = await prisma.contentDraftReview.findFirst({
+    where: { contentDraftId: draft.id, status: "REQUESTED", ...websiteScope(context) },
+  });
+  if (!request) {
+    throw new ContentDraftError(
+      "The review request for this draft is no longer open. Request review again.",
+      "invalid_state",
+    );
+  }
+
+  const revision = draft.currentRevisionId
+    ? await prisma.contentRevision.findFirst({
+        where: { id: draft.currentRevisionId, ...websiteScope(context) },
+      })
+    : null;
+  if (
+    !revision ||
+    revision.id !== request.contentRevisionId ||
+    revision.contentHash !== request.revisionHash
+  ) {
+    throw new ContentDraftError(
+      "The content changed after review was requested. Request review again for the current revision.",
+      "version_conflict",
+    );
+  }
+
+  const blocking = [
+    ...(revisionFindings(revision)?.findings ?? []).filter(
+      (finding) => finding.severity === "BLOCKING",
+    ),
+    ...(await staleClaimFindings(context, draft.brief, revision)),
+  ];
+  if (blocking.length > 0) {
+    throw new ContentDraftError(
+      `Revision ${revision.revisionNumber} has ${blocking.length} blocking finding${blocking.length === 1 ? "" : "s"}. It cannot be approved until a new revision resolves them.`,
+      "blocked",
+      { findings: blocking },
+    );
+  }
+
+  const newer = await prisma.contentBrief.findFirst({
+    where: { contentWorkItemId: item.id, status: "APPROVED", ...websiteScope(context) },
+    select: { id: true, version: true },
+  });
+  const briefSuperseded = Boolean(newer && newer.id !== draft.briefId);
+  if (briefSuperseded && !input.acknowledgeBriefMismatch) {
+    throw new ContentDraftError(
+      `This draft is based on Brief v${draft.brief.version}. Brief v${newer!.version} is now approved. To approve against v${draft.brief.version} anyway, acknowledge the newer version explicitly.`,
+      "brief_superseded",
+    );
+  }
+
+  if (!canTransition(DRAFT_TRANSITIONS, draft.status, "APPROVED")) {
+    throw new ContentDraftError("This draft cannot be approved from here.", "invalid_state");
+  }
+  if (!canTransition(REVIEW_TRANSITIONS, request.status, "APPROVED")) {
+    throw new ContentDraftError("This review request cannot be approved.", "invalid_state");
+  }
+
+  const selfDecided = revision.createdByUserId === context.user.id;
+  const decidedAt = new Date();
+
+  return prisma.$transaction(async (tx) => {
+    const review = await tx.contentDraftReview.update({
+      where: { id: request.id },
+      data: {
+        status: "APPROVED",
+        decidedByUserId: context.user.id,
+        decidedAt,
+        note: note || null,
+        selfDecided,
+        briefSupersededAtDecision: briefSuperseded,
+        briefMismatchAcknowledged: briefSuperseded && Boolean(input.acknowledgeBriefMismatch),
+      },
+    });
+    const updated = await tx.contentDraft.update({
+      where: { id: draft.id },
+      data: {
+        status: "APPROVED",
+        approvedRevisionId: revision.id,
+        approvedRevisionHash: revision.contentHash,
+        approvedByUserId: context.user.id,
+        approvedAt: decidedAt,
+        approvedReviewId: review.id,
+      },
+    });
+    const workItem = await transitionWorkItem(tx, context, item.id, "QA", "draft approved");
+
+    await recordAudit(tx, context, {
+      entityType: "ContentDraftReview",
+      entityId: review.id,
+      action: "APPROVE",
+      before: { status: "REQUESTED" },
+      after: {
+        status: "APPROVED",
+        revisionId: revision.id,
+        revisionNumber: revision.revisionNumber,
+        revisionHash: revision.contentHash,
+        selfDecided,
+        briefSupersededAtDecision: briefSuperseded,
+        briefMismatchAcknowledged: review.briefMismatchAcknowledged,
+      },
+    });
+    // CONTENT_DRAFT_APPROVED (§36).
+    await recordAudit(tx, context, {
+      entityType: "ContentDraft",
+      entityId: draft.id,
+      action: "APPROVE",
+      before: { status: draft.status, approvedReviewId: draft.approvedReviewId },
+      after: {
+        status: "APPROVED",
+        reviewId: review.id,
+        revisionId: revision.id,
+        revisionNumber: revision.revisionNumber,
+        revisionHash: revision.contentHash,
+        briefId: draft.briefId,
+        briefVersion: draft.brief.version,
+        briefSupersededAtDecision: briefSuperseded,
+        briefMismatchAcknowledged: review.briefMismatchAcknowledged,
+        note: note || null,
+        selfDecided,
+        workItemStatus: workItem.status,
+      },
+    });
+
+    return { draft: updated, review, revision, workItem };
+  });
+}
+
+export type ReopenDraftResult = { draft: ContentDraft; workItem: ContentWorkItem };
+
+/**
+ * Reopens an approved draft for revision (D3). The standing approval stops
+ * applying - the pointer is cleared, the draft is DRAFTING, the work item
+ * leaves QA - and the approval row stays in history exactly as decided. A
+ * reason is required and audited.
+ */
+export async function reopenDraft(
+  context: TenantContext,
+  draftId: string,
+  reason: string,
+): Promise<ReopenDraftResult> {
+  requireHumanWriter(context);
+  const draft = await scopedDraft(context, draftId);
+  if (draft.status !== "APPROVED") {
+    throw new ContentDraftError(
+      `This draft is ${statusWords(draft.status)}; only an approved draft can be reopened.`,
+      "invalid_state",
+    );
+  }
+  const trimmed = reason.trim();
+  if (!trimmed) {
+    throw new ContentDraftError("Say why the draft is being reopened.", "invalid_input", {
+      issues: ["reason: A reason is required."],
+    });
+  }
+  if (trimmed.length > 2000) {
+    throw new ContentDraftError("Keep the reason under 2,000 characters.", "invalid_input", {
+      issues: ["reason: Too long."],
+    });
+  }
+  const item = await scopedItem(context, draft.contentWorkItemId);
+  if (item.status !== "QA" && item.status !== "DRAFTING") {
+    throw new ContentDraftError(
+      `The work item is ${statusWords(item.status)}; the draft cannot be reopened here.`,
+      "invalid_state",
+    );
+  }
+  if (!canTransition(DRAFT_TRANSITIONS, draft.status, "DRAFTING")) {
+    throw new ContentDraftError("This draft cannot be reopened from here.", "invalid_state");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.contentDraft.update({
+      where: { id: draft.id },
+      data: {
+        status: "DRAFTING",
+        approvedRevisionId: null,
+        approvedRevisionHash: null,
+        approvedByUserId: null,
+        approvedAt: null,
+        approvedReviewId: null,
+      },
+    });
+    const workItem =
+      item.status === "QA"
+        ? await transitionWorkItem(tx, context, item.id, "DRAFTING", "draft reopened for revision")
+        : item;
+
+    if (draft.approvedReviewId) {
+      await recordAudit(tx, context, {
+        entityType: "ContentDraftReview",
+        entityId: draft.approvedReviewId,
+        action: "RETIRE",
+        after: {
+          reason: trimmed,
+          draftId: draft.id,
+          revisionId: draft.approvedRevisionId,
+          noLongerCurrent: true,
+        },
+      });
+    }
+    await recordAudit(tx, context, {
+      entityType: "ContentDraft",
+      entityId: draft.id,
+      action: "UPDATE",
+      before: {
+        status: draft.status,
+        approvedReviewId: draft.approvedReviewId,
+        approvedRevisionId: draft.approvedRevisionId,
+      },
+      after: { status: "DRAFTING", reason: trimmed, workItemStatus: workItem.status },
+    });
+
+    return { draft: updated, workItem };
+  });
+}
+
 // ---------------------------------------------------------------------------
-// Reading (§10, §12; M4.3 §2-§4)
+// Reading (§10, §12; M4.3 §2-§4; M4.5 readers)
 // ---------------------------------------------------------------------------
 
 const REVISION_INCLUDE = {
@@ -1406,7 +1907,29 @@ const REVISION_INCLUDE = {
 
 export type RevisionView = Prisma.ContentRevisionGetPayload<{ include: typeof REVISION_INCLUDE }>;
 
+const REVIEW_INCLUDE = {
+  requestedBy: { select: { id: true, email: true } },
+  decidedBy: { select: { id: true, email: true } },
+} satisfies Prisma.ContentDraftReviewInclude;
+
+export type ReviewView = Prisma.ContentDraftReviewGetPayload<{ include: typeof REVIEW_INCLUDE }>;
+
 export type ReturnNote = { note: string; by: string | null; at: Date };
+
+/** The standing approval of a draft, from its pointer. */
+export type StandingApproval = {
+  reviewId: string;
+  revisionId: string;
+  revisionNumber: number;
+  revisionHash: string;
+  by: string | null;
+  at: Date;
+  note: string | null;
+  briefVersion: number;
+  briefSupersededAtDecision: boolean;
+  briefMismatchAcknowledged: boolean;
+  selfDecided: boolean;
+};
 
 export type DraftView = {
   draft: ContentDraft;
@@ -1418,10 +1941,16 @@ export type DraftView = {
   revisionCount: number;
   /** The latest time a reviewer sent the draft back, with their note. */
   lastReturn: ReturnNote | null;
+  /** M4.5: the open request, the standing approval, and every review cycle. */
+  review: {
+    open: ReviewView | null;
+    approval: StandingApproval | null;
+    history: ReviewView[];
+  };
 };
 
 async function buildView(context: TenantContext, draft: DraftWithBrief): Promise<DraftView> {
-  const [current, approved, revisionCount, returned] = await Promise.all([
+  const [current, approved, revisionCount, returned, reviews, approvedBy] = await Promise.all([
     draft.currentRevisionId
       ? prisma.contentRevision.findFirst({
           where: { id: draft.currentRevisionId, ...websiteScope(context) },
@@ -1447,10 +1976,38 @@ async function buildView(context: TenantContext, draft: DraftWithBrief): Promise
       orderBy: { createdAt: "desc" },
       include: { actor: { select: { email: true } } },
     }),
+    prisma.contentDraftReview.findMany({
+      where: { contentDraftId: draft.id, ...websiteScope(context) },
+      orderBy: { createdAt: "desc" },
+      include: REVIEW_INCLUDE,
+    }),
+    draft.approvedByUserId
+      ? prisma.user.findUnique({ where: { id: draft.approvedByUserId }, select: { email: true } })
+      : Promise.resolve(null),
   ]);
 
   const { brief, ...rest } = draft;
   const note = (returned?.afterSnapshotJson as { note?: unknown } | null)?.note;
+  const approvedRow = draft.approvedReviewId
+    ? (reviews.find((row) => row.id === draft.approvedReviewId) ?? null)
+    : null;
+  const approval: StandingApproval | null =
+    draft.approvedRevisionId && draft.approvedRevisionHash && draft.approvedAt && approvedRow
+      ? {
+          reviewId: approvedRow.id,
+          revisionId: draft.approvedRevisionId,
+          revisionNumber: approvedRow.revisionNumber,
+          revisionHash: draft.approvedRevisionHash,
+          by: approvedBy?.email ?? approvedRow.decidedBy?.email ?? null,
+          at: draft.approvedAt,
+          note: approvedRow.note,
+          briefVersion: approvedRow.briefVersion,
+          briefSupersededAtDecision: approvedRow.briefSupersededAtDecision,
+          briefMismatchAcknowledged: approvedRow.briefMismatchAcknowledged,
+          selfDecided: approvedRow.selfDecided,
+        }
+      : null;
+
   return {
     draft: rest,
     brief,
@@ -1464,6 +2021,11 @@ async function buildView(context: TenantContext, draft: DraftWithBrief): Promise
       returned && typeof note === "string"
         ? { note, by: returned.actor?.email ?? null, at: returned.createdAt }
         : null,
+    review: {
+      open: reviews.find((row) => row.status === "REQUESTED") ?? null,
+      approval,
+      history: reviews,
+    },
   };
 }
 
@@ -1491,6 +2053,72 @@ export async function getDraft(context: TenantContext, draftId: string): Promise
     include: { brief: true },
   });
   return draft ? buildView(context, draft) : null;
+}
+
+/** Every review cycle of a draft, newest first. */
+export async function listDraftReviews(
+  context: TenantContext,
+  draftId: string,
+): Promise<ReviewView[]> {
+  return prisma.contentDraftReview.findMany({
+    where: { contentDraftId: draftId, ...websiteScope(context) },
+    orderBy: { createdAt: "desc" },
+    include: REVIEW_INCLUDE,
+  });
+}
+
+/** What M5 consumes: the one approved revision of a work item, or nothing. */
+export type ApprovedRevisionRef = {
+  workItemId: string;
+  draftId: string;
+  reviewId: string;
+  revisionId: string;
+  revisionNumber: number;
+  revisionHash: string;
+  briefId: string;
+  briefVersion: number;
+  approvedByUserId: string;
+  approvedAt: Date;
+};
+
+/**
+ * The exact approved revision of a work item, for QA and publishing. Returns
+ * nothing unless every binding still holds: the draft is APPROVED, its
+ * pointer names an APPROVED review row for the same revision, the hashes
+ * agree with the revision's own content hash, and that revision is still
+ * the draft's current one. Anything else is not an approval.
+ */
+export async function approvedRevisionFor(
+  context: TenantContext,
+  workItemId: string,
+): Promise<ApprovedRevisionRef | null> {
+  const draft = await prisma.contentDraft.findFirst({
+    where: { contentWorkItemId: workItemId, status: "APPROVED", ...websiteScope(context) },
+    include: { approvedRevision: true, approvedReview: true },
+  });
+  if (!draft?.approvedRevision || !draft.approvedReview || !draft.approvedByUserId) return null;
+  const { approvedRevision: revision, approvedReview: review } = draft;
+  const bound =
+    review.status === "APPROVED" &&
+    review.contentRevisionId === revision.id &&
+    review.revisionHash === revision.contentHash &&
+    draft.approvedRevisionHash === revision.contentHash &&
+    draft.currentRevisionId === revision.id &&
+    draft.approvedAt !== null;
+  if (!bound) return null;
+
+  return {
+    workItemId,
+    draftId: draft.id,
+    reviewId: review.id,
+    revisionId: revision.id,
+    revisionNumber: revision.revisionNumber,
+    revisionHash: revision.contentHash,
+    briefId: draft.briefId,
+    briefVersion: review.briefVersion,
+    approvedByUserId: draft.approvedByUserId,
+    approvedAt: draft.approvedAt!,
+  };
 }
 
 export type DraftSummary = {
@@ -1559,6 +2187,16 @@ export function describeAuthor(
   return { kind: "UNKNOWN", label: "Author not recorded" };
 }
 
+/** What review did with a revision, for history. */
+export type RevisionReviewMark = {
+  status: ContentDraftReviewStatus;
+  decidedBy: string | null;
+  decidedAt: Date | null;
+  note: string | null;
+  /** For APPROVED: this approval is the draft's standing one. */
+  current: boolean;
+};
+
 export type RevisionSummary = {
   id: string;
   revisionNumber: number;
@@ -1571,6 +2209,8 @@ export type RevisionSummary = {
   contentHash: string;
   /** One line: provider, model, prompt and schema versions, package - or the person. */
   provenance: string;
+  /** M4.5: the latest decided review of this revision, if any. */
+  review: RevisionReviewMark | null;
 };
 
 /** The lineage of a draft, newest first. */
@@ -1579,11 +2219,22 @@ export async function listRevisions(
   draftId: string,
   viewerUserId?: string,
 ): Promise<RevisionSummary[]> {
-  const rows = await prisma.contentRevision.findMany({
-    where: { contentDraftId: draftId, ...websiteScope(context) },
-    orderBy: { revisionNumber: "desc" },
-    include: REVISION_INCLUDE,
-  });
+  const [rows, reviews, draft] = await Promise.all([
+    prisma.contentRevision.findMany({
+      where: { contentDraftId: draftId, ...websiteScope(context) },
+      orderBy: { revisionNumber: "desc" },
+      include: REVISION_INCLUDE,
+    }),
+    prisma.contentDraftReview.findMany({
+      where: { contentDraftId: draftId, status: { not: "REQUESTED" }, ...websiteScope(context) },
+      orderBy: { createdAt: "desc" },
+      include: REVIEW_INCLUDE,
+    }),
+    prisma.contentDraft.findFirst({
+      where: { id: draftId, ...websiteScope(context) },
+      select: { approvedRevisionId: true, approvedReviewId: true },
+    }),
+  ]);
   return rows.map((row) => {
     const author = describeAuthor(row, viewerUserId);
     const provenance = row.createdByAiRun
@@ -1591,6 +2242,9 @@ export async function listRevisions(
       : row.createdBy
         ? `Hand-written by ${row.createdBy.email}`
         : "Not recorded";
+    // The approval, when there is one, outranks a later return or invalidation of another cycle.
+    const ofThis = reviews.filter((review) => review.contentRevisionId === row.id);
+    const mark = ofThis.find((review) => review.status === "APPROVED") ?? ofThis[0] ?? null;
     return {
       id: row.id,
       revisionNumber: row.revisionNumber,
@@ -1602,6 +2256,18 @@ export async function listRevisions(
       changeSummary: row.changeSummary,
       contentHash: row.contentHash,
       provenance,
+      review: mark
+        ? {
+            status: mark.status,
+            decidedBy: mark.decidedBy?.email ?? null,
+            decidedAt: mark.decidedAt,
+            note: mark.note,
+            current:
+              mark.status === "APPROVED" &&
+              draft?.approvedReviewId === mark.id &&
+              draft?.approvedRevisionId === row.id,
+          }
+        : null,
     };
   });
 }
@@ -1700,6 +2366,8 @@ export type DraftListRow = {
   authorKind: "AI" | "HUMAN" | null;
   findings: { blocking: number; warning: number; info: number };
   blocking: boolean;
+  /** M4.5: the standing approval's revision number, when the draft is approved. */
+  approvedRevisionNumber: number | null;
   /** The later of the draft's own change and its current revision's creation. */
   updatedAt: Date;
 };
@@ -1721,6 +2389,7 @@ export async function listDrafts(context: TenantContext): Promise<DraftListRow[]
           constraintFindingsJson: true,
         },
       },
+      approvedRevision: { select: { revisionNumber: true } },
       _count: { select: { revisions: true } },
     },
   });
@@ -1773,6 +2442,8 @@ export async function listDrafts(context: TenantContext): Promise<DraftListRow[]
           : null,
         findings,
         blocking: findings.blocking > 0,
+        approvedRevisionNumber:
+          row.status === "APPROVED" ? (row.approvedRevision?.revisionNumber ?? null) : null,
         updatedAt,
       };
     })

@@ -25,15 +25,19 @@ import {
   type BriefInput,
 } from "@/server/services/content-brief";
 import {
+  approveDraft,
+  approvedRevisionFor,
   compareRevisions,
   generateRevision,
   getBriefPanel,
   getDraft,
   getDraftForWorkItem,
   getRevision,
+  listDraftReviews,
   listDrafts,
   listDraftsForWorkItem,
   listRevisions,
+  reopenDraft,
   requestDraftReview,
   returnDraftToDrafting,
   saveRevision,
@@ -324,5 +328,48 @@ describe("the drafts and briefs lists across tenants", () => {
     const briefs = await listBriefs(a);
     expect(briefs.map((row) => row.id)).not.toContain(b.briefId);
     expect(briefs.map((row) => row.id)).toContain(a.briefId);
+  });
+});
+
+describe("draft approval across tenants and roles", () => {
+  it("cannot approve, reopen or read another tenant's reviews; roles and actors are enforced", async () => {
+    // B's draft is awaiting review (set up by the earlier tests).
+    const bView = await getDraftForWorkItem(b, b.itemId);
+    const bDraft = bView!.draft;
+    expect(bDraft.status).toBe("AWAITING_EDITOR_REVIEW");
+
+    // Cross-tenant: not found, nothing read.
+    await expect(approveDraft(a, bDraft.id, {})).rejects.toMatchObject({ code: "not_found" });
+    await expect(reopenDraft(a, bDraft.id, "mine")).rejects.toMatchObject({ code: "not_found" });
+    expect(await listDraftReviews(a, bDraft.id)).toEqual([]);
+    expect(await approvedRevisionFor(a, b.itemId)).toBeNull();
+    expect(await approveDraft(a, crypto.randomUUID(), {}).catch((error) => error.code)).toBe(
+      "not_found",
+    );
+
+    // Roles and actors, within B.
+    const member = { ...b, membership: { ...b.membership, role: "MEMBER" as const } };
+    await expect(approveDraft(member, bDraft.id, {})).rejects.toMatchObject({ code: "forbidden" });
+    const viewer = { ...b, membership: { ...b.membership, role: "VIEWER" as const } };
+    await expect(approveDraft(viewer, bDraft.id, {})).rejects.toMatchObject({ code: "forbidden" });
+    const system = await systemContextFor(b.website.id);
+    await expect(approveDraft(system, bDraft.id, {})).rejects.toMatchObject({ code: "forbidden" });
+
+    // The reviewer approves; the pointer is B's; A still sees nothing.
+    const approved = await approveDraft(b, bDraft.id, { note: "Good to go." });
+    expect(approved.draft.status).toBe("APPROVED");
+    expect(await approvedRevisionFor(b, b.itemId)).toMatchObject({ draftId: bDraft.id });
+    expect(await approvedRevisionFor(a, b.itemId)).toBeNull();
+    expect(await listDraftReviews(a, bDraft.id)).toEqual([]);
+
+    // The system actor cannot reopen either; a member can (WRITE), a viewer cannot.
+    await expect(reopenDraft(system, bDraft.id, "job")).rejects.toMatchObject({
+      code: "forbidden",
+    });
+    await expect(reopenDraft(viewer, bDraft.id, "no")).rejects.toMatchObject({ code: "forbidden" });
+    await expect(reopenDraft(a, bDraft.id, "mine")).rejects.toMatchObject({ code: "not_found" });
+    expect((await prisma.contentDraft.findUniqueOrThrow({ where: { id: bDraft.id } })).status).toBe(
+      "APPROVED",
+    );
   });
 });

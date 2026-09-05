@@ -147,7 +147,7 @@ hand diagnoses to the worker, which then needs the AI variables too.
 
 Some rows are immutable at the database, by trigger: approved
 `business_context_version` rows (P0), approved `content_brief` versions, every
-`content_revision`, decided `publish_approval` rows and every `execution_step`
+`content_revision`, decided `content_draft_review` and `publish_approval` rows and every `execution_step`
 (P4). Updates are refused. Deletes are refused too - which also stops an
 organization that holds such history from being deleted by cascade. That is
 deliberate. To tear one down on purpose, say so inside the same transaction:

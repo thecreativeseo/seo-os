@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ContentBriefStatus,
+  ContentDraftReviewStatus,
   ContentDraftStatus,
   ContentWorkItemStatus,
   ExecutionStatus,
@@ -14,6 +15,7 @@ import {
   DRAFT_TRANSITIONS,
   EXECUTION_TRANSITIONS,
   OPEN_WORK_ITEM_STATUSES,
+  REVIEW_TRANSITIONS,
   WORK_ITEM_TRANSITIONS,
   canTransition,
   isTerminal,
@@ -32,6 +34,7 @@ const TABLES = [
   ["draft", DRAFT_TRANSITIONS, Object.values(ContentDraftStatus)],
   ["execution", EXECUTION_TRANSITIONS, Object.values(ExecutionStatus)],
   ["publish approval", APPROVAL_TRANSITIONS, Object.values(PublishApprovalStatus)],
+  ["draft review", REVIEW_TRANSITIONS, Object.values(ContentDraftReviewStatus)],
 ] as const;
 
 describe.each(TABLES)("the %s state machine", (_name, table, statuses) => {
@@ -97,6 +100,17 @@ describe("the rules the spec spells out", () => {
     expect(canTransition(DRAFT_TRANSITIONS, "DRAFTING", "AWAITING_EDITOR_REVIEW")).toBe(true);
     expect(canTransition(DRAFT_TRANSITIONS, "AWAITING_EDITOR_REVIEW", "DRAFTING")).toBe(true);
     expect(canTransition(DRAFT_TRANSITIONS, "DRAFTING", "APPROVED")).toBe(false);
+  });
+
+  it("lets a person reopen an approved draft for revision, and decides a review once (M4.5)", () => {
+    expect(canTransition(DRAFT_TRANSITIONS, "APPROVED", "DRAFTING")).toBe(true);
+    expect(canTransition(DRAFT_TRANSITIONS, "AWAITING_EDITOR_REVIEW", "APPROVED")).toBe(true);
+    expect(canTransition(REVIEW_TRANSITIONS, "REQUESTED", "APPROVED")).toBe(true);
+    expect(canTransition(REVIEW_TRANSITIONS, "REQUESTED", "RETURNED")).toBe(true);
+    expect(canTransition(REVIEW_TRANSITIONS, "REQUESTED", "INVALIDATED")).toBe(true);
+    expect(isTerminal(REVIEW_TRANSITIONS, "APPROVED")).toBe(true);
+    expect(isTerminal(REVIEW_TRANSITIONS, "RETURNED")).toBe(true);
+    expect(isTerminal(REVIEW_TRANSITIONS, "INVALIDATED")).toBe(true);
   });
 
   it("agrees with the partial unique indexes about what counts as open or active", () => {

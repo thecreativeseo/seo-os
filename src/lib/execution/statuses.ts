@@ -1,5 +1,6 @@
 import type {
   ContentBriefStatus,
+  ContentDraftReviewStatus,
   ContentDraftStatus,
   ContentWorkItemStatus,
   ExecutionStatus,
@@ -70,7 +71,12 @@ export const BRIEF_TRANSITIONS: Transitions<ContentBriefStatus> = {
   ARCHIVED: [],
 };
 
-/** Drafts (§9). A new revision on an approved draft sends it back to QA. */
+/**
+ * Drafts (§9). Editorial review comes before QA in this product (M4.3-M4.5):
+ * DRAFTING → AWAITING_EDITOR_REVIEW → APPROVED, and back to DRAFTING when a
+ * person reopens an approved draft for revision (M4.5, D3). AWAITING_QA and
+ * REJECTED are M5's; no service reaches them yet.
+ */
 export const DRAFT_TRANSITIONS: Transitions<ContentDraftStatus> = {
   DRAFTING: ["AWAITING_EDITOR_REVIEW", "AWAITING_QA", "SUPERSEDED", "ARCHIVED"],
   AWAITING_QA: ["AWAITING_EDITOR_REVIEW", "DRAFTING", "SUPERSEDED", "ARCHIVED"],
@@ -82,10 +88,21 @@ export const DRAFT_TRANSITIONS: Transitions<ContentDraftStatus> = {
     "SUPERSEDED",
     "ARCHIVED",
   ],
-  APPROVED: ["AWAITING_QA", "SUPERSEDED", "ARCHIVED"],
+  APPROVED: ["DRAFTING", "AWAITING_QA", "SUPERSEDED", "ARCHIVED"],
   REJECTED: ["DRAFTING", "SUPERSEDED", "ARCHIVED"],
   SUPERSEDED: ["ARCHIVED"],
   ARCHIVED: [],
+};
+
+/**
+ * Draft reviews (M4.5, D2). A request is decided once - by a person, or by the
+ * content changing underneath it - and never changes again.
+ */
+export const REVIEW_TRANSITIONS: Transitions<ContentDraftReviewStatus> = {
+  REQUESTED: ["APPROVED", "RETURNED", "INVALIDATED"],
+  APPROVED: [],
+  RETURNED: [],
+  INVALIDATED: [],
 };
 
 /**

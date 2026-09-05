@@ -382,6 +382,7 @@ describe("DraftsTable", () => {
     authorKind: "HUMAN",
     findings: { blocking: 0, warning: 1, info: 0 },
     blocking: false,
+    approvedRevisionNumber: null,
     updatedAt: new Date("2026-09-05T09:00:00Z"),
     ...overrides,
   });
