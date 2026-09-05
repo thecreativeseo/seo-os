@@ -7,6 +7,7 @@ import { buildEvidenceId, parseEvidenceId } from "@/lib/evidence/id";
 import { reliabilityRank, renderEvidence, type Evidence } from "@/lib/evidence/types";
 import {
   CONTENT_BRIEF_POLICY,
+  CONTENT_DRAFT_POLICY,
   PAGE_DIAGNOSIS_POLICY,
   type RetrievalPolicyDefinition,
 } from "@/lib/evidence/retrieval-policy";
@@ -616,6 +617,150 @@ export async function assembleContentBriefPackage(
     policy,
     target: { type: "CONTENT_WORK_ITEM", id: item.id },
     purpose: "GENERATE_BRIEF",
+    candidates,
+    notes,
+    contextVersionId: contextVersion?.id ?? null,
+    windows,
+  });
+}
+
+/** What the draft assembler needs to know about the work and its brief. */
+export type DraftSubject = {
+  workItemId: string;
+  pageId: string | null;
+  keywordId: string | null;
+  topicId: string | null;
+  /** Pages the approved brief named as internal link targets. */
+  linkTargetPageIds: string[];
+};
+
+/**
+ * Assembles the evidence for writing one draft (docs/P4_SPEC.md §11; M4
+ * plan, D-M4-2). Purpose GENERATE_DRAFT, target the work item. Brand facts
+ * enter only when APPROVED as of now; the reconciliation of the pinned brief
+ * against this package happens in the draft service, not here.
+ */
+export async function assembleContentDraftPackage(
+  context: TenantContext,
+  subject: DraftSubject,
+  options: { policy?: RetrievalPolicyDefinition } = {},
+): Promise<AssembledPackage> {
+  const policy = options.policy ?? CONTENT_DRAFT_POLICY;
+  const { windows } = await resolveWebsiteWindows(context, "28d");
+
+  const candidates: string[] = [];
+  const notes: string[] = [];
+
+  const contextVersion = await prisma.businessContextVersion.findFirst({
+    where: { status: "APPROVED", businessContext: { websiteId: context.website.id } },
+    orderBy: { versionNumber: "desc" },
+  });
+  if (contextVersion) {
+    candidates.push(buildEvidenceId({ kind: "ctx", contextVersionId: contextVersion.id }));
+  } else {
+    notes.push(
+      "No approved Business Context. The draft has no canonical voice, claims or prohibitions.",
+    );
+  }
+
+  const goals = await prisma.businessGoal.findMany({
+    where: { ...websiteScope(context), status: "ACTIVE", archivedAt: null },
+    orderBy: { createdAt: "desc" },
+    take: policy.budgets.BUSINESS_GOAL?.max ?? 3,
+  });
+  candidates.push(...goals.map((goal) => buildEvidenceId({ kind: "goal", goalId: goal.id })));
+
+  const facts = await prisma.brandFact.findMany({
+    where: { ...websiteScope(context), approvalStatus: "APPROVED", archivedAt: null },
+    orderBy: { updatedAt: "desc" },
+    take: policy.budgets.BRAND_FACT?.max ?? 25,
+  });
+  candidates.push(...facts.map((fact) => buildEvidenceId({ kind: "fact", brandFactId: fact.id })));
+  if (facts.length === 0) {
+    notes.push("No approved Brand Facts. The draft may make no business claims.");
+  }
+
+  const rules = await prisma.seoRule.findMany({
+    where: { ...websiteScope(context), active: true, archivedAt: null },
+    orderBy: [{ severity: "asc" }, { createdAt: "desc" }],
+    take: policy.budgets.SEO_RULE?.max ?? 15,
+  });
+  candidates.push(...rules.map((rule) => buildEvidenceId({ kind: "rule", seoRuleId: rule.id })));
+
+  // The target page as it stands, and its keywords.
+  if (subject.pageId) {
+    const page = await prisma.page.findFirst({
+      where: { id: subject.pageId, ...websiteScope(context) },
+      select: { id: true },
+    });
+    if (page) {
+      const content = await prisma.pageContentSnapshot.findFirst({
+        where: { pageId: page.id, ...websiteScope(context) },
+        orderBy: { capturedAt: "desc" },
+      });
+      if (content) {
+        candidates.push(
+          buildEvidenceId({ kind: "content", pageId: page.id, contentHash: content.contentHash }),
+        );
+      } else {
+        notes.push(
+          "No content captured for the target page. A refresh cannot keep what it has not seen.",
+        );
+      }
+    } else {
+      notes.push("The target page is no longer available.");
+    }
+  } else {
+    notes.push("No target page: this is new content.");
+  }
+
+  // Pages a link may point at: the target's own ownerships, the brief's link
+  // targets, and whoever owns the primary keyword.
+  const pageIds = [
+    ...new Set(
+      [subject.pageId, ...subject.linkTargetPageIds].filter((id): id is string => Boolean(id)),
+    ),
+  ];
+  const ownershipWhere = [];
+  if (pageIds.length > 0) ownershipWhere.push({ pageId: { in: pageIds } });
+  if (subject.keywordId) ownershipWhere.push({ keywordId: subject.keywordId });
+  if (ownershipWhere.length > 0) {
+    const ownerships = await prisma.keywordPageOwnership.findMany({
+      where: { ...websiteScope(context), status: "ACTIVE", archivedAt: null, OR: ownershipWhere },
+      orderBy: [{ ownershipType: "asc" }, { assignedAt: "desc" }],
+      take: policy.budgets.KEYWORD_OWNERSHIP?.max ?? 12,
+    });
+    candidates.push(
+      ...ownerships.map((own) => buildEvidenceId({ kind: "own", ownershipId: own.id })),
+    );
+  }
+
+  if (subject.keywordId) {
+    const metrics = await prisma.keywordMetricsSnapshot.findMany({
+      where: { ...websiteScope(context), keywordId: subject.keywordId },
+      orderBy: { capturedAt: "desc" },
+      take: policy.budgets.KEYWORD_METRIC?.max ?? 5,
+    });
+    candidates.push(
+      ...metrics.map((metric) =>
+        buildEvidenceId({
+          kind: "kwm",
+          keywordId: metric.keywordId,
+          provider: metric.sourceProvider,
+          capturedAt: isoDate(metric.capturedAt),
+        }),
+      ),
+    );
+  }
+
+  if (subject.topicId) {
+    candidates.push(buildEvidenceId({ kind: "topic", topicId: subject.topicId, keywordId: null }));
+  }
+
+  return finalise(context, {
+    policy,
+    target: { type: "CONTENT_WORK_ITEM", id: subject.workItemId },
+    purpose: "GENERATE_DRAFT",
     candidates,
     notes,
     contextVersionId: contextVersion?.id ?? null,

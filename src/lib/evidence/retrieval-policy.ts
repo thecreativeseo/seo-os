@@ -183,9 +183,69 @@ export const CONTENT_BRIEF_POLICY: RetrievalPolicyDefinition = {
   ],
 };
 
+/**
+ * What a draft may be written from (docs/P4_SPEC.md §11; M4 plan, D-M4-2).
+ *
+ * Truth as of now, in full: the approved context, every approved fact, every
+ * active rule. The brief carries the piece's purpose and structure and is
+ * pinned by id; this package decides which of the brief's claims are still
+ * usable. Then the material: the target page as it stands, the pages the
+ * brief named as link targets, the keyword and its demand. Nothing else - a
+ * draft does not re-diagnose.
+ */
+export const CONTENT_DRAFT_POLICY: RetrievalPolicyDefinition = {
+  name: "content-draft",
+  version: 1,
+  description:
+    "Evidence gathered for writing one draft: the approved context, every approved " +
+    "fact and active rule as of now, the target page as it stands, the pages the " +
+    "brief links to, and the keyword the piece serves.",
+  windowDays: 28,
+  maxEvidence: 80,
+  maxContentChars: 12_000,
+  budgets: {
+    BUSINESS_CONTEXT: {
+      max: 1,
+      rationale: "The current approved version only; its voice, claims and prohibitions.",
+    },
+    BUSINESS_GOAL: { max: 3, rationale: "What the piece is for." },
+    BRAND_FACT: {
+      max: 25,
+      rationale: "Every approved fact: the only claims the draft may make.",
+    },
+    SEO_RULE: {
+      max: 15,
+      rationale: "Every active rule, so the draft is held to what applies now.",
+    },
+    PAGE_CONTENT: {
+      max: 1,
+      rationale:
+        "The target page as it stands, in full, so a refresh changes it rather than restarts it.",
+    },
+    KEYWORD_OWNERSHIP: {
+      max: 12,
+      rationale: "The target page's keywords and the pages the brief links to, by path.",
+    },
+    KEYWORD_METRIC: {
+      max: 5,
+      rationale: "Demand for the primary keyword, for emphasis not figures.",
+    },
+    TOPIC_MAPPING: { max: 3, rationale: "The topic, for context." },
+  },
+  rules: [
+    "Business Context: the current APPROVED version, never a draft.",
+    "Brand Facts: APPROVED only, as of drafting time. A fact revoked since the brief was approved is absent, and the brief's claim on it is stale.",
+    "SEO Rules: every active rule as of drafting time.",
+    "Page: the target page's latest content snapshot, in full up to the character cap.",
+    "Links: ownership records for the pages the brief named as targets, so each has a path and an ID.",
+    "Everything is scoped to this website. Nothing else is reachable.",
+  ],
+};
+
 export const RETRIEVAL_POLICIES: readonly RetrievalPolicyDefinition[] = [
   PAGE_DIAGNOSIS_POLICY,
   CONTENT_BRIEF_POLICY,
+  CONTENT_DRAFT_POLICY,
 ];
 
 export function findPolicy(name: string, version?: number): RetrievalPolicyDefinition | null {

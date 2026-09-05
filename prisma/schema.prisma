@@ -2625,27 +2625,36 @@ model ContentDraft {
 /// Never overwritten, never deleted (§10): a revision is inserted once. The
 /// provenance check in SQL requires exactly one author, run or person.
 model ContentRevision {
-  id                String   @id @default(uuid()) @db.Uuid
-  websiteId         String   @map("website_id") @db.Uuid
-  contentDraftId    String   @map("content_draft_id") @db.Uuid
-  revisionNumber    Int      @map("revision_number")
-  title             String
-  slug              String?
-  excerpt           String?
-  bodyMarkdown      String   @map("body_markdown")
+  id                     String   @id @default(uuid()) @db.Uuid
+  websiteId              String   @map("website_id") @db.Uuid
+  contentDraftId         String   @map("content_draft_id") @db.Uuid
+  revisionNumber         Int      @map("revision_number")
+  title                  String
+  slug                   String?
+  excerpt                String?
+  bodyMarkdown           String   @map("body_markdown")
   /// The exact HTML sent to the CMS, when one was.
-  bodyHtml          String?  @map("body_html")
-  metaTitle         String?  @map("meta_title")
-  metaDescription   String?  @map("meta_description")
-  schemaJson        Json?    @map("schema_json")
-  changeSummary     String   @map("change_summary")
+  bodyHtml               String?  @map("body_html")
+  metaTitle              String?  @map("meta_title")
+  metaDescription        String?  @map("meta_description")
+  schemaJson             Json?    @map("schema_json")
+  changeSummary          String   @map("change_summary")
   /// sha-256 over the canonical content fields (src/lib/execution/hash.ts).
   /// Every approval binds to it.
-  contentHash       String   @map("content_hash")
-  evidencePackageId String?  @map("evidence_package_id") @db.Uuid
-  createdByAiRunId  String?  @map("created_by_ai_run_id") @db.Uuid
-  createdByUserId   String?  @map("created_by_user_id") @db.Uuid
-  createdAt         DateTime @default(now()) @map("created_at")
+  contentHash            String   @map("content_hash")
+  evidencePackageId      String?  @map("evidence_package_id") @db.Uuid
+  createdByAiRunId       String?  @map("created_by_ai_run_id") @db.Uuid
+  createdByUserId        String?  @map("created_by_user_id") @db.Uuid
+  createdAt              DateTime @default(now()) @map("created_at")
+  /// M4: the revision this one was written from - the lineage a diff needs.
+  basedOnRevisionNumber  Int?     @map("based_on_revision_number")
+  /// M4: the claims the draft makes, each with its fact's evidence ID or null.
+  claimsJson             Json?    @map("claims_json")
+  /// M4: what the server found on the way in - prohibited phrases, unsupported figures, removed links.
+  constraintFindingsJson Json?    @map("constraint_findings_json")
+  wordCount              Int?     @map("word_count")
+  /// M4: idempotency. The token the generating request carried; a retry with the same token returns this row.
+  generationToken        String?  @map("generation_token")
 
   website           Website           @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   draft             ContentDraft      @relation("DraftRevisions", fields: [contentDraftId], references: [id], onDelete: Cascade)
