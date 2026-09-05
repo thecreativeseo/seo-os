@@ -1,5 +1,6 @@
 import type { GenerateStructuredRequest } from "@/lib/ai/provider";
 import type { ContentBriefOutput } from "@/lib/ai/schemas/content-brief";
+import type { ContentDraftOutput } from "@/lib/ai/schemas/content-draft";
 import { useStubProvider as installStubProvider, resetProvider } from "@/server/ai/registry";
 import type { TenantContext } from "@/server/auth/guards";
 import { prisma } from "@/server/db/prisma";
@@ -13,6 +14,7 @@ import {
   saveBrief,
   type BriefInput,
 } from "@/server/services/content-brief";
+import { generateRevision, startDraft } from "@/server/services/content-draft";
 import type { ContentWorkItem } from "@/generated/prisma/client";
 
 /**
@@ -42,6 +44,8 @@ export type P4DemoResult = {
   newContentItemId: string;
   startedFromP3: number;
   briefs: { version: number; status: string; workItemId: string }[];
+  /** M4.2: the refresh draft's revisions - one clean, one deliberately flagged. */
+  revisions: { revisionNumber: number; blocking: boolean }[];
 };
 
 const DEFAULT_REFRESH_PATH = "/blog/cohort-analysis-guide";
@@ -119,6 +123,81 @@ function scriptFor(request: GenerateStructuredRequest<unknown>): ContentBriefOut
     secondary_keyword_evidence_ids: owns.slice(0, 1),
     brand_voice_notes: "Direct, specific, no hype.",
     missing_evidence: isNew ? ["No page exists yet, so there is no baseline to refresh."] : [],
+  };
+}
+
+/**
+ * The scripted draft for the refresh story. The first pass is what a good
+ * model does with the brief; the second is deliberately bad - a claim the
+ * context prohibits, a figure nobody approved, a link off the site - so the
+ * stored, flagged revision shows what the server catches on the way in.
+ */
+function draftScriptFor(
+  request: GenerateStructuredRequest<unknown>,
+  pass: number,
+): ContentDraftOutput {
+  const ids = citableIds(request);
+  const facts = byKind(ids, "fact");
+  const owns = byKind(ids, "own");
+  const good = pass === 1;
+
+  const body = good
+    ? [
+        "# Cohort analysis, from first cohort to first decision",
+        "",
+        "## What a cohort is",
+        "",
+        "A cohort is a group of users who share a starting moment. Comparing cohorts shows whether the product is getting better at keeping people, week by week.",
+        "",
+        "## Walkthrough",
+        "",
+        "Pick a start event, group users by the week they did it, and count how many come back in each following week. The curve that falls and flattens is your retention.",
+        "",
+        "## Choosing a tool",
+        "",
+        "A spreadsheet works for one product and one question. Past that, a tool that refreshes cohorts on its own saves the week you would spend rebuilding them. See [cohort reports](/product/cohort-reports).",
+      ].join("\n")
+    : [
+        "# Cohort analysis, guaranteed to lift retention",
+        "",
+        "## What a cohort is",
+        "",
+        "Trusted by 10,000 businesses, our cohort reports cut churn by 40% in the first month. Unlike the competitor teardowns you will read elsewhere, this one is honest - see [this study](https://research.example/cohorts) for proof.",
+        "",
+        "## Walkthrough",
+        "",
+        "Pick a start event and group users by the week they did it.",
+      ].join("\n");
+
+  return {
+    title: good
+      ? "Cohort analysis, from first cohort to first decision"
+      : "Cohort analysis, guaranteed to lift retention",
+    slug: "cohort-analysis-guide",
+    excerpt: "How to run a cohort analysis and decide whether you need a tool for it.",
+    meta_title: good
+      ? "Cohort Analysis Guide | Investor Demo"
+      : "Cohort Analysis Guide, Guaranteed Results, Trusted by Thousands of Teams",
+    meta_description: "Set up a cohort, read the retention curve, and choose a tool.",
+    body_markdown: body,
+    claims: good
+      ? facts.slice(0, 1).map((evidence_id) => ({
+          text: "Claim as stated in the approved brand fact",
+          evidence_id,
+        }))
+      : [
+          { text: "Trusted by 10,000 businesses", evidence_id: null },
+          {
+            text: "Cut churn by 40% in the first month",
+            evidence_id: "fact:00000000-0000-4000-8000-0000000000ff",
+          },
+        ],
+    internal_links_used: good
+      ? owns.slice(0, 1).map((evidence_id) => ({ evidence_id, anchor_text: "cohort reports" }))
+      : [],
+    sections_covered: ["What a cohort is", "Walkthrough", "Choosing a tool"],
+    open_questions: good ? [] : ["A verified customer count, if one is ever to be quoted."],
+    change_summary: good ? "First draft from the approved brief." : "Second pass, regenerated.",
   };
 }
 
@@ -220,7 +299,16 @@ export async function seedP4Demo(
     }
   }
 
-  installStubProvider({ respond: scriptFor });
+  let draftPasses = 0;
+  installStubProvider({
+    respond: (request) => {
+      if (request.schemaName === "content_draft") {
+        draftPasses += 1;
+        return draftScriptFor(request, draftPasses);
+      }
+      return scriptFor(request);
+    },
+  });
 
   try {
     // Story 1: refresh - v1 approved, edited into v2, v2 approved, v1 superseded.
@@ -268,6 +356,16 @@ export async function seedP4Demo(
     if (firstP3) {
       await generateBrief(context, firstP3.id);
     }
+
+    // M4.2: the refresh item drafts from its approved brief - a clean first
+    // revision, then a deliberately bad second one that is stored and flagged.
+    const { draft } = await startDraft(context, refreshItem.id);
+    for (const token of ["demo-refresh-1", "demo-refresh-2"]) {
+      const outcome = await generateRevision(context, draft.id, { generationToken: token });
+      if (!outcome.ok) {
+        throw new DemoSeedError(`The refresh draft failed: ${outcome.message}`, "run_failed");
+      }
+    }
   } finally {
     resetProvider();
   }
@@ -278,6 +376,12 @@ export async function seedP4Demo(
     select: { version: true, status: true, contentWorkItemId: true },
   });
 
+  const revisions = await prisma.contentRevision.findMany({
+    where: { websiteId: context.website.id, draft: { contentWorkItemId: refreshItem.id } },
+    orderBy: { revisionNumber: "asc" },
+    select: { revisionNumber: true, constraintFindingsJson: true },
+  });
+
   return {
     refreshItemId: refreshItem.id,
     newContentItemId: newItem.id,
@@ -286,6 +390,10 @@ export async function seedP4Demo(
       version: row.version,
       status: row.status,
       workItemId: row.contentWorkItemId,
+    })),
+    revisions: revisions.map((row) => ({
+      revisionNumber: row.revisionNumber,
+      blocking: Boolean((row.constraintFindingsJson as { blocking?: boolean } | null)?.blocking),
     })),
   };
 }

@@ -23,6 +23,12 @@ import {
   saveBrief,
   type BriefInput,
 } from "@/server/services/content-brief";
+import {
+  generateRevision,
+  getDraftForWorkItem,
+  getRevision,
+  startDraft,
+} from "@/server/services/content-draft";
 
 /**
  * P4 tenant isolation (P4_ACCEPTANCE_CRITERIA, "Security attack tests").
@@ -193,5 +199,26 @@ describe("briefs across tenants", () => {
     const untouched = await prisma.contentBrief.findUniqueOrThrow({ where: { id: b.briefId } });
     expect(untouched.status).toBe("DRAFT");
     expect(untouched.title).toBe("A brief");
+  });
+});
+
+describe("drafts across tenants", () => {
+  it("cannot be started, generated, or read for another tenant's work item", async () => {
+    // B's brief is approved by B, so B can draft; A must still see nothing.
+    await approveBrief(b, b.briefId);
+    const { draft } = await startDraft(b, b.itemId);
+
+    await expect(startDraft(a, b.itemId)).rejects.toMatchObject({ code: "not_found" });
+    await expect(generateRevision(a, draft.id, { generationToken: "x" })).rejects.toMatchObject({
+      code: "not_found",
+    });
+    expect(await getDraftForWorkItem(a, b.itemId)).toBeNull();
+    expect(await getDraftForWorkItem(b, b.itemId)).not.toBeNull();
+
+    const revisionCount = await prisma.contentRevision.count({
+      where: { contentDraftId: draft.id },
+    });
+    expect(revisionCount).toBe(0);
+    expect(await getRevision(a, crypto.randomUUID())).toBeNull();
   });
 });

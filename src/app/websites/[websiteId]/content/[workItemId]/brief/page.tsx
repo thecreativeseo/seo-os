@@ -191,6 +191,20 @@ export default async function BriefPage({
                 label="Generate a new version"
               />
             ) : null}
+            {selected.status === "APPROVED" ? (
+              <p className="text-sm">
+                <Link
+                  href={`/websites/${websiteId}/content/${item.id}/draft`}
+                  className="font-medium hover:underline"
+                >
+                  Go to the draft →
+                </Link>
+                <span className="text-muted-foreground">
+                  {" "}
+                  Drafting starts from this approved version.
+                </span>
+              </p>
+            ) : null}
           </section>
 
           {/* --------------------------------------------------- Source */}

@@ -83,6 +83,8 @@ async function makeTenant(label: string, isDemo: boolean): Promise<TenantContext
       category: "Claims",
       rule: "Never quote customer counts.",
       severity: "BLOCKING",
+      // A machine check, so the deliberately bad draft pass is blocked by a rule.
+      checkJson: { kind: "forbidden_phrase", phrase: "Trusted by" },
     },
   });
 
@@ -134,8 +136,21 @@ describe("the P4 demo seed", () => {
       expect(refreshBriefs[0]!.createdByAiRunId).not.toBeNull();
       expect(refreshBriefs[1]!.createdByUserId).toBe(tenant.user.id);
 
-      // Nothing downstream: no drafts, no executions.
-      expect(await prisma.contentDraft.count({ where: { websiteId: tenant.website.id } })).toBe(0);
+      // M4.2: the refresh item has one draft, pinned to the approved v2, with a
+      // clean first revision and a deliberately flagged second one.
+      expect(first.revisions).toEqual([
+        { revisionNumber: 1, blocking: false },
+        { revisionNumber: 2, blocking: true },
+      ]);
+      const draft = await prisma.contentDraft.findFirstOrThrow({
+        where: { contentWorkItemId: refresh.id },
+        include: { revisions: { orderBy: { revisionNumber: "asc" } } },
+      });
+      expect(draft.briefId).toBe(refreshBriefs[1]!.id);
+      expect(draft.status).toBe("DRAFTING");
+      expect(draft.revisions.map((row) => row.createdByAiRunId !== null)).toEqual([true, true]);
+      expect(draft.revisions[1]!.bodyMarkdown).not.toContain("https://research.example");
+      expect(await prisma.contentDraft.count({ where: { contentWorkItemId: created.id } })).toBe(0);
 
       // Run again: the stories are rebuilt, not duplicated.
       const second = await seedP4Demo(tenant);

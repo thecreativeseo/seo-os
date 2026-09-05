@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { getContentWorkItem } from "@/server/services/content-work";
 import { currentBrief, listBriefVersions } from "@/server/services/content-brief";
+import { getDraftForWorkItem } from "@/server/services/content-draft";
 import { REQUIRED, hasRole } from "@/server/auth/roles";
 import { PageHeader } from "@/components/governance/primitives";
 import { DemoBadge } from "@/components/metrics/primitives";
@@ -27,9 +28,10 @@ export default async function ContentWorkItemPage({
   const item = await getContentWorkItem(context, workItemId);
   if (!item) notFound();
 
-  const [brief, versions] = await Promise.all([
+  const [brief, versions, draftView] = await Promise.all([
     currentBrief(context, item.id),
     listBriefVersions(context, item.id),
+    getDraftForWorkItem(context, item.id),
   ]);
   const awaiting = versions.filter((row) => row.status === "AWAITING_REVIEW").length;
   const canWrite = hasRole(context.membership.role, REQUIRED.WRITE);
@@ -167,11 +169,51 @@ export default async function ContentWorkItemPage({
         )}
       </section>
 
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-sm font-medium">Draft</h2>
+          <Link
+            href={`/websites/${websiteId}/content/${item.id}/draft`}
+            className="text-sm hover:underline"
+          >
+            {draftView ? "Open the draft" : "Draft"}
+          </Link>
+        </div>
+        {draftView ? (
+          <div className="border-border space-y-2 rounded-lg border p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusBadge status={draftView.draft.status} />
+              <span className="text-muted-foreground text-xs">
+                pinned to brief v{draftView.brief.version} · {draftView.revisionCount} revision
+                {draftView.revisionCount === 1 ? "" : "s"}
+              </span>
+            </div>
+            {draftView.current ? (
+              <p className="text-sm font-medium">{draftView.current.title}</p>
+            ) : (
+              <p className="text-muted-foreground text-sm">No revision generated yet.</p>
+            )}
+            {draftView.briefMismatch ? (
+              <p className="text-muted-foreground text-xs">
+                A newer brief version (v{draftView.briefMismatch.approvedVersion}) is approved; the
+                draft stays on v{draftView.brief.version}.
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <p className="border-border text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
+            {brief?.status === "APPROVED"
+              ? "No draft yet. Start one from the approved brief."
+              : "A draft can start once a brief version is approved."}
+          </p>
+        )}
+      </section>
+
       <section className="space-y-2">
         <h2 className="text-sm font-medium">Next</h2>
         <p className="text-muted-foreground border-border rounded-lg border border-dashed p-4 text-sm">
           {brief?.status === "APPROVED"
-            ? "Drafting from the approved brief arrives with the next milestone; nothing starts by itself."
+            ? "Editing, revision history and review arrive with the next milestone; nothing starts by itself."
             : "An approved brief comes first. Drafting, QA and CMS steps follow in later milestones."}
         </p>
       </section>
