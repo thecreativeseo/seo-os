@@ -173,7 +173,11 @@ describe("AnthropicProvider", () => {
         new Response(
           JSON.stringify({
             content: [
-              { type: "tool_use", name: "page_diagnosis", input: { verdict: "ok", evidenceIds: [] } },
+              {
+                type: "tool_use",
+                name: "page_diagnosis",
+                input: { verdict: "ok", evidenceIds: [] },
+              },
             ],
             usage: { input_tokens: 100, output_tokens: 20 },
           }),
@@ -319,16 +323,27 @@ describe("AnthropicProvider", () => {
   });
 
   it("refuses a prose answer", async () => {
-    // Truncated mid-answer, or ignored the tool. Either way there is nothing to
-    // store, and inferring a shape from prose is how evidence IDs go missing.
+    // Ignored the tool. There is nothing to store, and inferring a shape from
+    // prose is how evidence IDs go missing.
     ok({
       content: [{ type: "text", text: "The page looks fine to me." }],
-      stop_reason: "max_tokens",
+      stop_reason: "end_turn",
     });
 
     const result = await new AnthropicProvider("k", "m").generateStructured(baseRequest);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error.code).toBe("invalid_output");
+  });
+
+  it("reports an answer cut off by the output budget as truncated, not as a bad shape", async () => {
+    ok({
+      content: [{ type: "text", text: "The page looks" }],
+      stop_reason: "max_tokens",
+    });
+
+    const result = await new AnthropicProvider("k", "m").generateStructured(baseRequest);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe("output_truncated");
   });
 
   it("reports a refusal as a refusal", async () => {

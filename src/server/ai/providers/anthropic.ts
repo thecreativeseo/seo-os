@@ -4,8 +4,12 @@ import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   DEFAULT_TIMEOUT_MS,
   aiError,
+  summariseIssues,
   wrapUntrusted,
+  type AiDiagnostic,
+  type AiErrorCode,
   type AiModelProvider,
+  type AiUsage,
   type EmbedRequest,
   type EmbedResult,
   type GenerateStructuredRequest,
@@ -21,16 +25,22 @@ import {
  * the registry.
  *
  * Structured output is obtained by declaring a single tool whose input schema is
- * the answer's schema and requiring the model to call it. Asking for JSON in the
- * prose and parsing what comes back works until the day it does not, and the day
- * it does not is the day a diagnosis silently loses its evidence IDs. The schema
- * is generated from the caller's Zod schema, so validation and the tool contract
- * cannot drift apart.
+ * the answer's schema and requiring the model to call it, in strict mode: the
+ * provider then constrains generation to the schema's structure - objects are
+ * objects, arrays are arrays, enums are enums, required keys are present. Plain
+ * tool use turned out to be best-effort; a current model returned nine of ten
+ * array fields as strings in two attempts out of three. Strict mode accepts a
+ * subset of JSON Schema, so the tool schema is a projection of the canonical
+ * Zod schema with the unsupported keywords removed. The canonical schema still
+ * validates every answer afterwards: strict mode is an extra generation
+ * constraint, never a replacement for server validation, and a shape that
+ * "nearly" matches is not stored.
  *
  * The API key is read at call time and never stored on the instance beyond this
  * module, never logged, and never included in an error. Provider response bodies
  * are not stored either: they echo the request, and the request contains the
- * evidence.
+ * evidence. What a failure may carry is a structural diagnostic - stop reason,
+ * block kinds, usage, and validation issues as paths, codes, types and lengths.
  */
 
 const API_URL = "https://api.anthropic.com/v1/messages";
@@ -54,13 +64,34 @@ const responseSchema = z.object({
 });
 
 /** HTTP status to our own vocabulary. The provider's message never travels. */
-function codeForStatus(status: number) {
-  if (status === 401 || status === 403) return "unauthorized" as const;
-  if (status === 429) return "rate_limited" as const;
-  if (status === 529) return "overloaded" as const;
-  if (status >= 500) return "provider_error" as const;
-  return "provider_error" as const;
+function codeForStatus(status: number): AiErrorCode {
+  if (status === 401 || status === 403) return "unauthorized";
+  if (status === 429) return "rate_limited";
+  if (status === 529) return "overloaded";
+  return "provider_error";
 }
+
+/**
+ * JSON Schema keywords strict tool use does not accept. They express limits the
+ * canonical Zod schema enforces after the answer arrives, so nothing is lost
+ * by leaving them out of what the provider sees.
+ */
+export const STRICT_UNSUPPORTED_KEYWORDS: readonly string[] = [
+  "default",
+  "minLength",
+  "maxLength",
+  "minItems",
+  "maxItems",
+  "uniqueItems",
+  "pattern",
+  "format",
+  "minimum",
+  "maximum",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
+  "multipleOf",
+  "$schema",
+];
 
 export class AnthropicProvider implements AiModelProvider {
   readonly name = "anthropic";
@@ -73,13 +104,27 @@ export class AnthropicProvider implements AiModelProvider {
   async generateStructured<T>(
     request: GenerateStructuredRequest<T>,
   ): Promise<GenerateStructuredResult<T>> {
-    const usage = { inputTokens: null, outputTokens: null };
-    const fail = (code: Parameters<typeof aiError>[0]) => ({
+    const noUsage: AiUsage = { inputTokens: null, outputTokens: null };
+    const fail = (code: AiErrorCode, usage: AiUsage, diagnostic?: AiDiagnostic) => ({
       ok: false as const,
       error: aiError(code),
       usage,
       provider: this.name,
       model: this.model,
+      ...(diagnostic ? { diagnostic } : {}),
+    });
+    const diagnose = (
+      kind: AiDiagnostic["kind"],
+      usage: AiUsage,
+      fields: Partial<Omit<AiDiagnostic, "kind" | "usage">> = {},
+    ): AiDiagnostic => ({
+      kind,
+      httpStatus: null,
+      stopReason: null,
+      blockKinds: [],
+      issues: [],
+      ...fields,
+      usage,
     });
 
     // Trusted instruction and untrusted evidence go in separate turns, and the
@@ -103,6 +148,9 @@ export class AnthropicProvider implements AiModelProvider {
           name: request.schemaName,
           description: "Return the answer in this shape. This is the only way to answer.",
           input_schema: toToolSchema(request.schema),
+          // Constrained generation: the structure is enforced while the answer
+          // is written, not merely requested.
+          strict: true,
         },
       ],
       // Forced, not suggested: a prose answer is not an answer we can store.
@@ -110,10 +158,7 @@ export class AnthropicProvider implements AiModelProvider {
     };
 
     const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      request.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    );
+    const timeout = setTimeout(() => controller.abort(), request.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
     let response: Response;
     try {
@@ -130,6 +175,7 @@ export class AnthropicProvider implements AiModelProvider {
     } catch (error) {
       return fail(
         error instanceof Error && error.name === "AbortError" ? "timeout" : "unreachable",
+        noUsage,
       );
     } finally {
       clearTimeout(timeout);
@@ -137,34 +183,52 @@ export class AnthropicProvider implements AiModelProvider {
 
     if (!response.ok) {
       // The body is deliberately not read. It can contain the request, and the
-      // request contains the evidence.
-      return fail(codeForStatus(response.status));
+      // request contains the evidence. The status alone is the diagnostic.
+      return fail(
+        codeForStatus(response.status),
+        noUsage,
+        diagnose("provider_http_error", noUsage, { httpStatus: response.status }),
+      );
     }
 
     let payload: unknown;
     try {
       payload = await response.json();
     } catch {
-      return fail("invalid_output");
+      return fail(
+        "invalid_output",
+        noUsage,
+        diagnose("unparseable_response", noUsage, { httpStatus: response.status }),
+      );
     }
 
     const parsed = responseSchema.safeParse(payload);
-    if (!parsed.success) return fail("invalid_output");
+    if (!parsed.success) {
+      return fail(
+        "invalid_output",
+        noUsage,
+        diagnose("unparseable_response", noUsage, { httpStatus: response.status }),
+      );
+    }
 
-    const reported = {
+    const usage: AiUsage = {
       inputTokens: parsed.data.usage?.input_tokens ?? null,
       outputTokens: parsed.data.usage?.output_tokens ?? null,
     };
+    const stopReason = parsed.data.stop_reason ?? null;
+    const blockKinds = parsed.data.content.map((block) => block.type);
+    const base = { httpStatus: response.status, stopReason, blockKinds };
 
-    const withUsage = (code: Parameters<typeof aiError>[0]) => ({
-      ok: false as const,
-      error: aiError(code),
-      usage: reported,
-      provider: this.name,
-      model: this.model,
-    });
+    if (stopReason === "refusal") {
+      return fail("refused", usage, diagnose("refused", usage, base));
+    }
 
-    if (parsed.data.stop_reason === "refusal") return withUsage("refused");
+    // The output budget ran out. Whatever came back is incomplete, whether or
+    // not a tool block made it through, and is reported as such rather than as
+    // a shape mismatch.
+    if (stopReason === "max_tokens") {
+      return fail("output_truncated", usage, diagnose("output_truncated", usage, base));
+    }
 
     const toolUse = parsed.data.content.find(
       (block): block is { type: "tool_use"; name: string; input: unknown } =>
@@ -172,22 +236,28 @@ export class AnthropicProvider implements AiModelProvider {
     );
 
     if (!toolUse) {
-      // Ran out of tokens mid-answer, or answered in prose despite being told not
-      // to. Either way there is nothing to store.
-      return withUsage(
-        parsed.data.stop_reason === "max_tokens" ? "invalid_output" : "invalid_output",
-      );
+      // Answered in prose despite being told not to. There is nothing to store.
+      return fail("invalid_output", usage, diagnose("invalid_structured_output", usage, base));
     }
 
-    // The model's output is validated against the same schema the tool was built
-    // from. A shape that "nearly" matches is not stored.
+    // The model's output is validated against the canonical schema the tool
+    // schema was projected from. A shape that "nearly" matches is not stored.
     const value = request.schema.safeParse(toolUse.input);
-    if (!value.success) return withUsage("invalid_output");
+    if (!value.success) {
+      return fail(
+        "invalid_output",
+        usage,
+        diagnose("invalid_structured_output", usage, {
+          ...base,
+          issues: summariseIssues(value.error.issues, toolUse.input),
+        }),
+      );
+    }
 
     return {
       ok: true,
       value: value.data,
-      usage: reported,
+      usage,
       provider: this.name,
       model: this.model,
     };
@@ -218,14 +288,45 @@ export class AnthropicProvider implements AiModelProvider {
 }
 
 /**
- * Turns a Zod schema into a tool input schema.
+ * Turns a Zod schema into a strict tool input schema.
  *
- * `$schema` is dropped because the API rejects the key, and the root is forced to
- * an object because a tool's input always is one.
+ * The canonical schema is rendered as JSON Schema for its output type (so
+ * fields with defaults are required, as strict mode wants), then projected
+ * onto the subset strict tool use accepts: types, enums, constants, required
+ * lists, `additionalProperties: false`, item schemas and nullable unions
+ * survive; length, size, numeric and pattern constraints and defaults do not.
+ * Those still hold - the canonical schema checks them on the way back. The
+ * root is forced to an object because a tool's input always is one.
  */
 export function toToolSchema(schema: z.ZodType<unknown>): Record<string, unknown> {
   const json = z.toJSONSchema(schema, { io: "output" }) as Record<string, unknown>;
-  const { $schema: _ignored, ...rest } = json;
+  const projected = projectStrict(json) as Record<string, unknown>;
 
-  return { type: "object", ...rest };
+  return { type: "object", ...projected };
+}
+
+const UNSUPPORTED = new Set(STRICT_UNSUPPORTED_KEYWORDS);
+
+/** Removes unsupported keywords everywhere in a schema tree. */
+export function projectStrict(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(projectStrict);
+  if (node && typeof node === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      if (UNSUPPORTED.has(key)) continue;
+      // `properties` and `$defs` are maps keyed by user names, which may
+      // collide with keyword names; their values are schemas, their keys are not.
+      out[key] =
+        key === "properties" || key === "$defs"
+          ? Object.fromEntries(
+              Object.entries(value as Record<string, unknown>).map(([name, child]) => [
+                name,
+                projectStrict(child),
+              ]),
+            )
+          : projectStrict(value);
+    }
+    return out;
+  }
+  return node;
 }

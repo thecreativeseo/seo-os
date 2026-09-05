@@ -4,7 +4,7 @@ import {
   CONTENT_BRIEF_SCHEMA_VERSION,
   CONTENT_TYPES,
   SEARCH_INTENTS,
-  contentBriefSchema,
+  contentBriefSchemaV1,
 } from "@/lib/ai/schemas/content-brief";
 import { findPrompt } from "@/lib/ai/prompts/registry";
 import { CONTENT_BRIEF_POLICY, findPolicy } from "@/lib/evidence/retrieval-policy";
@@ -20,9 +20,9 @@ const minimal = {
   recommended_angle: "Compliance first, features second.",
 };
 
-describe("the content brief output schema", () => {
+describe("the content brief output schema, version 1", () => {
   it("accepts a minimal brief and fills the lists with empties", () => {
-    const parsed = contentBriefSchema.parse(minimal);
+    const parsed = contentBriefSchemaV1.parse(minimal);
     expect(parsed.key_questions).toEqual([]);
     expect(parsed.approved_claims).toEqual([]);
     expect(parsed.prohibited_claims).toEqual([]);
@@ -36,18 +36,20 @@ describe("the content brief output schema", () => {
 
   it("requires an evidence id on every claim, prohibition, rule and link", () => {
     expect(
-      contentBriefSchema.safeParse({ ...minimal, approved_claims: [{ text: "Trusted by 10,000" }] })
+      contentBriefSchemaV1.safeParse({
+        ...minimal,
+        approved_claims: [{ text: "Trusted by 10,000" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      contentBriefSchemaV1.safeParse({ ...minimal, prohibited_claims: [{ text: "No." }] }).success,
+    ).toBe(false);
+    expect(
+      contentBriefSchemaV1.safeParse({ ...minimal, seo_rule_constraints: [{ constraint: "x" }] })
         .success,
     ).toBe(false);
     expect(
-      contentBriefSchema.safeParse({ ...minimal, prohibited_claims: [{ text: "No." }] }).success,
-    ).toBe(false);
-    expect(
-      contentBriefSchema.safeParse({ ...minimal, seo_rule_constraints: [{ constraint: "x" }] })
-        .success,
-    ).toBe(false);
-    expect(
-      contentBriefSchema.safeParse({
+      contentBriefSchemaV1.safeParse({
         ...minimal,
         internal_link_targets: [{ anchor_text: "pricing", reason: "commercial" }],
       }).success,
@@ -55,15 +57,17 @@ describe("the content brief output schema", () => {
   });
 
   it("refuses unknown content types and intents rather than widening them", () => {
-    expect(contentBriefSchema.safeParse({ ...minimal, content_type: "WHITEPAPER" }).success).toBe(
+    expect(contentBriefSchemaV1.safeParse({ ...minimal, content_type: "WHITEPAPER" }).success).toBe(
       false,
     );
-    expect(contentBriefSchema.safeParse({ ...minimal, search_intent: "BUY" }).success).toBe(false);
+    expect(contentBriefSchemaV1.safeParse({ ...minimal, search_intent: "BUY" }).success).toBe(
+      false,
+    );
   });
 
   it("bounds every list, so a runaway answer cannot become a runaway row", () => {
     const tooMany = Array.from({ length: 13 }, (_, i) => `Question ${i}`);
-    expect(contentBriefSchema.safeParse({ ...minimal, key_questions: tooMany }).success).toBe(
+    expect(contentBriefSchemaV1.safeParse({ ...minimal, key_questions: tooMany }).success).toBe(
       false,
     );
   });

@@ -24,7 +24,9 @@ import type { z } from "zod";
  * **Its error messages are ours, never the provider's.** A provider's error body
  * frequently echoes the request back, and our request contains the evidence. So
  * an error carries a code from a fixed vocabulary and a message from a fixed
- * table. Provider response text is never stored and never surfaced.
+ * table. Provider response text is never stored and never surfaced. What a
+ * failure may carry, outside production, is a structural diagnostic: paths,
+ * codes, types and lengths, never values.
  */
 
 export type AiErrorCode =
@@ -38,6 +40,8 @@ export type AiErrorCode =
   | "unreachable"
   /** The provider answered, but not with something the schema accepts. */
   | "invalid_output"
+  /** The provider stopped before finishing the answer: the output budget ran out. */
+  | "output_truncated"
   /** The provider refused to answer. */
   | "refused"
   /** Anything else. Deliberately vague, because the detail is not ours to keep. */
@@ -59,6 +63,8 @@ export const AI_ERROR_MESSAGES: Record<AiErrorCode, string> = {
   timeout: "The AI provider did not respond in time.",
   unreachable: "Could not reach the AI provider.",
   invalid_output: "The AI provider returned a response that did not match the expected shape.",
+  output_truncated:
+    "The AI provider ran out of output budget before finishing the answer. Try again; if it keeps happening, the request is too large for one answer.",
   refused: "The AI provider declined to answer this request.",
   provider_error: "The AI provider returned an error.",
   unsupported: "This AI provider does not support that operation.",
@@ -85,6 +91,42 @@ export function aiError(code: AiErrorCode): AiError {
 export type AiUsage = {
   inputTokens: number | null;
   outputTokens: number | null;
+};
+
+/**
+ * One schema validation problem, described without its value: where, what
+ * kind, what was expected, and the type and size of what arrived. Enough to
+ * see "array expected, string received at key_questions" or "string of 485
+ * where at most 300 was allowed at missing_evidence.0" without ever seeing
+ * the 485 characters.
+ */
+export type AiValidationIssue = {
+  path: string;
+  code: string;
+  expected: string | null;
+  receivedType: string;
+  receivedLength: number | null;
+};
+
+/**
+ * A structural account of a failed structured-output call. Safe by
+ * construction: it carries no model text, no evidence, no prompt, and no
+ * provider message - only kinds, codes, counts and lengths. Logged outside
+ * production by the run service; never stored, never shown to a user.
+ */
+export type AiDiagnostic = {
+  kind:
+    | "invalid_structured_output"
+    | "output_truncated"
+    | "provider_http_error"
+    | "unparseable_response"
+    | "refused";
+  httpStatus: number | null;
+  stopReason: string | null;
+  /** The kinds of content blocks in the response, e.g. ["tool_use"] or ["text"]. */
+  blockKinds: string[];
+  usage: AiUsage;
+  issues: AiValidationIssue[];
 };
 
 export type GenerateStructuredRequest<T> = {
@@ -118,19 +160,25 @@ export type GenerateStructuredRequest<T> = {
 
 export type GenerateStructuredResult<T> =
   | { ok: true; value: T; usage: AiUsage; provider: string; model: string }
-  | { ok: false; error: AiError; usage: AiUsage; provider: string; model: string };
+  | {
+      ok: false;
+      error: AiError;
+      usage: AiUsage;
+      provider: string;
+      model: string;
+      /** Structure only. Present when the provider could say what went wrong. */
+      diagnostic?: AiDiagnostic;
+    };
 
 export type EmbedRequest = {
   texts: string[];
 };
 
 export type EmbedResult =
-  | { ok: true; vectors: number[][]; model: string; usage: AiUsage }
-  | { ok: false; error: AiError };
+  { ok: true; vectors: number[][]; model: string; usage: AiUsage } | { ok: false; error: AiError };
 
 export type HealthResult =
-  | { ok: true; provider: string; model: string }
-  | { ok: false; provider: string; error: AiError };
+  { ok: true; provider: string; model: string } | { ok: false; provider: string; error: AiError };
 
 export interface AiModelProvider {
   /** Stored on every AiRun, so a historical run can say what answered it. */
@@ -177,4 +225,63 @@ export function wrapUntrusted(data: string): string {
     data,
     "</untrusted_data>",
   ].join("\n");
+}
+
+/** The type of a value as a diagnostic word: "array", "null", "string", "object", "number" ... */
+export function diagnosticType(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+/** The size of a value where size means something: a string's length or an array's count. */
+export function diagnosticLength(value: unknown): number | null {
+  if (typeof value === "string" || Array.isArray(value)) return value.length;
+  return null;
+}
+
+/**
+ * Turns Zod issues into value-free issues. The value at each path is looked up
+ * only to name its type and size; nothing of it is copied.
+ */
+export function summariseIssues(
+  issues: readonly z.core.$ZodIssue[],
+  input: unknown,
+  limit = 40,
+): AiValidationIssue[] {
+  return issues.slice(0, limit).map((issue) => {
+    const at = issue.path.reduce<unknown>(
+      (value, key) =>
+        value && typeof value === "object"
+          ? (value as Record<string, unknown>)[String(key)]
+          : undefined,
+      input,
+    );
+    return {
+      path: issue.path.map(String).join(".") || "(root)",
+      code: issue.code,
+      expected: expectedOf(issue),
+      receivedType: diagnosticType(at),
+      receivedLength: diagnosticLength(at),
+    };
+  });
+}
+
+/** What an issue asked for, in one short word or bound - never the offending value. */
+function expectedOf(issue: z.core.$ZodIssue): string | null {
+  switch (issue.code) {
+    case "invalid_type":
+      return issue.expected;
+    case "too_big":
+      return `<= ${issue.maximum}`;
+    case "too_small":
+      return `>= ${issue.minimum}`;
+    case "invalid_value":
+      return `one of ${issue.values.length} allowed values`;
+    case "unrecognized_keys":
+      return `no keys beyond the schema (${issue.keys.length} unexpected)`;
+    default:
+      return null;
+  }
 }

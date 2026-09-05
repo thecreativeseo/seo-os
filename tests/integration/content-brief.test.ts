@@ -481,8 +481,8 @@ describe("generating a brief", () => {
     expect(version?.createdByAiRun).toMatchObject({
       id: outcome.run.id,
       provider: "stub",
-      promptTemplateVersion: 1,
-      outputSchemaVersion: "1",
+      promptTemplateVersion: 2,
+      outputSchemaVersion: "2",
       status: "SUCCEEDED",
     });
     expect(version?.evidencePackage).toMatchObject({
@@ -691,5 +691,23 @@ describe("who may do what", () => {
 
     const still = await prisma.contentBrief.findUniqueOrThrow({ where: { id: v1.id } });
     expect(still.status).toBe("DRAFT");
+  });
+});
+
+describe("provenance after the strict-output fix", () => {
+  it("records prompt v2 and output schema v2 on the run, and the brief still persists", async () => {
+    const tenant = await makeTenant("prov2");
+    const other = await makeTenant("prov2-other");
+    const item = await makeItem(tenant);
+    useStubProvider({ responses: [answer(tenant, ids(other).fact)] });
+
+    const outcome = await generateBrief(tenant, item.id);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.run.promptTemplateVersion).toBe(2);
+    expect(outcome.run.outputSchemaVersion).toBe("2");
+    expect(outcome.run.status).toBe("SUCCEEDED");
+    expect(outcome.brief.createdByAiRunId).toBe(outcome.run.id);
+    expect(outcome.brief.version).toBe(1);
   });
 });

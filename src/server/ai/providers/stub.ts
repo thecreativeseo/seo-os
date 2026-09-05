@@ -1,5 +1,6 @@
 import {
   aiError,
+  summariseIssues,
   wrapUntrusted,
   type AiErrorCode,
   type AiModelProvider,
@@ -25,7 +26,8 @@ import {
  *
  * It validates its own scripted answers against the caller's schema, so a fixture
  * that drifts away from the schema fails in the test that uses it rather than
- * quietly returning a shape the rest of the code cannot read.
+ * quietly returning a shape the rest of the code cannot read - and says where,
+ * through the same value-free diagnostic a real provider would attach.
  *
  * What it never does is invent an answer. With no script it fails with
  * `not_configured`, because a stub that improvised would put fabricated findings
@@ -111,8 +113,19 @@ export class StubProvider implements AiModelProvider {
 
     if (!parsed.success) {
       // A fixture that no longer matches its schema. Surfaced as invalid_output
-      // rather than cast, so the test that relies on it is the test that fails.
-      return fail("invalid_output");
+      // rather than cast, so the test that relies on it is the test that fails,
+      // with the same structure-only diagnostic a real provider would attach.
+      return {
+        ...fail("invalid_output"),
+        diagnostic: {
+          kind: "invalid_structured_output",
+          httpStatus: null,
+          stopReason: "tool_use",
+          blockKinds: ["tool_use"],
+          usage,
+          issues: summariseIssues(parsed.error.issues, scripted),
+        },
+      };
     }
 
     return { ok: true, value: parsed.data, usage, provider: this.name, model: this.model };

@@ -2,6 +2,7 @@ import { prisma } from "@/server/db/prisma";
 import { recordAudit } from "@/server/audit/record";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
 import { resolveProvider } from "@/server/ai/registry";
+import { diagnosticEventFor, logAiDiagnostic } from "@/server/ai/diagnostics";
 import { activeTemplate } from "@/server/services/prompt-template";
 import type { AiError, AiUsage, GenerateStructuredRequest } from "@/lib/ai/provider";
 import { Prisma } from "@/generated/prisma/client";
@@ -26,7 +27,9 @@ import type { z } from "zod";
  * or anything from a provider's error body. The run points at the prompt template
  * and the evidence package, both of which are stored and re-readable. Copying the
  * inputs in would duplicate the evidence into a table with different retention,
- * and provider error text echoes the request.
+ * and provider error text echoes the request. Outside production, a failed call
+ * is additionally logged as a structural diagnostic - paths, codes, types and
+ * lengths, never values - so a developer can see which field came back wrong.
  */
 
 /**
@@ -172,6 +175,27 @@ export async function runAgent<T>(
       // Our message, from the fixed table. Never the provider's.
       errorSummary: result.error.message,
     });
+
+    // Structure only, outside production only: which field, what kind, what
+    // size. Nothing the provider or the model said.
+    if (result.diagnostic) {
+      logAiDiagnostic({
+        event: diagnosticEventFor(result.diagnostic.kind),
+        runId: failed.id,
+        provider: failed.provider,
+        model: failed.model,
+        agentType: failed.agentType,
+        taskType: failed.taskType,
+        promptVersion: failed.promptTemplateVersion,
+        outputSchemaVersion: failed.outputSchemaVersion,
+        errorCode: result.error.code,
+        httpStatus: result.diagnostic.httpStatus,
+        stopReason: result.diagnostic.stopReason,
+        blockKinds: result.diagnostic.blockKinds,
+        usage: result.diagnostic.usage,
+        issues: result.diagnostic.issues,
+      });
+    }
 
     return { ok: false, run: failed, error: result.error };
   }
