@@ -1130,3 +1130,23 @@ export function changedFields(
   }
   return changed;
 }
+
+export type BriefListRow = Prisma.ContentBriefGetPayload<{
+  include: typeof BRIEF_INCLUDE & {
+    contentWorkItem: { select: { id: true; title: true; type: true; status: true } };
+    _count: { select: { drafts: true } };
+  };
+}>;
+
+/** Every brief version of the website, newest first, with its work item and pinned drafts (M4.4). */
+export async function listBriefs(context: TenantContext): Promise<BriefListRow[]> {
+  return prisma.contentBrief.findMany({
+    where: websiteScope(context),
+    orderBy: [{ createdAt: "desc" }, { version: "desc" }],
+    include: {
+      ...BRIEF_INCLUDE,
+      contentWorkItem: { select: { id: true, title: true, type: true, status: true } },
+      _count: { select: { drafts: true } },
+    },
+  });
+}

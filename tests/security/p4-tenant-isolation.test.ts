@@ -19,6 +19,7 @@ import {
   getBrief,
   getBriefEvidence,
   listBriefVersions,
+  listBriefs,
   requestBriefReview,
   saveBrief,
   type BriefInput,
@@ -26,9 +27,11 @@ import {
 import {
   compareRevisions,
   generateRevision,
+  getBriefPanel,
   getDraft,
   getDraftForWorkItem,
   getRevision,
+  listDrafts,
   listDraftsForWorkItem,
   listRevisions,
   requestDraftReview,
@@ -302,5 +305,24 @@ describe("revisions, review and supersession across tenants", () => {
     const untouched = await prisma.contentDraft.findUniqueOrThrow({ where: { id: bDraft.id } });
     expect(untouched.status).toBe("AWAITING_EDITOR_REVIEW");
     expect(await prisma.contentRevision.count({ where: { contentDraftId: bDraft.id } })).toBe(2);
+  });
+});
+
+describe("the drafts and briefs lists across tenants", () => {
+  it("lists only the tenant's own drafts and briefs, and shows no brief panel for another tenant's brief", async () => {
+    const mine = await listDrafts(b);
+    expect(mine.length).toBeGreaterThan(0);
+    expect(mine.every((row) => row.workItemId === b.itemId)).toBe(true);
+
+    const theirs = await listDrafts(a);
+    expect(theirs.map((row) => row.id)).not.toContain(mine[0]!.id);
+    expect(theirs.every((row) => row.workItemId === a.itemId)).toBe(true);
+
+    expect(await getBriefPanel(a, b.briefId)).toBeNull();
+    expect(await getBriefPanel(b, b.briefId)).not.toBeNull();
+
+    const briefs = await listBriefs(a);
+    expect(briefs.map((row) => row.id)).not.toContain(b.briefId);
+    expect(briefs.map((row) => row.id)).toContain(a.briefId);
   });
 });

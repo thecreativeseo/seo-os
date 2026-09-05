@@ -18,6 +18,13 @@ const PRIMARY =
 const SECONDARY =
   "border-border inline-flex h-9 items-center rounded-md border px-4 text-sm font-medium disabled:opacity-60";
 
+/** Asks once before an act that changes state for other people. */
+function confirmOr(message: string) {
+  return (event: React.FormEvent<HTMLFormElement>) => {
+    if (typeof window !== "undefined" && !window.confirm(message)) event.preventDefault();
+  };
+}
+
 function Feedback({ state }: { state: DraftActionState }) {
   if (!state.error) return null;
   const soft =
@@ -91,7 +98,13 @@ export function StartFromBriefButton({
   const [state, action, pending] = useActionState(startFromBriefAction, initial);
 
   return (
-    <form action={action} className="space-y-2">
+    <form
+      action={action}
+      className="space-y-2"
+      onSubmit={confirmOr(
+        `Start a new draft from Brief v${version}? The current draft and all its revisions are kept and marked superseded. Nothing is copied across.`,
+      )}
+    >
       <input type="hidden" name="__websiteId" value={websiteId} />
       <input type="hidden" name="__workItemId" value={workItemId} />
       <input type="hidden" name="__briefId" value={briefId} />
@@ -139,9 +152,10 @@ export function GenerateRevisionButton({
         <button type="submit" disabled={pending} className={PRIMARY} aria-busy={pending}>
           {pending ? "Generating… this can take a minute or two" : label}
         </button>
-        <span className="text-muted-foreground text-xs">
-          Writes from the approved brief and the facts approved right now. The result is a draft
-          revision for a person to inspect - never approved by being written.
+        <span className="text-muted-foreground text-xs" aria-live="polite">
+          {pending
+            ? "Assembling fresh evidence and writing from the brief. The page updates when the revision is stored."
+            : "Writes from the approved brief and the facts approved right now. The result is a revision for a person to inspect - never approved by being written."}
         </span>
       </div>
       <Feedback state={state} />
@@ -149,33 +163,46 @@ export function GenerateRevisionButton({
   );
 }
 
-/** Sends the current revision for editorial review. Refused while it has blocking findings. */
+/** Sends the current revision for editorial review. Disabled, with the reason, when it would be refused. */
 export function RequestReviewButton({
   websiteId,
   workItemId,
   draftId,
   blocked,
+  reason,
 }: {
   websiteId: string;
   workItemId: string;
   draftId: string;
-  /** The page already knows the current revision is blocked; the button says so. */
+  /** The page already knows the request would be refused; the button says why. */
   blocked: boolean;
+  reason?: string | null;
 }) {
   const [state, action, pending] = useActionState(requestReviewAction, initial);
 
   return (
-    <form action={action} className="space-y-2">
+    <form
+      action={action}
+      className="space-y-2"
+      onSubmit={confirmOr(
+        "Request editorial review of the current revision? An SEO lead, admin or owner will be able to return it with a note.",
+      )}
+    >
       <input type="hidden" name="__websiteId" value={websiteId} />
       <input type="hidden" name="__workItemId" value={workItemId} />
       <input type="hidden" name="__draftId" value={draftId} />
       <div className="flex flex-wrap items-center gap-3">
-        <button type="submit" disabled={pending || blocked} className={SECONDARY}>
+        <button
+          type="submit"
+          disabled={pending || blocked}
+          aria-disabled={blocked}
+          className={SECONDARY}
+        >
           {pending ? "Requesting…" : "Request review"}
         </button>
         <span className="text-muted-foreground text-xs">
           {blocked
-            ? "Blocked: the current revision has blocking findings. Save a revision that resolves them first."
+            ? (reason ?? "Not available for this revision.")
             : "Marks the current revision as ready for an editor. Warnings are shown to them, not hidden."}
         </span>
       </div>
@@ -197,7 +224,13 @@ export function ReturnToDraftingForm({
   const [state, action, pending] = useActionState(returnToDraftingAction, initial);
 
   return (
-    <form action={action} className="space-y-2">
+    <form
+      action={action}
+      className="space-y-2"
+      onSubmit={confirmOr(
+        "Return this draft to drafting with your note? The editor will see it on the draft.",
+      )}
+    >
       <input type="hidden" name="__websiteId" value={websiteId} />
       <input type="hidden" name="__workItemId" value={workItemId} />
       <input type="hidden" name="__draftId" value={draftId} />

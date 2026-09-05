@@ -17,7 +17,9 @@ import {
   type ProhibitedClaim,
   type RuleConstraint,
 } from "@/server/services/content-brief";
+import { getDraftForWorkItem } from "@/server/services/content-draft";
 import { EmptyState, PageHeader } from "@/components/governance/primitives";
+import { StartDraftButton, StartFromBriefButton } from "@/components/execution/draft-controls";
 import { DemoBadge, SeverityBadge } from "@/components/metrics/primitives";
 import { StatusBadge, humanize } from "@/components/diagnosis/primitives";
 import {
@@ -76,6 +78,7 @@ export default async function BriefPage({
   ]);
 
   const approvedStanding = versions.find((row) => row.status === "APPROVED") ?? null;
+  const draftView = await getDraftForWorkItem(context, item.id);
 
   return (
     <main className="space-y-8">
@@ -192,18 +195,54 @@ export default async function BriefPage({
               />
             ) : null}
             {selected.status === "APPROVED" ? (
-              <p className="text-sm">
-                <Link
-                  href={`/websites/${websiteId}/content/${item.id}/draft`}
-                  className="font-medium hover:underline"
-                >
-                  Go to the draft →
-                </Link>
-                <span className="text-muted-foreground">
-                  {" "}
-                  Drafting starts from this approved version.
-                </span>
-              </p>
+              draftView && draftView.draft.briefId === selected.id ? (
+                <p className="text-sm">
+                  <Link
+                    href={`/websites/${websiteId}/content/${item.id}/draft?draft=${draftView.draft.id}`}
+                    className="font-medium hover:underline"
+                  >
+                    Open Draft →
+                  </Link>
+                  <span className="text-muted-foreground">
+                    {" "}
+                    A draft is pinned to this version ({draftView.revisionCount} revision
+                    {draftView.revisionCount === 1 ? "" : "s"},{" "}
+                    {humanize(draftView.draft.status).toLowerCase()}).
+                  </span>
+                </p>
+              ) : draftView ? (
+                <div className="border-border space-y-3 rounded-lg border border-dashed p-3 text-sm">
+                  <p>
+                    <span className="font-medium">
+                      The draft is based on Brief v{draftView.brief.version}. This version (v
+                      {selected.version}) is now the approved one.
+                    </span>{" "}
+                    <span className="text-muted-foreground">
+                      The draft was not moved; its history stays where it is.
+                    </span>{" "}
+                    <Link
+                      href={`/websites/${websiteId}/content/${item.id}/draft?draft=${draftView.draft.id}`}
+                      className="hover:underline"
+                    >
+                      Open that draft →
+                    </Link>
+                  </p>
+                  {canWrite && item.status === "DRAFTING" ? (
+                    <StartFromBriefButton
+                      websiteId={websiteId}
+                      workItemId={item.id}
+                      briefId={selected.id}
+                      version={selected.version}
+                    />
+                  ) : null}
+                </div>
+              ) : canWrite && item.status === "DRAFTING" ? (
+                <StartDraftButton websiteId={websiteId} workItemId={item.id} />
+              ) : (
+                <p className="text-muted-foreground text-sm">
+                  Drafting starts from this approved version; a member or above starts it.
+                </p>
+              )
             ) : null}
           </section>
 

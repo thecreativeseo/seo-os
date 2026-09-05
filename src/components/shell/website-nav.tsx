@@ -6,11 +6,13 @@ import { usePathname } from "next/navigation";
 /**
  * Website navigation (docs/P0_SPEC.md §21).
  *
- * Only sections that exist are listed. Connections, Team, Audit History and
- * Settings arrive in M8–M10 and are added then, rather than shown now as dead
- * links.
+ * Only sections that exist are listed as links. A stage that is coming next
+ * may be shown, disabled and labelled so, where it helps a reader see the
+ * shape of the flow - never as a link, never implying it works.
  */
-const GROUPS = [
+type Section = { slug: string; label: string; comingNext?: true };
+
+const GROUPS: { heading: string; sections: Section[] }[] = [
   {
     heading: "Command Center",
     sections: [{ slug: "", label: "Command Center" }],
@@ -42,9 +44,15 @@ const GROUPS = [
   },
   {
     heading: "Execution",
-    // P4 (docs/P4_SPEC.md §38). Drafts, Publishing and Verification arrive
-    // with their milestones; only what exists is listed.
-    sections: [{ slug: "content", label: "Content Work" }],
+    // P4 (docs/P4_SPEC.md §38). Content Work → Briefs → Drafts exist; QA and
+    // Publishing are M5 and M6 and are shown disabled so the flow reads whole.
+    sections: [
+      { slug: "content", label: "Content Work" },
+      { slug: "briefs", label: "Briefs" },
+      { slug: "drafts", label: "Drafts" },
+      { slug: "qa", label: "QA", comingNext: true },
+      { slug: "publishing", label: "Publishing", comingNext: true },
+    ],
   },
   {
     heading: "Website",
@@ -64,7 +72,7 @@ const GROUPS = [
       { slug: "data-health", label: "Data Health" },
     ],
   },
-] as const;
+];
 
 export function WebsiteNav({ websiteId }: { websiteId: string }) {
   const pathname = usePathname();
@@ -78,6 +86,21 @@ export function WebsiteNav({ websiteId }: { websiteId: string }) {
           </p>
           <ul className="space-y-0.5">
             {group.sections.map((section) => {
+              if (section.comingNext) {
+                return (
+                  <li key={section.slug}>
+                    <span
+                      aria-disabled="true"
+                      title="Coming next - not available yet"
+                      className="text-muted-foreground/60 flex items-center justify-between rounded-md px-2 py-1.5 text-sm"
+                    >
+                      {section.label}
+                      <span className="text-[10px] tracking-wide uppercase">Coming next</span>
+                    </span>
+                  </li>
+                );
+              }
+
               const href = section.slug
                 ? `/websites/${websiteId}/${section.slug}`
                 : `/websites/${websiteId}`;

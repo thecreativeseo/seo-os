@@ -7,6 +7,7 @@ import { getDraft, getRevision } from "@/server/services/content-draft";
 import { PageHeader } from "@/components/governance/primitives";
 import { DemoBadge } from "@/components/metrics/primitives";
 import { StatusBadge, humanize } from "@/components/diagnosis/primitives";
+import { AuthorLabel } from "@/components/execution/provenance-panel";
 import { RevisionDetail } from "@/components/execution/revision-detail";
 
 export const metadata = { title: "Revision · SEO OS" };
@@ -29,33 +30,60 @@ export default async function RevisionPage({
   if (!view || view.draft.contentWorkItemId !== item.id) notFound();
 
   const base = `/websites/${websiteId}/content/${item.id}/draft`;
+  const isCurrent = revision.id === view.draft.currentRevisionId;
 
   return (
-    <main className="space-y-8">
+    <main className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <PageHeader
           title={`Revision ${revision.revisionNumber} · ${revision.title}`}
-          description={`${humanize(item.type)} · ${item.title} · brief v${view.brief.version} · read-only`}
+          description={`${humanize(item.type)} · ${item.title} · based on Brief v${view.brief.version} · read-only`}
         />
         {context.website.isDemo ? <DemoBadge /> : null}
       </div>
 
-      <nav className="text-muted-foreground flex flex-wrap items-center gap-4 text-sm">
+      <nav
+        className="text-muted-foreground flex flex-wrap items-center gap-4 text-sm"
+        aria-label="Revision"
+      >
         <Link href={`${base}?draft=${view.draft.id}`} className="hover:underline">
           ← Back to the draft
         </Link>
         <Link href={`${base}/history?draft=${view.draft.id}`} className="hover:underline">
           Revision history
         </Link>
+        {revision.basedOnRevisionNumber ? (
+          <Link
+            href={`${base}/compare?draft=${view.draft.id}&to=${revision.id}`}
+            className="hover:underline"
+          >
+            Compare with v{revision.basedOnRevisionNumber}
+          </Link>
+        ) : null}
         <StatusBadge status={view.draft.status} />
-        {revision.id === view.draft.currentRevisionId ? (
-          <span className="text-xs">This is the current revision.</span>
-        ) : (
-          <span className="text-xs">An earlier revision; the draft has moved on.</span>
-        )}
+        <AuthorLabel revision={revision} viewerUserId={context.user.id} />
+        <span className="text-xs">
+          {isCurrent
+            ? "This is the current revision."
+            : "An earlier revision; the draft has moved on. Nothing here can be changed."}
+        </span>
       </nav>
 
-      <RevisionDetail revision={revision} viewerUserId={context.user.id} />
+      <RevisionDetail
+        revision={revision}
+        viewerUserId={context.user.id}
+        lineage={{
+          briefVersion: view.brief.version,
+          briefSuperseded: view.brief.status !== "APPROVED",
+          workItem: { title: item.title, type: item.type },
+          recommendation: { title: item.recommendation.title },
+          decision: {
+            decision: item.decision.decision,
+            decidedBy: item.decision.decidedBy.email,
+            decidedAt: item.decision.decidedAt,
+          },
+        }}
+      />
     </main>
   );
 }

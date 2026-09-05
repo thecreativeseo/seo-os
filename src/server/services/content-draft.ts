@@ -27,6 +27,7 @@ import {
 } from "@/lib/content/constraints";
 import { plainText, renderMarkdown, wordCount } from "@/lib/content/markdown";
 import { reconcileBriefClaims, type ReconciledClaim } from "@/lib/content/reconcile";
+import { targetLengthFor } from "@/lib/content/draft-ux";
 import {
   diffLines,
   revisionChanges,
@@ -1674,3 +1675,211 @@ export function revisionFindings(
 }
 
 export type { RuleConstraint };
+
+// ---------------------------------------------------------------------------
+// The drafts list, and the brief as constraints (M4.4 §2, §3)
+// ---------------------------------------------------------------------------
+
+export type DraftListRow = {
+  id: string;
+  workItemId: string;
+  workItemTitle: string;
+  workItemType: string;
+  workItemStatus: string;
+  contentType: string | null;
+  briefId: string;
+  briefVersion: number;
+  briefStatus: string;
+  /** A newer approved brief exists for the work item; this draft stays pinned. */
+  briefMismatch: { approvedVersion: number; approvedBriefId: string } | null;
+  status: ContentDraftStatus;
+  awaitingReview: boolean;
+  currentRevisionNumber: number | null;
+  currentTitle: string | null;
+  revisionCount: number;
+  authorKind: "AI" | "HUMAN" | null;
+  findings: { blocking: number; warning: number; info: number };
+  blocking: boolean;
+  /** The later of the draft's own change and its current revision's creation. */
+  updatedAt: Date;
+};
+
+/** Every draft of the website, most recently updated first. */
+export async function listDrafts(context: TenantContext): Promise<DraftListRow[]> {
+  const rows = await prisma.contentDraft.findMany({
+    where: websiteScope(context),
+    include: {
+      brief: { select: { id: true, version: true, status: true, contentType: true } },
+      contentWorkItem: { select: { id: true, title: true, type: true, status: true } },
+      currentRevision: {
+        select: {
+          revisionNumber: true,
+          title: true,
+          createdAt: true,
+          createdByAiRunId: true,
+          createdByUserId: true,
+          constraintFindingsJson: true,
+        },
+      },
+      _count: { select: { revisions: true } },
+    },
+  });
+
+  const itemIds = [...new Set(rows.map((row) => row.contentWorkItemId))];
+  const approved = itemIds.length
+    ? await prisma.contentBrief.findMany({
+        where: {
+          contentWorkItemId: { in: itemIds },
+          status: "APPROVED",
+          ...websiteScope(context),
+        },
+        select: { id: true, version: true, contentWorkItemId: true },
+      })
+    : [];
+  const approvedByItem = new Map(approved.map((row) => [row.contentWorkItemId, row]));
+
+  return rows
+    .map((row): DraftListRow => {
+      const current = row.currentRevision;
+      const findings = countFindings((current ? revisionFindings(current)?.findings : null) ?? []);
+      const approvedBrief = approvedByItem.get(row.contentWorkItemId) ?? null;
+      const updatedAt =
+        current && current.createdAt > row.updatedAt ? current.createdAt : row.updatedAt;
+      return {
+        id: row.id,
+        workItemId: row.contentWorkItemId,
+        workItemTitle: row.contentWorkItem.title,
+        workItemType: row.contentWorkItem.type,
+        workItemStatus: row.contentWorkItem.status,
+        contentType: row.brief.contentType ?? null,
+        briefId: row.briefId,
+        briefVersion: row.brief.version,
+        briefStatus: row.brief.status,
+        briefMismatch:
+          approvedBrief && approvedBrief.id !== row.briefId
+            ? { approvedVersion: approvedBrief.version, approvedBriefId: approvedBrief.id }
+            : null,
+        status: row.status,
+        awaitingReview: row.status === "AWAITING_EDITOR_REVIEW",
+        currentRevisionNumber: current?.revisionNumber ?? null,
+        currentTitle: current?.title ?? null,
+        revisionCount: row._count.revisions,
+        authorKind: current
+          ? current.createdByAiRunId
+            ? "AI"
+            : current.createdByUserId
+              ? "HUMAN"
+              : null
+          : null,
+        findings,
+        blocking: findings.blocking > 0,
+        updatedAt,
+      };
+    })
+    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+}
+
+export type BriefPanelView = {
+  version: number;
+  status: string;
+  title: string;
+  contentType: string;
+  searchIntent: string | null;
+  audience: string | null;
+  customerProblem: string | null;
+  desiredOutcome: string | null;
+  recommendedAngle: string | null;
+  primaryConversion: string | null;
+  brandVoiceNotes: string | null;
+  businessGoal: { title: string } | null;
+  primaryKeyword: { keyword: string } | null;
+  secondaryKeywords: { keyword: string }[];
+  targetPage: { path: string } | null;
+  keyQuestions: string[];
+  requiredSections: { heading: string; purpose: string }[];
+  optionalSections: { heading: string; purpose: string }[];
+  /** Brief claims whose fact is approved right now. */
+  validClaims: ReconciledClaim[];
+  /** Brief claims whose fact has since been revoked or removed. */
+  staleClaims: ReconciledClaim[];
+  prohibitedClaims: { text: string; source: string }[];
+  rules: { rule: string; severity: string; constraint: string | null }[];
+  linkTargets: { path: string | null; anchorText: string; reason: string }[];
+  targetLength: string;
+};
+
+/**
+ * The pinned brief as the constraints a writer works under, with its claims
+ * judged against the facts approved now. The brief row is never changed;
+ * what changes is the verdict on each claim.
+ */
+export async function getBriefPanel(
+  context: TenantContext,
+  briefId: string,
+): Promise<BriefPanelView | null> {
+  const brief = await prisma.contentBrief.findFirst({
+    where: { id: briefId, ...websiteScope(context) },
+    include: {
+      businessGoal: { select: { title: true } },
+      primaryKeyword: { select: { keyword: true } },
+      targetPage: { select: { path: true } },
+      contentWorkItem: { select: { type: true } },
+    },
+  });
+  if (!brief) return null;
+
+  const secondaryIds = asArray<unknown>(brief.secondaryKeywordIdsJson).filter(
+    (id): id is string => typeof id === "string",
+  );
+  const secondaryKeywords = secondaryIds.length
+    ? await prisma.keyword.findMany({
+        where: { id: { in: secondaryIds }, ...websiteScope(context) },
+        select: { keyword: true },
+      })
+    : [];
+
+  const claims = asArray<CitedClaim>(brief.approvedClaimsJson);
+  const truth = await currentTruth(
+    context,
+    claims.map((claim) => claim.evidenceId),
+  );
+  const reconciled = reconcileBriefClaims(claims, truth);
+
+  return {
+    version: brief.version,
+    status: brief.status,
+    title: brief.title,
+    contentType: brief.contentType,
+    searchIntent: brief.searchIntent,
+    audience: brief.audience,
+    customerProblem: brief.customerProblem,
+    desiredOutcome: brief.desiredOutcome,
+    recommendedAngle: brief.recommendedAngle,
+    primaryConversion: brief.primaryConversion,
+    brandVoiceNotes: brief.brandVoiceNotes,
+    businessGoal: brief.businessGoal,
+    primaryKeyword: brief.primaryKeyword,
+    secondaryKeywords,
+    targetPage: brief.targetPage,
+    keyQuestions: asArray<string>(brief.keyQuestionsJson),
+    requiredSections: asArray<{ heading: string; purpose: string }>(brief.requiredSectionsJson),
+    optionalSections: asArray<{ heading: string; purpose: string }>(brief.optionalSectionsJson),
+    validClaims: reconciled.valid,
+    staleClaims: reconciled.stale,
+    prohibitedClaims: asArray<ProhibitedClaim>(brief.prohibitedClaimsJson).map((claim) => ({
+      text: claim.text,
+      source: claim.source,
+    })),
+    rules: asArray<RuleConstraint>(brief.seoRuleConstraintsJson).map((rule) => ({
+      rule: rule.rule,
+      severity: rule.severity,
+      constraint: rule.constraint,
+    })),
+    linkTargets: asArray<LinkTarget>(brief.internalLinkTargetsJson).map((target) => ({
+      path: target.path,
+      anchorText: target.anchorText,
+      reason: target.reason,
+    })),
+    targetLength: targetLengthFor(brief.contentWorkItem.type),
+  };
+}
