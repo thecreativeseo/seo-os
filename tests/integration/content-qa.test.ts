@@ -305,13 +305,6 @@ afterAll(async () => {
   if (organizationIds.length > 0) {
     await prisma.$transaction(async (tx) => {
       await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      // QA runs first. A completed run is immutable, and deleting the tenant
-      // cascades a SET NULL onto its evidence package and AI run references,
-      // which the trigger refuses. Deleting the runs outright is allowed under
-      // the switch and leaves the cascade nothing to touch.
-      const scope = { website: { workspace: { organizationId: { in: organizationIds } } } };
-      await tx.contentQaResult.deleteMany({ where: scope });
-      await tx.contentQaRun.deleteMany({ where: scope });
       await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
     });
   }
