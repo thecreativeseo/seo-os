@@ -10,8 +10,13 @@ import type { QaContext, QaSubject } from "@/lib/content/qa/types";
 
 export * from "@/lib/content/qa/findings";
 export * from "@/lib/content/qa/types";
-export { classifyHighRisk, HIGH_RISK_PATTERNS } from "@/lib/content/qa/claims";
+export {
+  approvedClaimTextsNow,
+  classifyHighRisk,
+  HIGH_RISK_PATTERNS,
+} from "@/lib/content/qa/claims";
 export { inputsFingerprint, type FingerprintInputs } from "@/lib/content/qa/fingerprint";
+export * from "@/lib/content/qa/judged";
 
 /** The version every deterministic result carries. Bump when any check's behavior changes. */
 export const QA_CHECKER_VERSION = "qa-deterministic/1";
@@ -24,7 +29,7 @@ export const QA_CHECKER_VERSION = "qa-deterministic/1";
  */
 export function runDeterministicChecks(subject: QaSubject, ctx: QaContext): QaTypeResult[] {
   const by = ctx.checkerVersion;
-  const judgedReason = ctx.aiAvailable ? "NO_PROVIDER" : "NOT_PRODUCED_YET";
+  const judgedReason = "NO_PROVIDER";
   const intent = typeResult({
     qaType: "INTENT_ALIGNMENT",
     findings: [notCheckedFinding("INTENT_ALIGNMENT", "intent_alignment", judgedReason, by)],

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/server/db/prisma";
 import type { TenantContext } from "@/server/auth/guards";
@@ -292,12 +292,26 @@ async function readyForQa(tenant: Fixture, lead: TenantContext, bodyMarkdown = B
   return { item: approved.workItem, draft, revision: saved.revision, brief: generated.brief };
 }
 
+// The deterministic path, on purpose: no judge is configured here. The
+// judged path has its own suite.
+beforeAll(() => {
+  vi.stubEnv("AI_PROVIDER", "null");
+  resetProvider();
+});
+
 afterEach(() => resetProvider());
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
     await prisma.$transaction(async (tx) => {
       await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
+      // QA runs first. A completed run is immutable, and deleting the tenant
+      // cascades a SET NULL onto its evidence package and AI run references,
+      // which the trigger refuses. Deleting the runs outright is allowed under
+      // the switch and leaves the cascade nothing to touch.
+      const scope = { website: { workspace: { organizationId: { in: organizationIds } } } };
+      await tx.contentQaResult.deleteMany({ where: scope });
+      await tx.contentQaRun.deleteMany({ where: scope });
       await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
     });
   }
@@ -346,6 +360,7 @@ describe("running QA on the approved revision", () => {
     });
     expect(pkg.sealedAt).not.toBeNull();
     expect(outcome.run.contextVersionId).not.toBeNull();
+    expect(outcome.run.aiRunId).toBeNull();
     expect(outcome.workItem.status).toBe("AWAITING_EDITOR_REVIEW");
 
     // The results: one per type, in the spec's order, each on the run's hash.
@@ -366,11 +381,11 @@ describe("running QA on the approved revision", () => {
     expect(byType.get("SEO_RULE_VALIDATION")?.status).toBe("PASS");
     expect(byType.get("INTENT_ALIGNMENT")).toMatchObject({
       status: "NOT_CHECKED",
-      notCheckedReason: "NOT_PRODUCED_YET",
+      notCheckedReason: "NO_PROVIDER",
     });
     expect(byType.get("ANSWER_READINESS")).toMatchObject({
       status: "NOT_CHECKED",
-      notCheckedReason: "NOT_PRODUCED_YET",
+      notCheckedReason: "NO_PROVIDER",
     });
     // Only one page: nothing to compare against for duplicates.
     expect(byType.get("DUPLICATION_RISK")?.status).toBe("PASS_WITH_WARNINGS");

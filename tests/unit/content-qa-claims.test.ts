@@ -197,7 +197,7 @@ describe("CLAIM_SAFETY", () => {
       result.coverage.filter((entry) => entry.status === "NOT_CHECKED").map((entry) => entry.check),
     ).toEqual(["unlisted_claims", "paraphrased_prohibitions"]);
     expect(result.coverage.find((entry) => entry.check === "unlisted_claims")?.reason).toBe(
-      "NOT_PRODUCED_YET",
+      "NO_PROVIDER",
     );
   });
 

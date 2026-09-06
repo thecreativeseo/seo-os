@@ -51,6 +51,7 @@ describe("the prompt registry after the P4 provider fixes", () => {
     expect([...active.keys()].sort()).toEqual([
       "CONTENT_BRIEF/GENERATE_BRIEF",
       "CONTENT_DRAFT/GENERATE_DRAFT",
+      "CONTENT_QA/QA_CONTENT",
       "PAGE_DIAGNOSIS/DIAGNOSE_PAGE",
     ]);
   });

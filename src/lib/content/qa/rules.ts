@@ -60,7 +60,7 @@ export function checkRules(subject: QaSubject, ctx: QaContext): QaTypeResult {
   coverage.push({ check: "machine_rules", status: "CHECKED" });
 
   if (textual.length > 0) {
-    const reason = ctx.aiAvailable ? "NO_PROVIDER" : "NOT_PRODUCED_YET";
+    const reason = "NO_PROVIDER";
     for (const rule of textual) {
       coverage.push({ check: `rule:${rule.ruleId}`, status: "NOT_CHECKED", reason });
       findings.push(

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/server/db/prisma";
 import { resetProvider } from "@/server/ai/registry";
@@ -24,6 +24,10 @@ import { QaFixtures } from "../helpers/qa-fixture";
 
 const fixtures = new QaFixtures();
 
+beforeAll(() => {
+  vi.stubEnv("AI_PROVIDER", "null");
+  resetProvider();
+});
 afterEach(() => resetProvider());
 afterAll(async () => {
   await fixtures.teardown();

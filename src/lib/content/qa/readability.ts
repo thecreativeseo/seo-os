@@ -69,7 +69,7 @@ export function checkReadability(subject: QaSubject, ctx: QaContext): QaTypeResu
   }
   coverage.push({ check: "paragraph_length", status: "CHECKED" });
 
-  const judgedReason = ctx.aiAvailable ? "NO_PROVIDER" : "NOT_PRODUCED_YET";
+  const judgedReason = "NO_PROVIDER";
   coverage.push({ check: "brand_voice", status: "NOT_CHECKED", reason: judgedReason });
   findings.push(notCheckedFinding("READABILITY", "brand_voice", judgedReason, by));
 

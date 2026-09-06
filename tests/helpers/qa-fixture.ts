@@ -208,6 +208,7 @@ export class QaFixtures {
     const generated = await generateBrief(tenant, item.id);
     if (!generated.ok) throw new Error(generated.error.message);
     await approveBrief(lead, generated.brief.id);
+    // The brief stub goes; each suite installs the judge it wants, or none.
     resetProvider();
     const { draft } = await startDraft(tenant, item.id);
     const saved = await saveRevision(tenant, draft.id, {
@@ -227,9 +228,17 @@ export class QaFixtures {
 
   async teardown(): Promise<void> {
     if (this.organizationIds.length > 0) {
+      const ids = this.organizationIds;
       await prisma.$transaction(async (tx) => {
         await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-        await tx.organization.deleteMany({ where: { id: { in: this.organizationIds } } });
+        // QA runs first. A completed run is immutable, and deleting the tenant
+        // cascades a SET NULL onto its evidence package and AI run references,
+        // which the trigger refuses. Deleting the runs outright is allowed under
+        // the switch and leaves the cascade nothing to touch.
+        const scope = { website: { workspace: { organizationId: { in: ids } } } };
+        await tx.contentQaResult.deleteMany({ where: scope });
+        await tx.contentQaRun.deleteMany({ where: scope });
+        await tx.organization.deleteMany({ where: { id: { in: ids } } });
       });
     }
     if (this.userIds.length > 0) {

@@ -43,6 +43,7 @@ export const NOT_CHECKED_REASONS = [
   "NO_REQUIRED_SECTIONS",
   "NO_CONTEXT_VERSION",
   "NOT_PRODUCED_YET",
+  "INVALID_AI_OUTPUT",
 ] as const;
 export type NotCheckedReason = (typeof NOT_CHECKED_REASONS)[number];
 
@@ -94,6 +95,8 @@ export type QaFindingCode =
   | "QUESTION_UNANSWERED"
   | "QUESTION_PARTIAL"
   | "CTA_MISSING"
+  | "CTA_WEAK"
+  | "KEYWORD_AWKWARD"
   | "VOICE_MISMATCH"
   | "NOT_CHECKED";
 
@@ -122,6 +125,8 @@ export type QaFinding = {
   field?: string;
   /** Verbatim text, verified against the revision by whoever recorded it. */
   excerpt?: string;
+  /** Why there is no excerpt when one was offered: it could not be verified, or it was withheld. */
+  excerptNote?: string;
   refs?: QaFindingRefs;
   /** A checker version, or an AI run id. */
   by: string;
@@ -232,6 +237,8 @@ export function describeReason(reason: NotCheckedReason): string {
       return "there is no approved Business Context";
     case "NOT_PRODUCED_YET":
       return "this check is not built yet";
+    case "INVALID_AI_OUTPUT":
+      return "the AI answer did not match the expected shape";
   }
 }
 

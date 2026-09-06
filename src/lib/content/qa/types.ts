@@ -6,9 +6,7 @@
  */
 
 export type ClaimRef =
-  | { kind: "fact"; id: string }
-  | { kind: "context"; id: string }
-  | { kind: "unknown"; raw: string };
+  { kind: "fact"; id: string } | { kind: "context"; id: string } | { kind: "unknown"; raw: string };
 
 export type QaClaim = {
   text: string;

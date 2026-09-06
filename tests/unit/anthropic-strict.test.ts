@@ -8,6 +8,7 @@ import {
   toToolSchema,
 } from "@/server/ai/providers/anthropic";
 import { contentBriefSchemaV1, contentBriefSchemaV2 } from "@/lib/ai/schemas/content-brief";
+import { contentQaSchemaV1 } from "@/lib/ai/schemas/content-qa";
 import { pageDiagnosisSchema } from "@/lib/ai/schemas/page-diagnosis";
 
 /**
@@ -311,5 +312,95 @@ describe("AnthropicProvider, strict", () => {
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.value.findings[0]?.category).toBe("CTR_SERP_MISMATCH");
     expect((sent(mock).tools as Record<string, unknown>[])[0]?.strict).toBe(true);
+  });
+
+  it("carries a content QA judgment through the same adapter, strictly", async () => {
+    const judgment = {
+      intent_alignment: { status: "ALIGNED", rationale: "It serves the intent.", excerpts: [] },
+      answer_readiness: [
+        {
+          question: "What does BIR require?",
+          status: "PARTIAL",
+          heading: "Compliance",
+          form: "LIST",
+          excerpt: "payslips follow the bureau's format",
+        },
+      ],
+      rule_judgments: [
+        { rule_id: "rule:abc", status: "UNCLEAR", rationale: "Hard to tell.", excerpt: null },
+      ],
+      unlisted_claims: [],
+      prohibited_paraphrases: [],
+      call_to_action: null,
+      keyword_use: { status: "NATURAL", rationale: "Reads well.", excerpt: null },
+      brand_voice: { status: "MATCHES", rationale: "Plain.", excerpt: null },
+    };
+    const mock = respond({
+      stop_reason: "tool_use",
+      content: [{ type: "tool_use", name: "content_qa", input: judgment }],
+      usage: { input_tokens: 20, output_tokens: 9 },
+    });
+    const request = {
+      system: "Judge.",
+      task: "Judge the revision.",
+      untrustedData: SENTINEL,
+      schema: contentQaSchemaV1,
+      schemaName: "content_qa",
+      outputSchemaVersion: "1",
+    };
+    const result = await new AnthropicProvider("k", "m").generateStructured(request);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.answer_readiness[0]?.status).toBe("PARTIAL");
+      expect(result.value.call_to_action).toBeNull();
+    }
+    const body = sent(mock);
+    const tool = (body.tools as Record<string, unknown>[])[0]!;
+    expect(tool.strict).toBe(true);
+    expect(tool.name).toBe("content_qa");
+    expect(JSON.stringify(tool)).not.toContain("maxLength");
+    expect(JSON.stringify(tool)).toContain("MISALIGNED");
+  });
+
+  it("refuses a judgment whose list arrived as a string, and says where without saying what", async () => {
+    respond({
+      stop_reason: "tool_use",
+      content: [
+        {
+          type: "tool_use",
+          name: "content_qa",
+          input: {
+            intent_alignment: { status: "ALIGNED", rationale: SENTINEL, excerpts: [] },
+            answer_readiness: "everything was answered",
+            rule_judgments: [],
+            unlisted_claims: [],
+            prohibited_paraphrases: [],
+            call_to_action: null,
+            keyword_use: null,
+            brand_voice: { status: "MATCHES", rationale: "Plain.", excerpt: null },
+          },
+        },
+      ],
+      usage: { input_tokens: 20, output_tokens: 9 },
+    });
+    const result = await new AnthropicProvider("k", "m").generateStructured({
+      system: "Judge.",
+      task: "Judge the revision.",
+      untrustedData: SENTINEL,
+      schema: contentQaSchemaV1,
+      schemaName: "content_qa",
+      outputSchemaVersion: "1",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("invalid_output");
+    expect(result.error.message).toBe(
+      "The AI provider returned a response that did not match the expected shape.",
+    );
+    const diagnostic = JSON.stringify(result.diagnostic);
+    expect(diagnostic).toContain("answer_readiness");
+    expect(diagnostic).toContain("invalid_type");
+    expect(diagnostic).not.toContain(SENTINEL);
+    expect(diagnostic).not.toContain("everything was answered");
   });
 });

@@ -306,7 +306,12 @@ export function checkClaimSafety(subject: QaSubject, ctx: QaContext): QaTypeResu
         });
         break;
       case "AVOID_TOPIC":
-        findings.push({ ...base, code: "AVOID_TOPIC", severity: "BLOCKING", message: found.message });
+        findings.push({
+          ...base,
+          code: "AVOID_TOPIC",
+          severity: "BLOCKING",
+          message: found.message,
+        });
         break;
       case "UNSUPPORTED_NUMERIC_CLAIM":
         findings.push({
@@ -344,9 +349,7 @@ export function checkClaimSafety(subject: QaSubject, ctx: QaContext): QaTypeResu
   for (const field of fields) {
     if (!field.text) continue;
     for (const sentence of splitSentences(field.text)) {
-      const categories = classifyHighRisk(sentence).filter(
-        (category) => category !== "percentage",
-      );
+      const categories = classifyHighRisk(sentence).filter((category) => category !== "percentage");
       if (categories.length === 0) continue;
       if (coveredByApproved(sentence, approvedTexts)) continue;
       const key = `${field.name}:${sentence}`;
@@ -380,12 +383,12 @@ export function checkClaimSafety(subject: QaSubject, ctx: QaContext): QaTypeResu
     {
       check: "unlisted_claims",
       status: "NOT_CHECKED",
-      reason: ctx.aiAvailable ? "NO_PROVIDER" : "NOT_PRODUCED_YET",
+      reason: "NO_PROVIDER",
     },
     {
       check: "paraphrased_prohibitions",
       status: "NOT_CHECKED",
-      reason: ctx.aiAvailable ? "NO_PROVIDER" : "NOT_PRODUCED_YET",
+      reason: "NO_PROVIDER",
     },
   );
   for (const entry of coverage) {

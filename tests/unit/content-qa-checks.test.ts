@@ -259,7 +259,7 @@ describe("SEO_RULE_VALIDATION", () => {
     const prose = result.findings.find((finding) => finding.code === "NOT_CHECKED");
     expect(prose).toMatchObject({
       needsHumanConfirmation: true,
-      refs: { ruleId: RULE_PROSE, reason: "NOT_PRODUCED_YET" },
+      refs: { ruleId: RULE_PROSE, reason: "NO_PROVIDER" },
     });
     expect(result.considered).toMatchObject({ machineRules: 1, textualRules: 1 });
   });
@@ -397,7 +397,7 @@ describe("READABILITY and DUPLICATION_RISK", () => {
     );
     expect(result.coverage.find((entry) => entry.check === "brand_voice")).toMatchObject({
       status: "NOT_CHECKED",
-      reason: "NOT_PRODUCED_YET",
+      reason: "NO_PROVIDER",
     });
     const wall = checkReadability(
       subject({ bodyMarkdown: `# T\n\n${Array.from({ length: 130 }, () => "word").join(" ")}.\n` }),
@@ -442,7 +442,7 @@ describe("READABILITY and DUPLICATION_RISK", () => {
 });
 
 describe("the whole deterministic pass", () => {
-  it("returns every type in the spec's order, deterministically, with the judged types not checked", () => {
+  it("returns every type in the spec's order, deterministically, with the judged types not checked when there is no judge", () => {
     const first = runDeterministicChecks(subject(), ctx);
     const second = runDeterministicChecks(subject(), ctx);
     expect(first.map((result) => result.qaType)).toEqual([...QA_TYPES]);
@@ -450,11 +450,11 @@ describe("the whole deterministic pass", () => {
     const byType = new Map(first.map((result) => [result.qaType, result]));
     expect(byType.get("INTENT_ALIGNMENT")).toMatchObject({
       status: "NOT_CHECKED",
-      notCheckedReason: "NOT_PRODUCED_YET",
+      notCheckedReason: "NO_PROVIDER",
     });
     expect(byType.get("ANSWER_READINESS")).toMatchObject({
       status: "NOT_CHECKED",
-      notCheckedReason: "NOT_PRODUCED_YET",
+      notCheckedReason: "NO_PROVIDER",
     });
     expect(byType.get("BRAND_FACT_VALIDATION")?.status).toBe("PASS");
     for (const result of first) {

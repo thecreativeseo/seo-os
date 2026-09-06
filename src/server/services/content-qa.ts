@@ -4,7 +4,19 @@ import { websiteScope, type TenantContext } from "@/server/auth/guards";
 import { REQUIRED, hasRole } from "@/server/auth/roles";
 import { SYSTEM_AUTH_USER_ID } from "@/server/jobs/system-context";
 import { transitionWorkItem } from "@/server/services/content-work";
-import { assembleContentQaPackage, sealPackage } from "@/server/services/evidence-assembler";
+import { isAiConfigured } from "@/server/ai/registry";
+import { runAgent } from "@/server/services/ai-run";
+import {
+  assembleContentQaPackage,
+  renderPackage,
+  sealPackage,
+} from "@/server/services/evidence-assembler";
+import {
+  CONTENT_QA_SCHEMA_NAME,
+  contentQaSchema,
+  type ContentQaOutput,
+} from "@/lib/ai/schemas/content-qa";
+import type { Evidence } from "@/lib/evidence/types";
 import {
   RUNNING_GUARD_MS,
   approvedRevisionFor,
@@ -15,6 +27,9 @@ import {
 import type { CitedClaim, LinkTarget } from "@/server/services/content-brief";
 import {
   QA_CHECKER_VERSION,
+  applyAiFailure,
+  applyAiJudgments,
+  approvedClaimTextsNow,
   countFindings,
   deriveOutcome,
   inputsFingerprint,
@@ -31,6 +46,7 @@ import { QA_RUN_TRANSITIONS, canTransition } from "@/lib/execution/statuses";
 import { parseEvidenceId } from "@/lib/evidence/id";
 import { Prisma } from "@/generated/prisma/client";
 import type {
+  ContentBrief,
   ContentQaResult,
   ContentQaRun,
   ContentQaStatus,
@@ -321,6 +337,88 @@ function claimRef(
   return { kind: "unknown", raw: evidenceId };
 }
 
+/**
+ * What the judge is told (M5.2 §3): the trusted material only, with the
+ * exact ids and texts it must use to refer to rules and questions. The
+ * revision itself goes in the untrusted block.
+ */
+function buildQaTask(
+  item: ContentWorkItem,
+  brief: ContentBrief,
+  subject: QaSubject,
+  ctx: QaContext,
+): string {
+  const list = (rows: string[]) => (rows.length ? rows.map((row) => `- ${row}`) : ["- (none)"]);
+  const prose = ctx.rules.filter((rule) => rule.check === null || rule.check === undefined);
+  const lines: string[] = [];
+  lines.push(
+    "Judge the revision in the untrusted block against this approved brief. Report what you see; do not decide anything.",
+    "",
+  );
+  lines.push("WORK ITEM", `Type: ${item.type}`, `Title: ${item.title}`, "");
+  lines.push(
+    `APPROVED BRIEF v${brief.version}`,
+    `Title: ${brief.title}`,
+    `Content type: ${brief.contentType}`,
+    `Search intent: ${brief.searchIntent ?? "not stated"}`,
+    `Audience: ${brief.audience ?? "not stated"}`,
+    `Customer problem: ${brief.customerProblem ?? "not stated"}`,
+    `Desired outcome: ${brief.desiredOutcome ?? "not stated"}`,
+    `Primary conversion: ${brief.primaryConversion ?? "not stated"}`,
+    `Primary keyword: ${ctx.brief.primaryKeyword ?? "not stated"}`,
+    `Brand voice: ${brief.brandVoiceNotes ?? "not stated"}`,
+    "",
+  );
+  lines.push(
+    "KEY QUESTIONS (copy each exactly into answer_readiness.question)",
+    ...list(ctx.brief.keyQuestions.map((question, index) => `Q${index + 1}: ${question}`)),
+    "",
+  );
+  lines.push("REQUIRED SECTIONS", ...list(ctx.brief.requiredSections), "");
+  lines.push(
+    "RULES TO JUDGE (use the id exactly in rule_judgments.rule_id)",
+    ...list(prose.map((rule) => `[rule:${rule.ruleId}] [${rule.severity}] ${rule.rule}`)),
+    "",
+  );
+  lines.push(
+    "APPROVED CLAIM TEXTS (a sentence carrying one word for word is not an unlisted claim)",
+    ...list(approvedClaimTextsNow(subject, ctx).map((text) => `"${text}"`)),
+    "",
+  );
+  lines.push(
+    "PROHIBITED CLAIMS AND TOPICS (copy exactly into prohibited_paraphrases.prohibited_claim)",
+    ...list([
+      ...(ctx.contextVersion?.prohibitedClaims ?? []),
+      ...(ctx.contextVersion?.avoidTopics ?? []),
+    ]),
+    "",
+  );
+  lines.push(
+    ctx.targetPage
+      ? "This is existing content: the current page is in the untrusted block as well."
+      : "This is new content; there is no current page.",
+  );
+  lines.push(
+    "Excerpts are short verbatim passages of the revision. Ids and question texts are those above, never others.",
+  );
+  return lines.join("\n");
+}
+
+/** The untrusted block: the evidence as data, then the revision, as data. */
+function renderUntrusted(evidence: Evidence[], subject: QaSubject): string {
+  return [
+    renderPackage(evidence),
+    "## REVISION UNDER REVIEW",
+    `[revision title] ${subject.title}`,
+    `[revision slug] ${subject.slug ?? ""}`,
+    `[revision meta_title] ${subject.metaTitle ?? ""}`,
+    `[revision meta_description] ${subject.metaDescription ?? ""}`,
+    `[revision excerpt] ${subject.excerpt ?? ""}`,
+    "[revision body]",
+    subject.bodyMarkdown,
+  ].join("\n");
+}
+
 function subjectOf(item: ContentWorkItem, revision: ContentRevision): QaSubject {
   return {
     workType: item.type,
@@ -468,6 +566,7 @@ export async function runQa(
 
   // Evidence, sealed before anything is judged.
   let packageId: string | null = null;
+  let evidence: Evidence[] = [];
   let gathered: Gathered;
   try {
     const assembled = await assembleContentQaPackage(context, {
@@ -482,6 +581,7 @@ export async function runQa(
     });
     await sealPackage(context, assembled.package.id);
     packageId = assembled.package.id;
+    evidence = assembled.evidence;
     gathered = await gather(context, item, brief);
   } catch {
     return fail("package_error", "The evidence for QA could not be assembled.");
@@ -491,7 +591,7 @@ export async function runQa(
   const subject = subjectOf(item, revision);
   const ctx: QaContext = {
     ...gathered.ctx,
-    aiAvailable: false,
+    aiAvailable: isAiConfigured(),
     checkerVersion: QA_CHECKER_VERSION,
   };
   let results: QaTypeResult[];
@@ -505,8 +605,46 @@ export async function runQa(
     return fail("checker_error", "A QA check failed for a reason of its own.");
   }
 
-  const outcome = deriveOutcome(results);
-  const counts = countFindings(results);
+  // The judge. Its failure is never the run's failure: the deterministic
+  // results stand, and the sub-checks that needed a judge say why they have
+  // nothing (M5.2 §8). Its findings are capped, verified and resolved by the
+  // server before they count (M5.2 §5-§7).
+  let aiRunId: string | null = null;
+  let merged: QaTypeResult[];
+  if (!isAiConfigured()) {
+    merged = applyAiFailure(results, "NO_PROVIDER");
+  } else {
+    try {
+      const judged = await runAgent<ContentQaOutput>(context, {
+        agentType: "CONTENT_QA",
+        taskType: "QA_CONTENT",
+        evidencePackageId: packageId,
+        request: {
+          task: buildQaTask(item, brief, subject, ctx),
+          untrustedData: renderUntrusted(evidence, subject),
+          schema: contentQaSchema,
+          schemaName: CONTENT_QA_SCHEMA_NAME,
+          maxOutputTokens: 4096,
+        },
+      });
+      aiRunId = judged.run.id;
+      merged = judged.ok
+        ? applyAiJudgments(results, judged.value, subject, ctx, judged.run.id)
+        : applyAiFailure(
+            results,
+            judged.error.code === "invalid_output" || judged.error.code === "output_truncated"
+              ? "INVALID_AI_OUTPUT"
+              : judged.error.code === "not_configured"
+                ? "NO_PROVIDER"
+                : "AI_RUN_FAILED",
+          );
+    } catch {
+      merged = applyAiFailure(results, "AI_RUN_FAILED");
+    }
+  }
+
+  const outcome = deriveOutcome(merged);
+  const counts = countFindings(merged);
 
   try {
     const completed = await prisma.$transaction(async (tx) => {
@@ -528,7 +666,7 @@ export async function runQa(
         throw new RevisionChanged();
       }
 
-      for (const result of results) {
+      for (const result of merged) {
         await tx.contentQaResult.create({
           data: {
             websiteId: context.website.id,
@@ -539,6 +677,7 @@ export async function runQa(
             status: result.status,
             source: result.source,
             notCheckedReason: result.notCheckedReason,
+            aiRunId: result.source === "DETERMINISTIC" ? null : aiRunId,
             issuesJson: {
               version: 1,
               findings: result.findings,
@@ -568,6 +707,7 @@ export async function runQa(
           inputsFingerprint: gathered.fingerprint,
           contextVersionId: gathered.contextVersionId,
           evidencePackageId: packageId,
+          aiRunId,
           blockingCount: counts.blocking,
           warningCount: counts.warning,
           infoCount: counts.info,
@@ -603,13 +743,14 @@ export async function runQa(
           ...counts,
           inputsFingerprint: gathered.fingerprint,
           evidencePackageId: packageId,
+          aiRunId,
           workItemStatus: workItem.status,
         },
       });
 
       return { row, workItem };
     });
-    return { ok: true, run: completed.row, results, workItem: completed.workItem };
+    return { ok: true, run: completed.row, results: merged, workItem: completed.workItem };
   } catch (error) {
     if (error instanceof RevisionChanged) {
       return fail("revision_changed", "The approved revision changed while QA was running.");

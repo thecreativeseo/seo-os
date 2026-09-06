@@ -251,7 +251,7 @@ export function checkOnPage(subject: QaSubject, ctx: QaContext): QaTypeResult {
   }
 
   // Judged parts.
-  const judgedReason = ctx.aiAvailable ? "NO_PROVIDER" : "NOT_PRODUCED_YET";
+  const judgedReason = "NO_PROVIDER";
   coverage.push({ check: "keyword_reads_naturally", status: "NOT_CHECKED", reason: judgedReason });
   findings.push(notCheckedFinding("ON_PAGE_SEO", "keyword_reads_naturally", judgedReason, by));
   if (ctx.brief.primaryConversion) {
