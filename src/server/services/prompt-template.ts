@@ -1,5 +1,10 @@
 import { prisma } from "@/server/db/prisma";
-import { PROMPTS, findPrompt, hashInstructions, type PromptDefinition } from "@/lib/ai/prompts/registry";
+import {
+  PROMPTS,
+  findPrompt,
+  hashInstructions,
+  type PromptDefinition,
+} from "@/lib/ai/prompts/registry";
 import type { AgentType, AiTaskType, PromptTemplate } from "@/generated/prisma/client";
 
 /**
@@ -24,11 +29,7 @@ import type { AgentType, AiTaskType, PromptTemplate } from "@/generated/prisma/c
 export class PromptTemplateError extends Error {
   constructor(
     message: string,
-    readonly code:
-      | "version_changed"
-      | "no_active_template"
-      | "not_found"
-      | "already_active",
+    readonly code: "version_changed" | "no_active_template" | "not_found" | "already_active",
   ) {
     super(message);
     this.name = "PromptTemplateError";
@@ -63,11 +64,17 @@ export type SyncResult = {
  *
  * Safe to call repeatedly — it is idempotent, and it is called lazily before a
  * diagnosis runs so a fresh database does not need a separate setup step.
+ *
+ * The definitions default to the code registry. A test may pass its own list,
+ * so the immutability guard can be exercised against a version of the test's
+ * own making rather than by rewriting a row every other caller checks.
  */
-export async function syncPromptTemplates(): Promise<SyncResult> {
+export async function syncPromptTemplates(
+  definitions: readonly PromptDefinition[] = PROMPTS,
+): Promise<SyncResult> {
   const result: SyncResult = { created: 0, activated: 0, retired: 0, unchanged: 0 };
 
-  for (const definition of PROMPTS) {
+  for (const definition of definitions) {
     const existing = await prisma.promptTemplate.findUnique({
       where: {
         agentType_taskType_version: {

@@ -123,36 +123,45 @@ describe("prompt registry", () => {
     await syncPromptTemplates();
 
     // Simulates somebody editing the prompt in place instead of adding a version.
-    // Historical runs cite v1; if v1's text could change, every one of them would
-    // point at instructions that were never used.
+    // Historical runs cite a version; if its text could change, every one of
+    // them would point at instructions that were never used.
     //
-    // The retired v1 row is the one mutated, on purpose. The guard checks every
-    // version code defines, so it fires just the same - and no other test file
-    // ever needs v1, whereas mutating the active row races every file that runs
-    // the agent while this test holds it changed. The prompt table is global,
-    // not tenant-scoped, so that race crosses files.
-    const template = await prisma.promptTemplate.findUniqueOrThrow({
-      where: {
-        agentType_taskType_version: {
-          agentType: "PAGE_DIAGNOSIS",
-          taskType: "DIAGNOSE_PAGE",
-          version: 1,
-        },
+    // The version probed is this test's own: the prompt table is global, and
+    // the guard checks every version code defines on every sync, so mutating a
+    // real row - even a retired one - races every file that runs an agent while
+    // the row is changed. A probe version nobody else defines races nothing.
+    const base = PROMPTS.find(
+      (prompt) => prompt.agentType === "PAGE_DIAGNOSIS" && prompt.taskType === "DIAGNOSE_PAGE",
+    )!;
+    const definition = {
+      ...base,
+      name: "Immutability probe",
+      version: 99,
+      active: false,
+      systemInstructions: "Say what the evidence supports, and nothing else.",
+    };
+    const key = { agentType: base.agentType, taskType: base.taskType, version: 99 } as const;
+    const probe = await prisma.promptTemplate.upsert({
+      where: { agentType_taskType_version: key },
+      create: {
+        ...key,
+        name: definition.name,
+        systemInstructions: "Say whatever you like.",
+        outputSchemaVersion: definition.outputSchemaVersion,
+        status: "DRAFT",
       },
-    });
-    await prisma.promptTemplate.update({
-      where: { id: template.id },
-      data: { systemInstructions: "Say whatever you like." },
+      update: { systemInstructions: "Say whatever you like.", status: "DRAFT" },
     });
 
     try {
-      await expect(syncPromptTemplates()).rejects.toBeInstanceOf(PromptTemplateError);
+      await expect(syncPromptTemplates([...PROMPTS, definition])).rejects.toBeInstanceOf(
+        PromptTemplateError,
+      );
+      // The real rows were never in question.
+      const again = await syncPromptTemplates();
+      expect(again.created).toBe(0);
     } finally {
-      // Restored from the row as it was fetched, whatever the assertion did.
-      await prisma.promptTemplate.update({
-        where: { id: template.id },
-        data: { systemInstructions: template.systemInstructions },
-      });
+      await prisma.promptTemplate.delete({ where: { id: probe.id } });
     }
   });
 

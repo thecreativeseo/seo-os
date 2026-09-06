@@ -133,7 +133,7 @@ describe("the P4 demo seed", () => {
       const refresh = items.find((row) => row.id === first.refreshItemId)!;
       const created = items.find((row) => row.id === first.newContentItemId)!;
       const compare = items.find((row) => row.id === first.compareItemId)!;
-      expect(refresh.status).toBe("DRAFTING");
+      expect(refresh.status).toBe("QA");
       expect(created.status).toBe("BRIEFING");
       expect(compare.status).toBe("DRAFTING");
 
@@ -160,7 +160,25 @@ describe("the P4 demo seed", () => {
       });
       expect(draft.contentWorkItemId).toBe(refresh.id);
       expect(draft.briefId).toBe(refreshBriefs[1]!.id);
-      expect(draft.status).toBe("AWAITING_EDITOR_REVIEW");
+      // Story B ends approved for QA on exactly revision 2 (M4.5).
+      expect(draft.status).toBe("APPROVED");
+      expect(draft.approvedRevisionId).toBe(draft.revisions[1]!.id);
+      expect(draft.approvedRevisionHash).toBe(draft.revisions[1]!.contentHash);
+      expect(draft.approvedByUserId).toBe(tenant.user.id);
+      expect(draft.approvedReviewId).not.toBeNull();
+      expect(refresh.status).toBe("QA");
+      const refreshReviews = await prisma.contentDraftReview.findMany({
+        where: { contentDraftId: draft.id },
+      });
+      expect(refreshReviews.map((row) => [row.status, row.revisionNumber])).toEqual([
+        ["APPROVED", 2],
+      ]);
+      // Story A: the generated brief v1 went through review before approval.
+      expect(
+        await prisma.auditEvent.count({
+          where: { entityType: "ContentBrief", entityId: refreshBriefs[0]!.id, action: "UPDATE" },
+        }),
+      ).toBeGreaterThanOrEqual(1);
       expect(draft.revisions[0]!.bodyMarkdown).not.toContain("https://research.example");
       expect(draft.revisions[1]!.createdByUserId).toBe(tenant.user.id);
       expect(draft.revisions[1]!.basedOnRevisionNumber).toBe(1);
@@ -188,8 +206,37 @@ describe("the P4 demo seed", () => {
         2,
         "APPROVED",
       ]);
-      expect(fresh.revisions).toHaveLength(1);
-      expect(fresh.revisions[0]!.evidencePackageId).not.toBeNull();
+      // Story C: approved, reopened with a reason, revised by hand. The
+      // approval is history, not current.
+      expect(first.reopenedDraftId).toBe(fresh.id);
+      expect(fresh.revisions).toHaveLength(2);
+      expect(
+        fresh.revisions.find((row) => row.revisionNumber === 1)?.evidencePackageId,
+      ).not.toBeNull();
+      expect(fresh.revisions.find((row) => row.revisionNumber === 2)?.createdByUserId).toBe(
+        tenant.user.id,
+      );
+      expect(fresh.approvedRevisionId).toBeNull();
+      expect(fresh.approvedReviewId).toBeNull();
+      const freshReviews = await prisma.contentDraftReview.findMany({
+        where: { contentDraftId: fresh.id },
+      });
+      expect(freshReviews.map((row) => [row.status, row.revisionNumber])).toEqual([
+        ["APPROVED", 1],
+      ]);
+      expect(
+        await prisma.auditEvent.count({
+          where: {
+            entityType: "ContentDraftReview",
+            entityId: freshReviews[0]!.id,
+            action: "RETIRE",
+          },
+        }),
+      ).toBe(1);
+      const reviewRowsFirst = await prisma.contentDraftReview.count({
+        where: { websiteId: tenant.website.id },
+      });
+      expect(reviewRowsFirst).toBe(2);
 
       // Run again: the stories are rebuilt, not duplicated.
       const second = await seedP4Demo(tenant);
@@ -197,6 +244,12 @@ describe("the P4 demo seed", () => {
       expect(await prisma.contentWorkItem.count({ where: { websiteId: tenant.website.id } })).toBe(
         3,
       );
+      expect(await prisma.contentDraft.count({ where: { websiteId: tenant.website.id } })).toBe(3);
+      expect(
+        await prisma.contentDraftReview.count({ where: { websiteId: tenant.website.id } }),
+      ).toBe(2);
+      expect(await prisma.contentBrief.count({ where: { websiteId: tenant.website.id } })).toBe(5);
+      expect(second.reviewDraftId).not.toBe(first.reviewDraftId);
     },
     SEED_TIMEOUT,
   );

@@ -350,6 +350,21 @@ describe("a draft that does not match the contract", () => {
       expect(diagnostic).not.toContain(testCase.secret);
       expect(diagnostic).not.toContain("Payslips follow BIR formats");
     }
+
+    // Recovery: the same draft generates normally once the answer fits.
+    installStubProvider({ respond: draftAnswer });
+    const recovered = await generateRevision(tenant, draft.id, { generationToken: "recovered" });
+    expect(recovered.ok).toBe(true);
+    if (!recovered.ok) return;
+    expect(recovered.revision.revisionNumber).toBe(1);
+    expect(recovered.run?.status).toBe("SUCCEEDED");
+    const after = await prisma.contentDraft.findUniqueOrThrow({ where: { id: draft.id } });
+    expect(after.currentRevisionId).toBe(recovered.revision.id);
+    expect(
+      await prisma.aiRun.count({
+        where: { websiteId: tenant.website.id, agentType: "CONTENT_DRAFT", status: "FAILED" },
+      }),
+    ).toBe(cases.length);
   });
 
   it("goes through when the draft uses the room version 2 gives", async () => {

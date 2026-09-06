@@ -17,6 +17,8 @@ import {
 import {
   ContentDraftError,
   generateRevision,
+  approveDraft,
+  reopenDraft,
   requestDraftReview,
   saveRevision,
   startDraft,
@@ -48,6 +50,12 @@ import type { ContentWorkItem } from "@/generated/prisma/client";
  *   into v2 and approved - the mismatch - and a person started a draft from
  *   v2: the first draft is SUPERSEDED and inspectable, the second generated
  *   from v2 and a fresh package.
+ *
+ * Stories (M4.5):
+ *   the refresh brief v1 goes through review before approval; the refresh
+ *   draft is approved for QA on its hand-written v2 (work item Ready for QA);
+ *   the third item's draft on v2 is approved, then reopened with a reason and
+ *   revised by hand - the approval stays in history, no longer current.
  */
 
 export type P4DemoOptions = {
@@ -63,8 +71,10 @@ export type P4DemoResult = {
   briefs: { version: number; status: string; workItemId: string }[];
   /** The refresh draft's revisions: AI v1 flagged and blocking, human v2 clean. */
   revisions: { revisionNumber: number; blocking: boolean; author: "AI" | "HUMAN" }[];
-  /** The refresh draft, awaiting editorial review. */
+  /** The refresh draft, approved for QA on its hand-written revision. */
   reviewDraftId: string;
+  /** The draft on the newer brief: approved, then reopened with a reason and revised. */
+  reopenedDraftId: string;
   /** The supersession story: the old draft kept, the new one pinned to v2. */
   supersession: { oldDraftId: string; newDraftId: string };
 };
@@ -353,6 +363,7 @@ export async function seedP4Demo(
   });
 
   let reviewDraftId = "";
+  let reopenedDraftId = "";
   let supersession = { oldDraftId: "", newDraftId: "" };
 
   try {
@@ -361,6 +372,8 @@ export async function seedP4Demo(
     if (!refreshV1.ok) {
       throw new DemoSeedError(`The refresh brief failed: ${refreshV1.error.message}`, "run_failed");
     }
+    // Story A: the generated brief goes through review before approval.
+    await requestBriefReview(context, refreshV1.brief.id);
     await approveBrief(context, refreshV1.brief.id);
 
     const edit: BriefInput = {
@@ -432,6 +445,10 @@ export async function seedP4Demo(
         "Removed the customer count and the external study nobody approved; rebuilt the walkthrough and the tool section from the brief.",
     });
     await requestDraftReview(context, refreshDraft.id);
+    // Story B ends approved for QA: exactly revision 2, by the demo owner.
+    await approveDraft(context, refreshDraft.id, {
+      note: "The walkthrough is real and every claim is backed. Ready for QA.",
+    });
     reviewDraftId = refreshDraft.id;
 
     // Story B: the compare item. Brief v1 approved and drafted; then v2
@@ -486,6 +503,30 @@ export async function seedP4Demo(
       throw new DemoSeedError(`The compare draft failed: ${secondPass.message}`, "run_failed");
     }
     supersession = { oldDraftId: compareDraftA.id, newDraftId: compareDraftB.id };
+
+    // Story C: the draft on v2 is approved, then reopened with a reason and
+    // revised by hand. The approval stays in history, no longer current.
+    await requestDraftReview(context, compareDraftB.id);
+    await approveDraft(context, compareDraftB.id, { note: "Approved against Brief v2." });
+    await reopenDraft(
+      context,
+      compareDraftB.id,
+      "Pricing for the dedicated tools changed after approval; the cost comparison must be rewritten.",
+    );
+    await saveRevision(context, compareDraftB.id, {
+      title: "Cohort analysis tools compared: when a spreadsheet stops being enough",
+      slug: "cohort-analysis-tools-compared",
+      excerpt:
+        "The honest case for a spreadsheet, and the point where a dedicated tool earns its cost.",
+      metaTitle: "Cohort Analysis Tools Compared | Investor Demo",
+      metaDescription: "Spreadsheet, product analytics, or a dedicated cohort tool: how to decide.",
+      bodyMarkdown: GOOD_REFRESH_BODY.replace(
+        "## Choosing a tool",
+        "## Choosing a tool, with today's prices",
+      ),
+      changeSummary: "Rewrote the cost comparison with the current prices; the rest stands.",
+    });
+    reopenedDraftId = compareDraftB.id;
   } finally {
     resetProvider();
   }
@@ -518,6 +559,7 @@ export async function seedP4Demo(
       author: row.createdByAiRunId ? "AI" : "HUMAN",
     })),
     reviewDraftId,
+    reopenedDraftId,
     supersession,
   };
 }

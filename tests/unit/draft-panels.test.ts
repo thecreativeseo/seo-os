@@ -226,6 +226,39 @@ describe("ProvenancePanel", () => {
     expect(out).toContain("812 words");
   });
 
+  it("reports whatever run the revision carries, never a fixed version", () => {
+    // The real-provider fix: the latest generated draft carries prompt v3 on
+    // schema v2, and the panel says so from the run, not from a constant.
+    const out = text(
+      createElement(ProvenancePanel, {
+        revision: {
+          ...aiRevision,
+          createdByAiRun: {
+            ...aiRevision.createdByAiRun!,
+            provider: "anthropic",
+            model: "claude-sonnet-5",
+            promptTemplateVersion: 3,
+            outputSchemaVersion: "2",
+          },
+        },
+        lineage,
+      }),
+    );
+    expect(out).toContain("anthropic · claude-sonnet-5");
+    expect(out).toContain("prompt v3 · output schema v2");
+    expect(out).not.toContain("prompt v1");
+    const stub = text(
+      createElement(ProvenancePanel, {
+        revision: {
+          ...aiRevision,
+          createdByAiRun: { ...aiRevision.createdByAiRun!, provider: "stub", model: "stub-1" },
+        },
+        lineage,
+      }),
+    );
+    expect(stub).toContain("stub · stub-1");
+  });
+
   it("shows the person, the base revision and the change summary for a hand-written one", () => {
     const human: ProvenanceRevision = {
       ...aiRevision,
