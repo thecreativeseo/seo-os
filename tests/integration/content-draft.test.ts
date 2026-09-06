@@ -589,8 +589,8 @@ describe("generating a revision", () => {
     const view = await getDraftForWorkItem(tenant, item.id);
     expect(view?.current?.createdByAiRun).toMatchObject({
       provider: "stub",
-      promptTemplateVersion: 1,
-      outputSchemaVersion: "1",
+      promptTemplateVersion: 3,
+      outputSchemaVersion: "2",
       status: "SUCCEEDED",
     });
     expect(view?.current?.evidencePackage).toMatchObject({
@@ -786,8 +786,8 @@ describe("idempotency and concurrency", () => {
         taskType: "GENERATE_DRAFT",
         provider: "stub",
         model: "stub",
-        promptTemplateVersion: 1,
-        outputSchemaVersion: "1",
+        promptTemplateVersion: 3,
+        outputSchemaVersion: "2",
         status: "RUNNING",
         evidencePackageId: pkg.package.id,
       },

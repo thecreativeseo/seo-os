@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { CONTENT_DRAFT_SCHEMA_VERSION, contentDraftSchema } from "@/lib/ai/schemas/content-draft";
+import { CONTENT_DRAFT_SCHEMA_VERSION, contentDraftSchemaV1 } from "@/lib/ai/schemas/content-draft";
 import { PROMPTS, findPrompt } from "@/lib/ai/prompts/registry";
 import { CONTENT_DRAFT_POLICY, findPolicy } from "@/lib/evidence/retrieval-policy";
+
+// Version 1, preserved exactly for the runs that were validated against it.
+// Version 2 is covered in content-draft-schema-v2.test.ts.
+const contentDraftSchema = contentDraftSchemaV1;
 
 const minimal = {
   title: "Payroll software in the Philippines",
@@ -10,7 +14,7 @@ const minimal = {
   change_summary: "First draft from the brief.",
 };
 
-describe("the content draft output schema", () => {
+describe("the content draft output schema, version 1", () => {
   it("accepts a minimal draft and fills the rest with empties", () => {
     const parsed = contentDraftSchema.parse(minimal);
     expect(parsed.slug).toBeNull();
