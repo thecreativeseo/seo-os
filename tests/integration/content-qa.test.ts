@@ -622,8 +622,13 @@ describe("what the database refuses", () => {
       where: { qaRunId: outcome.run.id },
     });
 
+    // A status it does not already hold: writing a column its own value
+    // changes nothing and is not a mutation.
     await expect(
-      prisma.contentQaResult.update({ where: { id: result.id }, data: { status: "PASS" } }),
+      prisma.contentQaResult.update({
+        where: { id: result.id },
+        data: { status: result.status === "PASS" ? "FAIL" : "PASS" },
+      }),
     ).rejects.toThrow(/immutable/);
     await expect(
       prisma.contentQaRun.update({ where: { id: outcome.run.id }, data: { outcome: "PASS" } }),
