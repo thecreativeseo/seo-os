@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   ContentBriefStatus,
+  ContentCmsApprovalStatus,
   ContentDraftReviewStatus,
   ContentDraftStatus,
+  ContentQaRunStatus,
   ContentWorkItemStatus,
   ExecutionStatus,
   PublishApprovalStatus,
@@ -12,6 +14,8 @@ import {
   ACTIVE_EXECUTION_STATUSES,
   APPROVAL_TRANSITIONS,
   BRIEF_TRANSITIONS,
+  CMS_APPROVAL_TRANSITIONS,
+  QA_RUN_TRANSITIONS,
   DRAFT_TRANSITIONS,
   EXECUTION_TRANSITIONS,
   OPEN_WORK_ITEM_STATUSES,
@@ -124,5 +128,34 @@ describe("the rules the spec spells out", () => {
     }
     expect(ACTIVE_EXECUTION_STATUSES).not.toContain("SUCCEEDED");
     expect(ACTIVE_EXECUTION_STATUSES).not.toContain("VERIFYING");
+  });
+});
+
+describe("the M5 tables: QA runs and CMS approvals", () => {
+  it("cover every status the database knows, and name only those", () => {
+    expect(Object.keys(QA_RUN_TRANSITIONS).sort()).toEqual(
+      Object.values(ContentQaRunStatus).sort(),
+    );
+    expect(Object.keys(CMS_APPROVAL_TRANSITIONS).sort()).toEqual(
+      Object.values(ContentCmsApprovalStatus).sort(),
+    );
+    for (const targets of Object.values(QA_RUN_TRANSITIONS)) {
+      for (const target of targets) expect(Object.values(ContentQaRunStatus)).toContain(target);
+    }
+    for (const targets of Object.values(CMS_APPROVAL_TRANSITIONS)) {
+      for (const target of targets)
+        expect(Object.values(ContentCmsApprovalStatus)).toContain(target);
+    }
+  });
+
+  it("write a run once and never edit an approval", () => {
+    expect(canTransition(QA_RUN_TRANSITIONS, "RUNNING", "COMPLETED")).toBe(true);
+    expect(canTransition(QA_RUN_TRANSITIONS, "RUNNING", "FAILED")).toBe(true);
+    expect(canTransition(QA_RUN_TRANSITIONS, "COMPLETED", "RUNNING")).toBe(false);
+    expect(canTransition(QA_RUN_TRANSITIONS, "FAILED", "COMPLETED")).toBe(false);
+    expect(terminalStatuses(QA_RUN_TRANSITIONS).sort()).toEqual(["COMPLETED", "FAILED"]);
+    expect(canTransition(CMS_APPROVAL_TRANSITIONS, "APPROVED", "INVALIDATED")).toBe(true);
+    expect(canTransition(CMS_APPROVAL_TRANSITIONS, "INVALIDATED", "APPROVED")).toBe(false);
+    expect(isTerminal(CMS_APPROVAL_TRANSITIONS, "INVALIDATED")).toBe(true);
   });
 });

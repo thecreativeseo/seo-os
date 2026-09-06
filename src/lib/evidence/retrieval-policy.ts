@@ -242,10 +242,67 @@ export const CONTENT_DRAFT_POLICY: RetrievalPolicyDefinition = {
   ],
 };
 
+/**
+ * P4 M5. What QA judges an approved revision against: the same truth the
+ * draft was written from, as of QA time - so a fact revoked after the
+ * editorial approval is absent here and its claim is stale. The page as it
+ * stands is included for a refresh; other pages are read by the
+ * deterministic checks directly, under the tenant's scope, and counted in
+ * the result rather than carried in the package.
+ */
+export const CONTENT_QA_POLICY: RetrievalPolicyDefinition = {
+  name: "content-qa",
+  version: 1,
+  description:
+    "Evidence gathered for checking one approved revision: the approved context, " +
+    "every approved fact and active rule as of now, the target page as it stands, " +
+    "the pages the brief links to, and the keyword the piece serves.",
+  windowDays: 28,
+  maxEvidence: 80,
+  maxContentChars: 12_000,
+  budgets: {
+    BUSINESS_CONTEXT: {
+      max: 1,
+      rationale: "The current approved version only; its voice, claims and prohibitions.",
+    },
+    BUSINESS_GOAL: { max: 3, rationale: "What the piece is for." },
+    BRAND_FACT: {
+      max: 25,
+      rationale: "Every approved fact: the only claims the revision may still make.",
+    },
+    SEO_RULE: {
+      max: 15,
+      rationale: "Every active rule, so the revision is held to what applies now.",
+    },
+    PAGE_CONTENT: {
+      max: 1,
+      rationale: "The target page as it stands, so a refresh can be compared with it.",
+    },
+    KEYWORD_OWNERSHIP: {
+      max: 12,
+      rationale: "The target page's keywords and the pages the brief links to, by path.",
+    },
+    KEYWORD_METRIC: {
+      max: 5,
+      rationale: "Demand for the primary keyword, for context not figures.",
+    },
+    TOPIC_MAPPING: { max: 3, rationale: "The topic, for context." },
+  },
+  rules: [
+    "Business Context: the current APPROVED version, never a draft.",
+    "Brand Facts: APPROVED only, as of QA time. A fact revoked since the editorial approval is absent, and the revision's claim on it is stale.",
+    "SEO Rules: every active rule as of QA time.",
+    "Page: the target page's latest content snapshot, in full up to the character cap.",
+    "Links: ownership records for the pages the brief named as targets, so each has a path and an ID.",
+    "Everything is scoped to this website. Nothing else is reachable.",
+  ],
+};
+
 export const RETRIEVAL_POLICIES: readonly RetrievalPolicyDefinition[] = [
   PAGE_DIAGNOSIS_POLICY,
   CONTENT_BRIEF_POLICY,
   CONTENT_DRAFT_POLICY,
+  CONTENT_QA_POLICY,
 ];
 
 export function findPolicy(name: string, version?: number): RetrievalPolicyDefinition | null {

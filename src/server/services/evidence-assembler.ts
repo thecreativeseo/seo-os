@@ -8,6 +8,7 @@ import { reliabilityRank, renderEvidence, type Evidence } from "@/lib/evidence/t
 import {
   CONTENT_BRIEF_POLICY,
   CONTENT_DRAFT_POLICY,
+  CONTENT_QA_POLICY,
   PAGE_DIAGNOSIS_POLICY,
   type RetrievalPolicyDefinition,
 } from "@/lib/evidence/retrieval-policy";
@@ -643,7 +644,12 @@ export type DraftSubject = {
 export async function assembleContentDraftPackage(
   context: TenantContext,
   subject: DraftSubject,
-  options: { policy?: RetrievalPolicyDefinition } = {},
+  options: {
+    policy?: RetrievalPolicyDefinition;
+    /** M5: QA reuses this gathering under its own policy, purpose and target. */
+    purpose?: string;
+    target?: { type: string; id: string };
+  } = {},
 ): Promise<AssembledPackage> {
   const policy = options.policy ?? CONTENT_DRAFT_POLICY;
   const { windows } = await resolveWebsiteWindows(context, "28d");
@@ -759,12 +765,28 @@ export async function assembleContentDraftPackage(
 
   return finalise(context, {
     policy,
-    target: { type: "CONTENT_WORK_ITEM", id: subject.workItemId },
-    purpose: "GENERATE_DRAFT",
+    target: options.target ?? { type: "CONTENT_WORK_ITEM", id: subject.workItemId },
+    purpose: options.purpose ?? "GENERATE_DRAFT",
     candidates,
     notes,
     contextVersionId: contextVersion?.id ?? null,
     windows,
+  });
+}
+
+/**
+ * Assembles the evidence for checking one approved revision (M5). The same
+ * gathering as a draft, under the QA policy, purpose QA_CONTENT, targeting
+ * the revision itself - so the package says which exact text it was for.
+ */
+export async function assembleContentQaPackage(
+  context: TenantContext,
+  subject: DraftSubject & { revisionId: string },
+): Promise<AssembledPackage> {
+  return assembleContentDraftPackage(context, subject, {
+    policy: CONTENT_QA_POLICY,
+    purpose: "QA_CONTENT",
+    target: { type: "CONTENT_REVISION", id: subject.revisionId },
   });
 }
 

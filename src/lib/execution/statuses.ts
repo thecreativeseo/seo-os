@@ -1,7 +1,9 @@
 import type {
   ContentBriefStatus,
+  ContentCmsApprovalStatus,
   ContentDraftReviewStatus,
   ContentDraftStatus,
+  ContentQaRunStatus,
   ContentWorkItemStatus,
   ExecutionStatus,
   PublishApprovalStatus,
@@ -142,6 +144,22 @@ export const APPROVAL_TRANSITIONS: Transitions<PublishApprovalStatus> = {
   REJECTED: [],
   EXPIRED: [],
   CANCELLED: [],
+};
+
+/**
+ * QA runs (M5). Written once: RUNNING at creation, then exactly one completion.
+ * A completed or failed run is history.
+ */
+export const QA_RUN_TRANSITIONS: Transitions<ContentQaRunStatus> = {
+  RUNNING: ["COMPLETED", "FAILED"],
+  COMPLETED: [],
+  FAILED: [],
+};
+
+/** CMS approvals (M5, D3). An approval is never edited, only invalidated. */
+export const CMS_APPROVAL_TRANSITIONS: Transitions<ContentCmsApprovalStatus> = {
+  APPROVED: ["INVALIDATED"],
+  INVALIDATED: [],
 };
 
 export function canTransition<S extends string>(table: Transitions<S>, from: S, to: S): boolean {

@@ -230,6 +230,8 @@ model User {
   createdRevisions          ContentRevision[]        @relation("ContentRevisionCreator")
   requestedDraftReviews     ContentDraftReview[]     @relation("DraftReviewRequester")
   decidedDraftReviews       ContentDraftReview[]     @relation("DraftReviewDecider")
+  requestedQaRuns           ContentQaRun[]           @relation("QaRunRequester")
+  cmsApprovals              ContentCmsApproval[]     @relation("CmsApprover")
   reviewedLinkSuggestions   InternalLinkSuggestion[] @relation("LinkSuggestionReviewer")
   createdPublishingPolicies PublishingPolicy[]       @relation("PublishingPolicyCreator")
   updatedPublishingPolicies PublishingPolicy[]       @relation("PublishingPolicyUpdater")
@@ -391,6 +393,8 @@ model Website {
   contentRevisions        ContentRevision[]
   contentDraftReviews     ContentDraftReview[]
   contentQaResults        ContentQaResult[]
+  contentQaRuns           ContentQaRun[]
+  contentCmsApprovals     ContentCmsApproval[]
   internalLinkSuggestions InternalLinkSuggestion[]
   publishingPolicies      PublishingPolicy[]
   executions              Execution[]
@@ -498,6 +502,7 @@ model BusinessContextVersion {
   // P3. A package records which approved context version it reasoned from, so a
   // diagnosis stays readable after the context is revised.
   evidencePackages EvidencePackage[]
+  qaRuns           ContentQaRun[]    @relation("QaRunContextVersion")
 
   @@unique([businessContextId, versionNumber])
   @@map("business_context_version")
@@ -1964,6 +1969,7 @@ model AiRun {
   contentDrafts     ContentDraft[]           @relation("ContentDraftRun")
   contentRevisions  ContentRevision[]        @relation("ContentRevisionRun")
   contentQaResults  ContentQaResult[]        @relation("ContentQaRun")
+  contentQaRuns     ContentQaRun[]           @relation("ContentQaRunAiRun")
   linkSuggestions   InternalLinkSuggestion[] @relation("LinkSuggestionRun")
 
   @@index([websiteId, createdAt])
@@ -2030,6 +2036,7 @@ model EvidencePackage {
   diagnoses         Diagnosis[]
   contentBriefs     ContentBrief[]     @relation("ContentBriefPackage")
   contentRevisions  ContentRevision[]  @relation("ContentRevisionPackage")
+  contentQaRuns     ContentQaRun[]     @relation("ContentQaRunPackage")
 
   @@index([websiteId, assembledAt])
   @@index([websiteId, targetType, targetId])
@@ -2400,6 +2407,31 @@ enum ContentQaStatus {
   PASS
   PASS_WITH_WARNINGS
   FAIL
+  /// M5: the check had nothing to check with. Never PASS by absence.
+  NOT_CHECKED
+}
+
+/// M5. A QA run: RUNNING while checks execute, then COMPLETED with an outcome
+/// or FAILED when it could not finish (a checker error, a revision that
+/// changed underneath it). A run that did not complete records no result.
+enum ContentQaRunStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+/// M5. Who produced a result's findings.
+enum ContentQaSource {
+  DETERMINISTIC
+  AI_JUDGED
+  MIXED
+}
+
+/// M5. A human approval for execution. Never edited; invalidated with a
+/// reason when the revision, draft or brief it authorized moves on.
+enum ContentCmsApprovalStatus {
+  APPROVED
+  INVALIDATED
 }
 
 enum InternalLinkSuggestionStatus {
@@ -2535,6 +2567,8 @@ model ContentWorkItem {
   briefs          ContentBrief[]
   drafts          ContentDraft[]
   draftReviews    ContentDraftReview[]
+  qaRuns          ContentQaRun[]
+  cmsApprovals    ContentCmsApproval[]
   linkSuggestions InternalLinkSuggestion[]
   executions      Execution[]
 
@@ -2597,6 +2631,8 @@ model ContentBrief {
   approvedBy      User?                @relation("ContentBriefApprover", fields: [approvedByUserId], references: [id], onDelete: Restrict)
   drafts          ContentDraft[]
   draftReviews    ContentDraftReview[]
+  qaRuns          ContentQaRun[]       @relation("BriefQaRuns")
+  cmsApprovals    ContentCmsApproval[] @relation("BriefCmsApprovals")
 
   @@unique([contentWorkItemId, version])
   @@index([websiteId, status])
@@ -2637,6 +2673,8 @@ model ContentDraft {
   createdBy        User?                @relation("ContentDraftCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
   revisions        ContentRevision[]    @relation("DraftRevisions")
   reviews          ContentDraftReview[] @relation("DraftReviews")
+  qaRuns           ContentQaRun[]       @relation("DraftQaRuns")
+  cmsApprovals     ContentCmsApproval[] @relation("DraftCmsApprovals")
 
   @@index([websiteId, status])
   @@index([contentWorkItemId])
@@ -2685,6 +2723,8 @@ model ContentRevision {
   currentForDrafts  ContentDraft[]       @relation("DraftCurrentRevision")
   approvedForDrafts ContentDraft[]       @relation("DraftApprovedRevision")
   qaResults         ContentQaResult[]
+  qaRuns            ContentQaRun[]       @relation("RevisionQaRuns")
+  cmsApprovals      ContentCmsApproval[] @relation("RevisionCmsApprovals")
   executions        Execution[]
   publishApprovals  PublishApproval[]
   reviews           ContentDraftReview[]
@@ -2757,14 +2797,128 @@ model ContentQaResult {
   checkerVersion     String          @map("checker_version")
   aiRunId            String?         @map("ai_run_id") @db.Uuid
   createdAt          DateTime        @default(now()) @map("created_at")
+  /// M5: the run this result belongs to, and the exact revision hash it judged.
+  qaRunId            String          @map("qa_run_id") @db.Uuid
+  revisionHash       String          @map("revision_hash")
+  source             ContentQaSource @default(DETERMINISTIC)
+  /// Set when status is NOT_CHECKED: why there was nothing to check with.
+  notCheckedReason   String?         @map("not_checked_reason")
 
   website  Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   revision ContentRevision @relation(fields: [contentRevisionId], references: [id], onDelete: Cascade)
   aiRun    AiRun?          @relation("ContentQaRun", fields: [aiRunId], references: [id], onDelete: SetNull)
+  run      ContentQaRun    @relation(fields: [qaRunId], references: [id], onDelete: Cascade)
 
+  // Plus, in SQL: a result's revision and hash must be its run's
+  // (content_qa_result_bound_to_run); results never change once written.
+  @@unique([qaRunId, qaType])
   @@index([contentRevisionId, qaType, checkedAt])
   @@index([websiteId, status])
   @@map("content_qa_result")
+}
+
+/// M5 (docs/P4_SPEC.md §12; M5 plan D2). One QA run over exactly one approved
+/// revision: what was checked, against which facts, rules and context (the
+/// inputs fingerprint), with what outcome. The ten results hang off it. A run
+/// is written once: RUNNING at creation, then one completion.
+model ContentQaRun {
+  id                String             @id @default(uuid()) @db.Uuid
+  websiteId         String             @map("website_id") @db.Uuid
+  contentWorkItemId String             @map("content_work_item_id") @db.Uuid
+  contentDraftId    String             @map("content_draft_id") @db.Uuid
+  contentRevisionId String             @map("content_revision_id") @db.Uuid
+  revisionNumber    Int                @map("revision_number")
+  revisionHash      String             @map("revision_hash")
+  briefId           String             @map("brief_id") @db.Uuid
+  briefVersion      Int                @map("brief_version")
+  contextVersionId  String?            @map("context_version_id") @db.Uuid
+  evidencePackageId String?            @map("evidence_package_id") @db.Uuid
+  aiRunId           String?            @map("ai_run_id") @db.Uuid
+  /// sha256 over the facts, rules and context version the run judged against.
+  inputsFingerprint String             @map("inputs_fingerprint")
+  status            ContentQaRunStatus @default(RUNNING)
+  outcome           ContentQaStatus?
+  blockingCount     Int                @default(0) @map("blocking_count")
+  warningCount      Int                @default(0) @map("warning_count")
+  infoCount         Int                @default(0) @map("info_count")
+  notCheckedCount   Int                @default(0) @map("not_checked_count")
+  checkerVersion    String             @map("checker_version")
+  requestedByUserId String             @map("requested_by_user_id") @db.Uuid
+  startedAt         DateTime           @default(now()) @map("started_at")
+  completedAt       DateTime?          @map("completed_at")
+  errorCode         String?            @map("error_code")
+  errorSummary      String?            @map("error_summary")
+  createdAt         DateTime           @default(now()) @map("created_at")
+
+  website         Website                 @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  contentWorkItem ContentWorkItem         @relation(fields: [contentWorkItemId], references: [id], onDelete: Cascade)
+  draft           ContentDraft            @relation("DraftQaRuns", fields: [contentDraftId], references: [id], onDelete: Cascade)
+  revision        ContentRevision         @relation("RevisionQaRuns", fields: [contentRevisionId], references: [id], onDelete: Cascade)
+  brief           ContentBrief            @relation("BriefQaRuns", fields: [briefId], references: [id], onDelete: Cascade)
+  contextVersion  BusinessContextVersion? @relation("QaRunContextVersion", fields: [contextVersionId], references: [id], onDelete: SetNull)
+  evidencePackage EvidencePackage?        @relation("ContentQaRunPackage", fields: [evidencePackageId], references: [id], onDelete: SetNull)
+  aiRun           AiRun?                  @relation("ContentQaRunAiRun", fields: [aiRunId], references: [id], onDelete: SetNull)
+  requestedBy     User                    @relation("QaRunRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+
+  results      ContentQaResult[]
+  cmsApprovals ContentCmsApproval[]
+
+  // Plus, in SQL: one RUNNING run per work item (content_qa_run_running_per_item);
+  // a completed or failed run never changes (content_qa_run_completed_immutable).
+  @@index([websiteId, createdAt])
+  @@index([contentWorkItemId, createdAt])
+  @@index([contentRevisionId])
+  @@index([websiteId, status])
+  @@map("content_qa_run")
+}
+
+/// M5 (M5 plan D3, D4, D8, D11). A person's approval of one exact revision for
+/// execution, on the strength of one completed QA run. The approval pins the
+/// revision hash and the run; what the person acknowledged (a superseded
+/// brief, unchecked types) is stored with it. It is never edited: when the
+/// revision, draft or brief moves on, it is INVALIDATED with a reason and a
+/// fresh approval is needed. Facts, rules or context changing afterwards do
+/// not touch it - they make the QA stale, which the readers compute.
+model ContentCmsApproval {
+  id                          String                   @id @default(uuid()) @db.Uuid
+  websiteId                   String                   @map("website_id") @db.Uuid
+  contentWorkItemId           String                   @map("content_work_item_id") @db.Uuid
+  contentDraftId              String                   @map("content_draft_id") @db.Uuid
+  contentRevisionId           String                   @map("content_revision_id") @db.Uuid
+  revisionNumber              Int                      @map("revision_number")
+  revisionHash                String                   @map("revision_hash")
+  qaRunId                     String                   @map("qa_run_id") @db.Uuid
+  briefId                     String                   @map("brief_id") @db.Uuid
+  briefVersion                Int                      @map("brief_version")
+  briefSupersededAcknowledged Boolean                  @default(false) @map("brief_superseded_acknowledged")
+  notCheckedAcknowledged      Boolean                  @default(false) @map("not_checked_acknowledged")
+  /// What exactly was acknowledged: unchecked types with their reasons, and
+  /// the findings that needed a person's confirmation.
+  acknowledgedJson            Json?                    @map("acknowledged_json")
+  status                      ContentCmsApprovalStatus @default(APPROVED)
+  approvedByUserId            String                   @map("approved_by_user_id") @db.Uuid
+  approvedAt                  DateTime                 @default(now()) @map("approved_at")
+  note                        String?
+  selfDecided                 Boolean                  @default(false) @map("self_decided")
+  invalidatedAt               DateTime?                @map("invalidated_at")
+  invalidatedReason           String?                  @map("invalidated_reason")
+  createdAt                   DateTime                 @default(now()) @map("created_at")
+
+  website         Website         @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  contentWorkItem ContentWorkItem @relation(fields: [contentWorkItemId], references: [id], onDelete: Cascade)
+  draft           ContentDraft    @relation("DraftCmsApprovals", fields: [contentDraftId], references: [id], onDelete: Cascade)
+  revision        ContentRevision @relation("RevisionCmsApprovals", fields: [contentRevisionId], references: [id], onDelete: Cascade)
+  qaRun           ContentQaRun    @relation(fields: [qaRunId], references: [id], onDelete: Cascade)
+  brief           ContentBrief    @relation("BriefCmsApprovals", fields: [briefId], references: [id], onDelete: Cascade)
+  approvedBy      User            @relation("CmsApprover", fields: [approvedByUserId], references: [id], onDelete: Restrict)
+
+  // Plus, in SQL: one APPROVED approval per work item
+  // (content_cms_approval_active_per_item); an approval only ever goes
+  // APPROVED -> INVALIDATED (content_cms_approval_immutable).
+  @@index([websiteId, status])
+  @@index([contentWorkItemId, createdAt])
+  @@index([qaRunId])
+  @@map("content_cms_approval")
 }
 
 /// A proposed link for the work item's content (§16). sourcePage is empty for
