@@ -4,6 +4,7 @@ import { prisma } from "@/server/db/prisma";
 import type { TenantContext } from "@/server/auth/guards";
 import { resetProvider } from "@/server/ai/registry";
 import { DemoSeedError, seedP3Demo, type P3DemoResult, type P3DemoTargets } from "@/server/demo/p3";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * P3 Demo Mode (docs/P3_SPEC.md §33; P3_ACCEPTANCE_CRITERIA "Demo Mode").
@@ -21,7 +22,10 @@ import { DemoSeedError, seedP3Demo, type P3DemoResult, type P3DemoTargets } from
  */
 
 /** Five diagnoses and five decisions through the real pipeline take a while. */
-const SEED_TIMEOUT = 120_000;
+// The seed runs twice, through the real services, against a database in
+// another region: measured at 120,011ms against a 120,000ms ceiling, which is
+// a stopwatch failure rather than a product one.
+const SEED_TIMEOUT = 240_000;
 
 const organizationIds: string[] = [];
 const userIds: string[] = [];
@@ -231,10 +235,7 @@ afterEach(() => {
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

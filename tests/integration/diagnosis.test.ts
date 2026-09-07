@@ -16,6 +16,7 @@ import {
   listDiagnosesForPage,
   requestPageDiagnosis,
 } from "@/server/services/diagnosis";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * The page diagnosis pipeline (docs/P3_SPEC.md §14–§20, §26, §27, §36).
@@ -247,10 +248,7 @@ afterEach(() => {
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

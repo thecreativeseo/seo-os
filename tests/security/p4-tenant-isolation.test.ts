@@ -46,6 +46,7 @@ import {
   type RevisionInput,
 } from "@/server/services/content-draft";
 import { systemContextFor } from "@/server/jobs/system-context";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * P4 tenant isolation (P4_ACCEPTANCE_CRITERIA, "Security attack tests").
@@ -148,10 +149,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

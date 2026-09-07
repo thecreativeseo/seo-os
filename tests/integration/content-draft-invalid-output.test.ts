@@ -12,6 +12,7 @@ import { decide } from "@/server/services/decision";
 import { startFromRecommendation } from "@/server/services/content-work";
 import { approveBrief, generateBrief } from "@/server/services/content-brief";
 import { generateRevision, startDraft } from "@/server/services/content-draft";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * What happens when the model's draft does not match the contract (the
@@ -217,10 +218,7 @@ afterEach(() => {
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

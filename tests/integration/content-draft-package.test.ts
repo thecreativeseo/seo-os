@@ -7,6 +7,7 @@ import type { TenantContext } from "@/server/auth/guards";
 import { buildEvidenceId } from "@/lib/evidence/id";
 import { reconcileBriefClaims } from "@/lib/content/reconcile";
 import { assembleContentDraftPackage, sealPackage } from "@/server/services/evidence-assembler";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * The content-draft package (M4 plan, D-M4-2 as clarified): truth as of now.
@@ -200,10 +201,7 @@ async function makeTenant(label: string): Promise<Fixture> {
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

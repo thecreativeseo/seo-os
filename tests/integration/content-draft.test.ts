@@ -27,6 +27,7 @@ import {
   startDraft,
 } from "@/server/services/content-draft";
 import type { ContentBriefStatus, Role } from "@/generated/prisma/client";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * Drafts and generation (docs/P4_SPEC.md §9-§11; M4.2).
@@ -385,10 +386,7 @@ afterEach(() => {
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

@@ -6,6 +6,7 @@ import { prisma } from "@/server/db/prisma";
 import type { TenantContext } from "@/server/auth/guards";
 import { DemoSeedError } from "@/server/demo/p3";
 import { seedP4Demo } from "@/server/demo/p4";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * The P4 M3 demo seed (docs/P4_SPEC.md §34, §35): runs the real services
@@ -13,7 +14,10 @@ import { seedP4Demo } from "@/server/demo/p4";
  * run again.
  */
 
-const SEED_TIMEOUT = 120_000;
+// The seed runs twice, through the real services, against a database in
+// another region: measured at 120,011ms against a 120,000ms ceiling, which is
+// a stopwatch failure rather than a product one.
+const SEED_TIMEOUT = 240_000;
 const organizationIds: string[] = [];
 const userIds: string[] = [];
 
@@ -93,10 +97,7 @@ async function makeTenant(label: string, isDemo: boolean): Promise<TenantContext
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

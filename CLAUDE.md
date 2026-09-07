@@ -186,6 +186,12 @@ Managed auth with Google OAuth/OIDC
 
 If a suitable stack already exists, preserve it unless there is a strong reason to change it.
 
+## Migrations
+
+Migrations are created with `prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script` and applied with `prisma migrate deploy`.
+
+Once a migration has been applied to any shared environment, never edit that migration file or repair its recorded checksum. Any later correction is a new follow-up migration. The one exception on record, P4 M6.1, was accepted after the fact and is not a precedent.
+
 ## Testing
 
 Before each major milestone:

@@ -29,6 +29,7 @@ import {
   type RuleConstraint,
 } from "@/server/services/content-brief";
 import type { Role } from "@/generated/prisma/client";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * Content briefs (docs/P4_SPEC.md §7, §8, §11).
@@ -362,10 +363,7 @@ afterEach(() => {
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

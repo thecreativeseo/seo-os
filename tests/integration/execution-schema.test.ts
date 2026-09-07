@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/server/db/prisma";
 import { revisionHash } from "@/lib/execution/hash";
 import type { Prisma } from "@/generated/prisma/client";
+import { deleteOrganizations, deleteUsers } from "../helpers/teardown";
 
 /**
  * P4 M6.1: the execution binding, tested at the database.
@@ -250,10 +251,7 @@ async function clearExecutions(websiteId: string): Promise<void> {
 }
 
 async function teardown(ids: string[]): Promise<void> {
-  await prisma.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-    await tx.organization.deleteMany({ where: { id: { in: ids } } });
-  });
+  await deleteOrganizations(ids);
 }
 
 let a: Chain;
@@ -266,7 +264,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (organizationIds.length > 0) await teardown(organizationIds);
-  if (userIds.length > 0) await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  if (userIds.length > 0) await deleteUsers(userIds);
   await prisma.$disconnect();
 });
 

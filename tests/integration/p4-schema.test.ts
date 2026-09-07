@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { prisma } from "@/server/db/prisma";
 import { revisionHash } from "@/lib/execution/hash";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * The P4 execution schema (docs/P4_SPEC.md §6-§27), tested at the database.
@@ -156,10 +157,7 @@ async function makeDraftWithRevision(fixture: Fixture, workItemId: string) {
  * Written once here; the last test proves the hatch is the only way through.
  */
 async function teardown(organizationIds: string[]): Promise<void> {
-  await prisma.$transaction(async (tx) => {
-    await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-    await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-  });
+  await deleteOrganizations(organizationIds);
 }
 
 afterAll(async () => {

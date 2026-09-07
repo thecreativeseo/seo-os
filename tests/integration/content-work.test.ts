@@ -16,6 +16,7 @@ import {
   startFromRecommendation,
 } from "@/server/services/content-work";
 import type { RecommendationType, Role } from "@/generated/prisma/client";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * The P3 → P4 handoff (docs/P4_SPEC.md §5, §6, §31).
@@ -136,10 +137,7 @@ async function makeRecommendation(
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

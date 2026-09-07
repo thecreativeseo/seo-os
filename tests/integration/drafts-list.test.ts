@@ -21,6 +21,7 @@ import {
   startDraftFromBrief,
 } from "@/server/services/content-draft";
 import { applyDraftFilters, parseDraftFilters } from "@/lib/content/draft-ux";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * The drafts list and the brief panel (M4.4 §2, §3): rows with their
@@ -279,10 +280,7 @@ afterEach(() => resetProvider());
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

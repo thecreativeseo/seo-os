@@ -38,6 +38,7 @@ import { getRun, listRuns } from "@/server/services/ai-run";
 import { approveForCms, cmsApprovalFor, runQa } from "@/server/services/content-qa";
 import { qaAnswer } from "../helpers/qa-stub";
 import type { Role } from "@/generated/prisma/client";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * P4 M4.5.3 hardening: the whole chain through the real services under the
@@ -357,10 +358,7 @@ afterEach(() => resetProvider());
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

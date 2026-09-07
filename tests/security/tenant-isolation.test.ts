@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { AuthedUser } from "@/server/auth/session";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * Tenant isolation — release-blocking (P0_ACCEPTANCE_CRITERIA).
@@ -125,10 +126,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -239,8 +237,15 @@ describe("a user with no membership", () => {
     });
     organizationIds.push(shared.id);
 
+    // The domain is what this test is about; the local part is not, so it
+    // varies per run. A fixed address collides with itself the moment one run
+    // leaves the row behind, which is a failure about housekeeping rather than
+    // about tenant isolation.
     const lookalike = await prisma.user.create({
-      data: { authUserId: crypto.randomUUID(), email: "someone@shareddomainco.com" },
+      data: {
+        authUserId: crypto.randomUUID(),
+        email: `someone-${crypto.randomUUID().slice(0, 8)}@shareddomainco.com`,
+      },
     });
     userIds.push(lookalike.id);
 

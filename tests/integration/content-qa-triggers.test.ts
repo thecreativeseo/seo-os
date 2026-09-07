@@ -7,6 +7,7 @@ import { resetProvider } from "@/server/ai/registry";
 import { runQa } from "@/server/services/content-qa";
 import { QaFixtures } from "../helpers/qa-fixture";
 import { installQaStub } from "../helpers/qa-stub";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * The QA history triggers (P4, migration 20260907020000).
@@ -94,10 +95,7 @@ describe("referential cleanup on QA history", () => {
 
     // Exactly what docs/DEPLOYMENT.md documents: the switch, then the delete.
     // No pre-deletion of anything, and the cascades do the rest.
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: organizationId } });
-    });
+    await deleteOrganizations([organizationId]);
 
     for (const [label, count] of [
       ["qa runs", await prisma.contentQaRun.count({ where: { websiteId } })],

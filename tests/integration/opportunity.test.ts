@@ -15,6 +15,7 @@ import {
 } from "@/server/services/opportunity";
 import { assignOwnership } from "@/server/services/ownership";
 import { KeywordError, updateKeyword } from "@/server/services/keyword";
+import { deleteOrganizations } from "../helpers/teardown";
 
 const organizationIds: string[] = [];
 const userIds: string[] = [];
@@ -140,7 +141,7 @@ async function seedCommercialRanking(context: TenantContext) {
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.organization.deleteMany({ where: { id: { in: organizationIds } } });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -358,9 +359,9 @@ describe("status transitions", () => {
 
     const [theirs] = await listOpportunities(b);
 
-    await expect(
-      setOpportunityStatus(a, theirs!.id, "QUALIFIED"),
-    ).rejects.toBeInstanceOf(OpportunityError);
+    await expect(setOpportunityStatus(a, theirs!.id, "QUALIFIED")).rejects.toBeInstanceOf(
+      OpportunityError,
+    );
 
     const unchanged = await getOpportunity(b, theirs!.id);
     expect(unchanged?.status).toBe("IDENTIFIED");
@@ -389,9 +390,9 @@ describe("ownership of the work", () => {
 
     const [opportunity] = await listOpportunities(a);
 
-    await expect(
-      assignOpportunityOwner(a, opportunity!.id, b.user.id),
-    ).rejects.toBeInstanceOf(OpportunityError);
+    await expect(assignOpportunityOwner(a, opportunity!.id, b.user.id)).rejects.toBeInstanceOf(
+      OpportunityError,
+    );
   });
 });
 
@@ -701,10 +702,7 @@ describe("business goals", () => {
  * one losing clicks while the market holds steady.
  */
 describe("content refresh knows its keyword", () => {
-  async function seedDecliningPage(
-    context: TenantContext,
-    options: { withOwnership: boolean },
-  ) {
+  async function seedDecliningPage(context: TenantContext, options: { withOwnership: boolean }) {
     const page = await makePage(context, "/guides/payroll");
     const keyword = await makeKeyword(context, "payroll guide");
     await addVolume(context, keyword.id, 4800);

@@ -15,6 +15,7 @@ import {
   startDraft,
 } from "@/server/services/content-draft";
 import type { Role } from "@/generated/prisma/client";
+import { teardownTenants } from "./teardown";
 
 /**
  * A tenant with everything QA reads - approved context, an approved fact, a
@@ -235,17 +236,13 @@ export class QaFixtures {
     return { item: approved.workItem, draft, revision: saved.revision, brief: generated.brief };
   }
 
+  /**
+   * Batched and failure-tolerant (tests/helpers/teardown.ts). One long
+   * transaction over every tenant a suite made is what used to time out under
+   * load and leave all of them behind.
+   */
   async teardown(): Promise<void> {
-    if (this.organizationIds.length > 0) {
-      const ids = this.organizationIds;
-      await prisma.$transaction(async (tx) => {
-        await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-        await tx.organization.deleteMany({ where: { id: { in: ids } } });
-      });
-    }
-    if (this.userIds.length > 0) {
-      await prisma.user.deleteMany({ where: { id: { in: this.userIds } } });
-    }
+    await teardownTenants(this.organizationIds, this.userIds);
   }
 }
 

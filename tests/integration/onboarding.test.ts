@@ -14,6 +14,7 @@ import {
 } from "@/server/services/onboarding";
 import { canOpenStep } from "@/lib/onboarding/steps";
 import type { WorkspaceContext } from "@/server/auth/guards";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * Onboarding engine (P0_ACCEPTANCE_CRITERIA "Onboarding").
@@ -65,10 +66,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });

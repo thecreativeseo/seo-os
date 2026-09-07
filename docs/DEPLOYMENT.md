@@ -8,6 +8,10 @@ before and after a deploy. Deploys from `main` are manual: press Deploy in
 the Railway dashboard. The web service runs `prisma migrate deploy` before
 each deploy, and the health check is `/api/health`.
 
+A migration that has been applied to this database is history. Never edit its
+file or repair its recorded checksum afterwards; correct it with a new
+follow-up migration instead.
+
 | Service    | What it is                                 | Config file           | Start command    |
 | ---------- | ------------------------------------------ | --------------------- | ---------------- |
 | **web**    | The Next.js app: UI, Server Actions, OAuth | `railway.json`        | `npm run start`  |

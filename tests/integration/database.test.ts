@@ -2,6 +2,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { PrismaClient } from "@/generated/prisma/client";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * M2 database verification. Requires a live connection (DIRECT_URL).
@@ -24,14 +25,9 @@ const createdUserIds: string[] = [];
 
 afterAll(async () => {
   if (createdOrganizationIds.length > 0) {
-    // Approved context versions block DELETE by design, cascades included. Teardown
-    // opts in explicitly for this transaction only; no application code does this.
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({
-        where: { id: { in: createdOrganizationIds } },
-      });
-    });
+    // Approved context versions block DELETE by design, cascades included. The
+    // shared helper opts in explicitly, per transaction; no application code does.
+    await deleteOrganizations(createdOrganizationIds);
   }
   // Users are not owned by an Organization, so nothing cascades them away.
   if (createdUserIds.length > 0) {

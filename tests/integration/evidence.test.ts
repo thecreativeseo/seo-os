@@ -15,6 +15,7 @@ import {
   renderPackage,
   sealPackage,
 } from "@/server/services/evidence-assembler";
+import { deleteOrganizations } from "../helpers/teardown";
 
 /**
  * Evidence resolution and assembly (docs/P3_SPEC.md §9–§13, §36).
@@ -195,10 +196,7 @@ afterAll(async () => {
     // Approved context versions are immutable, enforced by a trigger rather than
     // by application code. Teardown asks for the documented escape hatch instead
     // of pretending the rule is not there.
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SET LOCAL app.allow_approved_context_delete = 'on'");
-      await tx.organization.deleteMany({ where: { id: { in: organizationIds } } });
-    });
+    await deleteOrganizations(organizationIds);
   }
   if (userIds.length > 0) {
     await prisma.user.deleteMany({ where: { id: { in: userIds } } });
