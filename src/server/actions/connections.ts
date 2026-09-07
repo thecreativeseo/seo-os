@@ -58,7 +58,9 @@ export async function connectApiKeyAction(
   if (!region) {
     // Both providers need to be told which market to report on, and guessing one
     // would attribute another country's numbers to this site.
-    return { error: `Set this website's primary market before connecting ${provider === "SEMRUSH" ? "Semrush" : "Ahrefs"}.` };
+    return {
+      error: `Set this website's primary market before connecting ${provider === "SEMRUSH" ? "Semrush" : "Ahrefs"}.`,
+    };
   }
 
   // One row from each provider. Enough to prove the key, the plan and the
@@ -103,7 +105,6 @@ export async function selectPropertyAction(
   const websiteId = String(formData.get("__websiteId") ?? "");
   const provider = providerFromSlug(String(formData.get("__provider") ?? ""));
   const propertyId = String(formData.get("propertyId") ?? "");
-  const propertyName = String(formData.get("propertyName") ?? propertyId);
 
   if (!provider || !propertyId) {
     return { error: "Choose a property to continue." };
@@ -114,7 +115,10 @@ export async function selectPropertyAction(
   });
 
   try {
-    await selectProperty(context, provider, { id: propertyId, name: propertyName });
+    // Only the id is passed on. The display name comes from Google, because a
+    // name posted alongside it would be a label this website is stored under
+    // that nobody at Google ever agreed to.
+    await selectProperty(context, provider, propertyId);
   } catch (error) {
     if (error instanceof ConnectionAuthError) {
       return { error: error.message };

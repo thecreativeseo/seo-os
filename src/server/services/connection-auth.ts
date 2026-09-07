@@ -2,11 +2,7 @@ import { prisma } from "@/server/db/prisma";
 import { recordAudit } from "@/server/audit/record";
 import { requireWebsiteAccess, type TenantContext } from "@/server/auth/guards";
 import { REQUIRED } from "@/server/auth/roles";
-import {
-  decryptCredential,
-  encryptCredential,
-  type OAuthState,
-} from "@/server/crypto/credentials";
+import { decryptCredential, encryptCredential, type OAuthState } from "@/server/crypto/credentials";
 import {
   GoogleOAuthError,
   exchangeCodeForTokens,
@@ -16,6 +12,12 @@ import {
   type RemoteProperty,
 } from "@/server/connectors/google/oauth";
 import type { Connection } from "@/generated/prisma/client";
+import type { DiscoveryFailureCode } from "@/lib/connections/discovery";
+import {
+  GoogleDiscoveryError,
+  safeDiagnostic,
+  type SafeDiagnostic,
+} from "@/server/connectors/google/discovery";
 
 /**
  * Connecting a provider, in two deliberate steps.
@@ -67,9 +69,7 @@ export async function completeAuthorization(
     );
   }
 
-  const encrypted = encryptCredential(
-    JSON.stringify({ refreshToken: tokens.refreshToken }),
-  );
+  const encrypted = encryptCredential(JSON.stringify({ refreshToken: tokens.refreshToken }));
 
   const connection = await prisma.$transaction(async (tx) => {
     const record = await tx.connection.upsert({
@@ -134,9 +134,9 @@ export async function getAccessToken(connectionId: string): Promise<string> {
     throw new ConnectionAuthError("This connection has no stored credential.", "no_credential");
   }
 
-  const { refreshToken } = JSON.parse(
-    decryptCredential(credential.encryptedPayload),
-  ) as { refreshToken: string };
+  const { refreshToken } = JSON.parse(decryptCredential(credential.encryptedPayload)) as {
+    refreshToken: string;
+  };
 
   try {
     const tokens = await refreshAccessToken(refreshToken);
@@ -297,10 +297,26 @@ export async function getApiKey(connectionId: string): Promise<string> {
   return payload.apiKey;
 }
 
-export async function listAvailableProperties(
+export type PropertyDiscovery =
+  | { ok: true; properties: RemoteProperty[] }
+  | { ok: false; code: DiscoveryFailureCode; diagnostic: SafeDiagnostic | null };
+
+/**
+ * What properties this connection can offer, or why it cannot say.
+ *
+ * A result rather than an exception, because "Google refused" and "the account
+ * has none" and "the API is off" are all ordinary answers a person needs to see
+ * differently, not one failure to be caught and paraphrased. The old version
+ * threw for every one of them and the page turned all of it into a single
+ * sentence about reauthorizing.
+ *
+ * An empty list stays a success here and is classified by the caller: at this
+ * layer it is simply true that there are none.
+ */
+export async function discoverProperties(
   context: TenantContext,
   provider: GoogleProvider,
-): Promise<RemoteProperty[]> {
+): Promise<PropertyDiscovery> {
   const connection = await prisma.connection.findFirst({
     where: { websiteId: context.website.id, provider },
   });
@@ -309,8 +325,35 @@ export async function listAvailableProperties(
     throw new ConnectionAuthError("This provider is not connected.", "not_connected");
   }
 
-  const accessToken = await getAccessToken(connection.id);
-  return listProperties(provider, accessToken);
+  let accessToken: string;
+  try {
+    accessToken = await getAccessToken(connection.id);
+  } catch (error) {
+    // getAccessToken has already recorded REAUTH_REQUIRED on the connection.
+    if (error instanceof ConnectionAuthError && error.code === "reauth_required") {
+      return { ok: false, code: "REAUTH_REQUIRED", diagnostic: null };
+    }
+    throw error;
+  }
+
+  try {
+    return { ok: true, properties: await listProperties(provider, accessToken) };
+  } catch (error) {
+    if (!(error instanceof GoogleDiscoveryError)) throw error;
+
+    const diagnostic = safeDiagnostic(provider, "list_properties", error);
+    // Codes, a status and a reason. Never a token, a header, a URL or a body.
+    console.error("connection.discovery", JSON.stringify(diagnostic));
+
+    if (error.code === "REAUTH_REQUIRED") {
+      await prisma.connection.update({
+        where: { id: connection.id },
+        data: { status: "REAUTH_REQUIRED", lastError: error.code },
+      });
+    }
+
+    return { ok: false, code: error.code, diagnostic };
+  }
 }
 
 /**
@@ -319,7 +362,7 @@ export async function listAvailableProperties(
 export async function selectProperty(
   context: TenantContext,
   provider: GoogleProvider,
-  property: RemoteProperty,
+  propertyId: string,
 ): Promise<Connection> {
   const existing = await prisma.connection.findFirst({
     where: { websiteId: context.website.id, provider },
@@ -327,6 +370,26 @@ export async function selectProperty(
 
   if (!existing) {
     throw new ConnectionAuthError("This provider is not connected.", "not_connected");
+  }
+
+  // The id arrives in a form, so it is a claim. It is honoured only if Google
+  // itself lists it for this connection right now: otherwise a person could
+  // post any property string and have SEO OS record it as the source of this
+  // website's data. The name is taken from Google too, never from the form.
+  const discovery = await discoverProperties(context, provider);
+  if (!discovery.ok) {
+    throw new ConnectionAuthError(
+      "The property list could not be confirmed with Google.",
+      discovery.code,
+    );
+  }
+
+  const property = discovery.properties.find((candidate) => candidate.id === propertyId);
+  if (!property) {
+    throw new ConnectionAuthError(
+      "That property is not one this Google account can read.",
+      "property_not_allowed",
+    );
   }
 
   return prisma.$transaction(async (tx) => {

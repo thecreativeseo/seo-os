@@ -3,7 +3,14 @@ import Link from "next/link";
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { hasRole } from "@/server/auth/roles";
 import { PROVIDER_COUNT, listConnectionCards } from "@/server/services/connections";
-import { listAvailableProperties } from "@/server/services/connection-auth";
+import { discoverProperties } from "@/server/services/connection-auth";
+import {
+  CONNECTION_STATE_LABELS,
+  CONNECTION_STATE_MESSAGES,
+  canChooseProperty,
+  needsReauthorization,
+  type ConnectionState,
+} from "@/lib/connections/discovery";
 import { isGoogleProvider, slugForProvider } from "@/server/connectors/google/oauth";
 import { Badge, PageHeader } from "@/components/governance/primitives";
 import {
@@ -71,16 +78,36 @@ export default async function ConnectionsPage({
   const selectingProvider = select && isGoogleProvider(select) ? select : null;
 
   let properties: { id: string; name: string }[] = [];
-  let propertyError: string | null = null;
+  /** Set only for the provider being set up, from what Google actually said. */
+  let discoveryState: ConnectionState | null = null;
 
   if (selectingProvider && canManage) {
-    try {
-      properties = await listAvailableProperties(context, selectingProvider);
-    } catch {
-      propertyError =
-        "Could not read the list of properties. The authorization may need to be repeated.";
+    const discovery = await discoverProperties(context, selectingProvider);
+    if (discovery.ok) {
+      properties = discovery.properties;
+      // Success with nothing in it is its own state. It is not a failure, and
+      // telling somebody to reauthorize would send them to fix what is not broken.
+      discoveryState =
+        properties.length === 0 ? "NO_ACCESSIBLE_PROPERTIES" : "PROPERTY_SELECTION_REQUIRED";
+    } else {
+      discoveryState = discovery.code;
     }
   }
+
+  /**
+   * What is true of a Google card right now.
+   *
+   * A stored status alone cannot say: CONNECTING means authorized and waiting
+   * for a property, and only a live lookup can tell "waiting" from "the account
+   * has none" or "the API is off".
+   */
+  const stateOf = (status: string, isSelecting: boolean): ConnectionState => {
+    if (isSelecting && discoveryState) return discoveryState;
+    if (status === "NOT_CONNECTED") return "NOT_CONNECTED";
+    if (status === "REAUTH_REQUIRED" || status === "ERROR") return "REAUTH_REQUIRED";
+    if (status === "CONNECTED") return "READY";
+    return "PROPERTY_SELECTION_REQUIRED";
+  };
 
   return (
     <main className="space-y-8">
@@ -90,7 +117,10 @@ export default async function ConnectionsPage({
       />
 
       {error ? (
-        <p role="alert" className="rounded-lg border border-red-300 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:text-red-300">
+        <p
+          role="alert"
+          className="rounded-lg border border-red-300 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:text-red-300"
+        >
           {ERRORS[error] ?? ERRORS.exchange_failed}
         </p>
       ) : null}
@@ -108,6 +138,7 @@ export default async function ConnectionsPage({
           const connectable = CONNECTABLE.has(card.provider);
           const keyConnectable = KEY_CONNECTABLE.has(card.provider);
           const isSelecting = selectingProvider === card.provider;
+          const state = stateOf(card.status, isSelecting);
 
           return (
             <li key={card.provider} className="space-y-3 px-4 py-4">
@@ -115,18 +146,16 @@ export default async function ConnectionsPage({
                 <div className="min-w-0">
                   <p className="text-sm font-medium">{card.name}</p>
                   <p className="text-muted-foreground text-sm">{card.purpose}</p>
-                  {card.status === "CONNECTED" ? (
+                  {connectable && card.status === "CONNECTED" ? (
                     <p className="text-muted-foreground mt-1 font-mono text-xs">
-                      {card.hasCredentialReference || connectable
-                        ? "Property selected"
-                        : null}
+                      Property selected
                     </p>
                   ) : null}
                 </div>
 
                 <div className="flex shrink-0 items-center gap-3">
                   <span className="text-muted-foreground text-xs">{card.availability}</span>
-                  <Badge>{card.status}</Badge>
+                  <Badge>{connectable ? CONNECTION_STATE_LABELS[state] : card.status}</Badge>
                 </div>
               </div>
 
@@ -140,25 +169,38 @@ export default async function ConnectionsPage({
                     />
                   ) : null}
 
-                  {card.status === "CONNECTING" && !isSelecting ? (
-                    <p className="text-muted-foreground text-sm">
-                      Authorised. Choose a property to finish connecting.
+                  {card.status !== "NOT_CONNECTED" ? (
+                    <p
+                      role={needsReauthorization(state) ? "alert" : undefined}
+                      className={
+                        needsReauthorization(state) || state === "API_NOT_ENABLED"
+                          ? "text-sm text-red-600"
+                          : "text-muted-foreground text-sm"
+                      }
+                    >
+                      {CONNECTION_STATE_MESSAGES[state]}
                     </p>
                   ) : null}
 
-                  {isSelecting ? (
-                    propertyError ? (
-                      <p role="alert" className="text-sm text-red-600">
-                        {propertyError}
-                      </p>
-                    ) : (
-                      <PropertyPicker
-                        websiteId={websiteId}
-                        slug={slug}
-                        properties={properties}
-                        selectedId={null}
-                      />
-                    )
+                  {/* The way back into selection. Without it a connection that
+                      left the callback redirect was stranded: authorized, told to
+                      choose a property, and given nothing to choose with. */}
+                  {!isSelecting && canChooseProperty(state) ? (
+                    <Link
+                      href={`/websites/${websiteId}/connections?select=${card.provider}`}
+                      className="border-border inline-flex h-9 items-center rounded-md border px-4 text-sm font-medium"
+                    >
+                      {state === "READY" ? "Change property" : "Choose property"}
+                    </Link>
+                  ) : null}
+
+                  {isSelecting && properties.length > 0 ? (
+                    <PropertyPicker
+                      websiteId={websiteId}
+                      slug={slug}
+                      properties={properties}
+                      selectedId={null}
+                    />
                   ) : null}
 
                   {card.status !== "NOT_CONNECTED" ? (
@@ -207,14 +249,13 @@ export default async function ConnectionsPage({
       <section className="border-border space-y-2 rounded-lg border border-dashed p-5">
         <h2 className="text-sm font-medium">How connections work</h2>
         <p className="text-muted-foreground text-sm leading-relaxed">
-          Signing in with Google proves who you are. Connecting Search Console or
-          Analytics is a separate authorization, asking only for read access, and it is
-          attached to the property you choose rather than to your account as a whole.
+          Signing in with Google proves who you are. Connecting Search Console or Analytics is a
+          separate authorization, asking only for read access, and it is attached to the property
+          you choose rather than to your account as a whole.
         </p>
         <p className="text-muted-foreground text-sm leading-relaxed">
-          The long-lived token is encrypted before it is stored and is never returned by
-          any page. Data already collected stays if a connection is removed, because it
-          was really measured.
+          The long-lived token is encrypted before it is stored and is never returned by any page.
+          Data already collected stays if a connection is removed, because it was really measured.
         </p>
       </section>
     </main>

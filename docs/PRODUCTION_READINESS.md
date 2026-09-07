@@ -54,11 +54,14 @@ for a public launch.
 7. Testing or staging and production OAuth projects and configuration are
    clearly separated where practical, so a change to one cannot break the
    other.
-8. The Connections screen eventually tells these apart, in words a customer
-   can act on: the OAuth app is still in testing and this account is not an
-   approved tester; authorization was denied; the redirect URI does not match;
-   a scope is not approved or configured; the token has expired;
-   reauthorization is required.
+8. The Connections screen tells these apart, in words a customer can act on.
+   Mostly done: the Google connections hotfix classifies discovery failures as
+   REAUTH_REQUIRED, API_NOT_ENABLED, INSUFFICIENT_SCOPE,
+   NO_ACCESSIBLE_PROPERTIES, PROPERTY_DISCOVERY_FAILED, RATE_LIMITED,
+   PROVIDER_UNAVAILABLE and INVALID_PROVIDER_RESPONSE, and offers reconnecting
+   only where that is the remedy. Still outstanding: naming the testing-mode
+   refusal and a redirect-URI mismatch, both of which happen during consent,
+   before any of the above is reached.
 9. OAuth access tokens, refresh tokens, authorization codes and full state
    payloads never appear in user-visible error messages or in audit records.
    The existing redaction in `src/lib/redact.ts` and the fixed error vocabulary

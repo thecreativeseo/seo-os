@@ -2,6 +2,7 @@
 
 import { useActionState } from "react";
 
+import { CONNECTION_STATE_MESSAGES } from "@/lib/connections/discovery";
 import {
   connectApiKeyAction,
   disconnectProviderAction,
@@ -120,11 +121,13 @@ export function PropertyPicker({
 }) {
   const [state, action, pending] = useActionState(selectPropertyAction, initial);
 
+  // The page does not render the picker with an empty list, so this is a
+  // fallback. It says what the rest of the product says, rather than telling
+  // somebody to reconnect an account that is working perfectly well.
   if (properties.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
-        This Google account has no readable properties. Check that the account has
-        access, then reconnect.
+        {CONNECTION_STATE_MESSAGES.NO_ACCESSIBLE_PROPERTIES}
       </p>
     );
   }
@@ -174,13 +177,7 @@ export function PropertyPicker({
   );
 }
 
-export function DisconnectButton({
-  websiteId,
-  slug,
-}: {
-  websiteId: string;
-  slug: string;
-}) {
+export function DisconnectButton({ websiteId, slug }: { websiteId: string; slug: string }) {
   const [state, action, pending] = useActionState(disconnectProviderAction, initial);
 
   return (
@@ -195,8 +192,8 @@ export function DisconnectButton({
         {pending ? "Disconnecting…" : "Disconnect"}
       </button>
       <p className="text-muted-foreground text-xs">
-        Removes the stored credential. Data already collected is kept, because it was
-        really measured.
+        Removes the stored credential. Data already collected is kept, because it was really
+        measured.
       </p>
       {state.error ? (
         <p role="alert" className="text-sm text-red-600">

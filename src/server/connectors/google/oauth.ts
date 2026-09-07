@@ -1,4 +1,5 @@
 import { getEnv } from "@/lib/env";
+import { GoogleDiscoveryError, discoveryFailure } from "@/server/connectors/google/discovery";
 
 /**
  * Google OAuth for data access, deliberately separate from sign-in.
@@ -161,59 +162,120 @@ export async function refreshAccessToken(refreshToken: string): Promise<TokenRes
 
 export type RemoteProperty = { id: string; name: string };
 
-/** Search Console properties this authorization can read. */
-export async function listSearchConsoleProperties(
-  accessToken: string,
-): Promise<RemoteProperty[]> {
+/**
+ * Search Console properties this authorization can read.
+ *
+ * An empty list is a result, not a failure: a Google account with no verified
+ * properties has connected perfectly well and simply has nothing to offer. The
+ * caller decides what to call that. Only a response Google refused, or one we
+ * could not read, throws.
+ *
+ * The endpoint is unchanged. It is the same host the P1 sync connector has used
+ * successfully since it shipped, and nothing observed here is evidence against
+ * it; the new classification will say what Google actually objects to.
+ */
+export async function listSearchConsoleProperties(accessToken: string): Promise<RemoteProperty[]> {
   const response = await fetch("https://www.googleapis.com/webmasters/v3/sites", {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
 
-  if (!response.ok) {
-    throw new GoogleOAuthError("Could not list Search Console properties.", "list_failed");
+  if (!response.ok) await discoveryFailure(response);
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new GoogleDiscoveryError("INVALID_PROVIDER_RESPONSE", null);
   }
 
-  const payload = (await response.json()) as {
-    siteEntry?: { siteUrl: string; permissionLevel: string }[];
-  };
-
-  return (payload.siteEntry ?? [])
-    // A property the user cannot read would produce empty syncs that look like a
-    // site with no traffic.
-    .filter((entry) => entry.permissionLevel !== "siteUnverifiedUser")
-    .map((entry) => ({ id: entry.siteUrl, name: entry.siteUrl }));
-}
-
-/** GA4 properties this authorization can read. */
-export async function listAnalyticsProperties(
-  accessToken: string,
-): Promise<RemoteProperty[]> {
-  const response = await fetch(
-    "https://analyticsadmin.googleapis.com/v1beta/accountSummaries",
-    { headers: { Authorization: `Bearer ${accessToken}` } },
-  );
-
-  if (!response.ok) {
-    throw new GoogleOAuthError("Could not list Analytics properties.", "list_failed");
+  const entries = (payload as { siteEntry?: unknown } | null)?.siteEntry;
+  if (entries !== undefined && !Array.isArray(entries)) {
+    throw new GoogleDiscoveryError("INVALID_PROVIDER_RESPONSE", null);
   }
 
-  const payload = (await response.json()) as {
-    accountSummaries?: {
-      displayName?: string;
-      propertySummaries?: { property: string; displayName: string }[];
-    }[];
-  };
-
-  return (payload.accountSummaries ?? []).flatMap((account) =>
-    (account.propertySummaries ?? []).map((property) => ({
-      id: property.property,
-      name: account.displayName
-        ? `${account.displayName} · ${property.displayName}`
-        : property.displayName,
-    })),
+  return (
+    (entries ?? [])
+      .filter(
+        (entry): entry is { siteUrl: string; permissionLevel?: string } =>
+          typeof (entry as { siteUrl?: unknown } | null)?.siteUrl === "string",
+      )
+      // A property the user cannot read would produce empty syncs that look like a
+      // site with no traffic.
+      .filter((entry) => entry.permissionLevel !== "siteUnverifiedUser")
+      .map((entry) => ({ id: entry.siteUrl, name: entry.siteUrl }))
   );
 }
 
+/** The Admin API's maximum page size for accountSummaries. */
+const ANALYTICS_PAGE_SIZE = 200;
+
+/** A ceiling on paging, so a provider that always returns a token cannot loop. */
+const ANALYTICS_MAX_PAGES = 25;
+
+type AccountSummary = {
+  displayName?: string;
+  propertySummaries?: { property?: unknown; displayName?: unknown }[];
+};
+
+/**
+ * GA4 properties this authorization can read, across every page.
+ *
+ * accountSummaries is paginated and only the first page was ever read, so an
+ * organization with more accounts than fit in one page had the rest silently
+ * disappear. Not an error, just a shorter list than the truth, which is the
+ * worse of the two.
+ *
+ * An empty list is a result, not a failure.
+ */
+export async function listAnalyticsProperties(accessToken: string): Promise<RemoteProperty[]> {
+  const properties: RemoteProperty[] = [];
+  let pageToken: string | null = null;
+  let pages = 0;
+
+  do {
+    const url = new URL("https://analyticsadmin.googleapis.com/v1beta/accountSummaries");
+    url.searchParams.set("pageSize", String(ANALYTICS_PAGE_SIZE));
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+
+    const response = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) await discoveryFailure(response);
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new GoogleDiscoveryError("INVALID_PROVIDER_RESPONSE", null);
+    }
+
+    const body = (payload ?? {}) as { accountSummaries?: unknown; nextPageToken?: unknown };
+    if (body.accountSummaries !== undefined && !Array.isArray(body.accountSummaries)) {
+      throw new GoogleDiscoveryError("INVALID_PROVIDER_RESPONSE", null);
+    }
+
+    for (const account of (body.accountSummaries ?? []) as AccountSummary[]) {
+      for (const property of account.propertySummaries ?? []) {
+        if (typeof property.property !== "string") continue;
+        const label =
+          typeof property.displayName === "string" ? property.displayName : property.property;
+        properties.push({
+          id: property.property,
+          name: account.displayName ? `${account.displayName} · ${label}` : label,
+        });
+      }
+    }
+
+    pageToken =
+      typeof body.nextPageToken === "string" && body.nextPageToken.length > 0
+        ? body.nextPageToken
+        : null;
+    pages += 1;
+  } while (pageToken && pages < ANALYTICS_MAX_PAGES);
+
+  return properties;
+}
 export async function listProperties(
   provider: GoogleProvider,
   accessToken: string,
