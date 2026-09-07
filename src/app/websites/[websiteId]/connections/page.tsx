@@ -53,7 +53,7 @@ const KEY_CONNECTABLE = new Set(["SEMRUSH", "AHREFS"]);
 
 const KEY_HELP: Record<string, string> = {
   SEMRUSH:
-    "Semrush Analytics API v3 key required. In Semrush, open My Profile → API Keys and copy the existing Version 3 key. New keys you create are Version 4 and do not work with SEO OS's current Domain reports. Check Subscription info → API Units if API access or units are unavailable. Stored encrypted, never shown again, and verified with a single-row request before it is saved. Rows are billed as API units.",
+    "SEO OS currently requires Semrush Analytics API v3 for Domain Reports. If your Semrush account shows a Version 3 API key, use that key here. Version 4 keys are not compatible with this connection. If your account does not provide a Version 3 key, use Ahrefs instead or contact Semrush Support about v3 API access. Stored encrypted, never shown again, and verified with a single-row request before it is saved. Rows are billed as API units.",
   AHREFS:
     "An API key from your Ahrefs account's API settings. Stored encrypted, never shown again, and verified with a single-row request before it is saved. Rows consume API units.",
 };

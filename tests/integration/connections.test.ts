@@ -159,14 +159,13 @@ describe("what the interface asks for", () => {
     const page = await readFile("src/app/websites/[websiteId]/connections/page.tsx", "utf8");
     const help = page.slice(page.indexOf("SEMRUSH:"), page.indexOf("AHREFS:"));
 
-    expect(help).toContain("Semrush Analytics API v3 key required");
-    // Where the existing v3 key actually is. It is generated for the account
-    // and cannot be created: anything a user makes now is v4.
-    expect(help).toContain("My Profile → API Keys");
-    expect(help).toContain("copy the existing Version 3 key");
-    expect(help).toContain("New keys you create are Version 4");
-    // And where to look when the key is right but the account is not.
-    expect(help).toContain("Subscription info → API Units");
+    expect(help).toContain("requires Semrush Analytics API v3 for Domain Reports");
+    // Some accounts only ever see Version 4 keys. The copy must not promise a
+    // v3 key exists, and must say what to do when there is none.
+    expect(help).toContain("If your Semrush account shows a Version 3 API key");
+    expect(help).toContain("Version 4 keys are not compatible with this connection");
+    expect(help).toContain("use Ahrefs instead");
+    expect(help).toContain("contact Semrush Support about v3 API access");
   });
 });
 

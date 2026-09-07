@@ -337,7 +337,7 @@ describe("mapping Semrush errors", () => {
     expect(error).toBeInstanceOf(SemrushError);
     expect((error as Error).message).not.toContain(KEY);
     expect((error as Error).message).toBe(
-      "Semrush did not accept this Analytics API v3 key. In Semrush, open My Profile → API Keys and copy the existing Version 3 key; any key you create now is Version 4.",
+      "Semrush did not accept this key for the v3 Domain Reports API. Version 4 keys do not work with this connection. If your account does not show a Version 3 key, use Ahrefs or contact Semrush Support about v3 API access.",
     );
   });
 
