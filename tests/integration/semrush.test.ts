@@ -236,14 +236,24 @@ describe("parsing a Semrush response", () => {
 });
 
 describe("mapping Semrush errors", () => {
+  // The official v3 SEO API table. Two entries here were previously wrong: 130
+  // was written as "nothing found" when it means API disabled, and 134 was read
+  // as a bad key when it means the total request limit was reached, so every
+  // account that hit its ceiling was told to check a key that was fine.
   const cases: [string, string][] = [
-    ["ERROR 120 :: WRONG KEY", "invalid_key"],
-    ["ERROR 131 :: WRONG DATABASE", "unknown_database"],
-    ["ERROR 132 :: API UNITS BALANCE IS ZERO", "quota_exhausted"],
-    ["ERROR 130 :: NOTHING FOUND", "not_subscribed"],
+    ["ERROR 110 :: INVALID IMPORT KEY", "INVALID_API_KEY"],
+    ["ERROR 120 :: WRONG KEY - ID PAIR", "INVALID_API_KEY"],
+    ["ERROR 130 :: API DISABLED", "API_ACCESS_DISABLED"],
+    ["ERROR 131 :: LIMIT EXCEEDED", "REPORT_LIMIT_EXCEEDED"],
+    ["ERROR 132 :: API UNITS BALANCE IS ZERO", "API_UNITS_EXHAUSTED"],
+    ["ERROR 133 :: DB ACCESS DENIED", "DATABASE_ACCESS_DENIED"],
+    ["ERROR 134 :: TOTAL LIMIT EXCEEDED", "TOTAL_LIMIT_EXCEEDED"],
+    ["ERROR 135 :: API REPORT TYPE DISABLED", "REPORT_TYPE_DISABLED"],
+    ["ERROR 429 :: TOO MANY REQUESTS", "RATE_LIMITED"],
+    ["ERROR 500 :: INTERNAL ERROR", "PROVIDER_UNAVAILABLE"],
     // An unrecognised code stays generic rather than being reported as
     // something specific we have not actually identified.
-    ["ERROR 999 :: SOMETHING NEW", "upstream_error"],
+    ["ERROR 999 :: SOMETHING NEW", "PROVIDER_ERROR"],
   ];
 
   for (const [body, expected] of cases) {
@@ -262,6 +272,54 @@ describe("mapping Semrush errors", () => {
     });
   }
 
+  it("treats NOTHING FOUND as an empty report, not a failure", async () => {
+    // ERROR 50 means the key was accepted, the request was understood, and the
+    // domain has nothing in that database. A new site rankng for nothing must
+    // still be able to connect.
+    const { impl } = stubFetch(["ERROR 50 :: NOTHING FOUND"]);
+
+    const result = await fetchOrganicPositions({
+      apiKey: KEY,
+      domain: "example.com",
+      database: "ph",
+      fetchImpl: impl,
+      sleepImpl: noSleep,
+    });
+
+    expect(result.rows).toEqual([]);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("carries the status and the numeric code for diagnosis, and nothing else", async () => {
+    const { impl } = stubFetch(["ERROR 132 :: API UNITS BALANCE IS ZERO"]);
+
+    const error = (await fetchOrganicPositions({
+      apiKey: KEY,
+      domain: "example.com",
+      database: "ph",
+      fetchImpl: impl,
+      sleepImpl: noSleep,
+    }).catch((caught: unknown) => caught)) as SemrushError;
+
+    expect(error.code).toBe("API_UNITS_EXHAUSTED");
+    expect(error.providerErrorCode).toBe("132");
+    expect(error.httpStatus).toBe(200);
+    expect(JSON.stringify({ ...error, message: error.message })).not.toContain(KEY);
+  });
+
+  it("says a malformed answer is malformed, not a bad key", async () => {
+    const { impl } = stubFetch(["<html>gateway</html>"]);
+
+    await expect(
+      fetchOrganicPositions({
+        apiKey: KEY,
+        domain: "example.com",
+        database: "ph",
+        fetchImpl: impl,
+        sleepImpl: noSleep,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_PROVIDER_RESPONSE" });
+  });
   it("never carries the upstream body, which can echo the key", async () => {
     // A realistic hostile case: the provider reflects the request back.
     const { impl } = stubFetch([
@@ -279,7 +337,7 @@ describe("mapping Semrush errors", () => {
     expect(error).toBeInstanceOf(SemrushError);
     expect((error as Error).message).not.toContain(KEY);
     expect((error as Error).message).toBe(
-      "Semrush rejected the API key. Check it and connect again.",
+      "Semrush did not accept this Analytics API v3 key. Check that you copied the v3 key from Subscription info → API units.",
     );
   });
 
@@ -294,7 +352,7 @@ describe("mapping Semrush errors", () => {
         fetchImpl: impl,
         sleepImpl: noSleep,
       }),
-    ).rejects.toMatchObject({ code: "rate_limited" });
+    ).rejects.toMatchObject({ code: "RATE_LIMITED" });
   });
 
   it("does not inspect a thrown fetch error, whose message can hold the url", async () => {
@@ -311,7 +369,7 @@ describe("mapping Semrush errors", () => {
     }).catch((caught: unknown) => caught);
 
     expect((error as Error).message).not.toContain(KEY);
-    expect((error as SemrushError).code).toBe("request_failed");
+    expect((error as SemrushError).code).toBe("PROVIDER_UNAVAILABLE");
   });
 });
 
@@ -432,7 +490,7 @@ describe("storing the API key", () => {
 
     await expect(
       connectApiKey(context, "SEMRUSH", KEY, async () => {
-        throw new SemrushError("invalid_key");
+        throw new SemrushError("INVALID_API_KEY");
       }),
     ).rejects.toMatchObject({ code: "key_rejected" });
 

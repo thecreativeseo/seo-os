@@ -1,11 +1,8 @@
+import { readFile } from "node:fs/promises";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { prisma } from "@/server/db/prisma";
-import {
-  PROVIDER_COUNT,
-  countConnected,
-  listConnectionCards,
-} from "@/server/services/connections";
+import { PROVIDER_COUNT, countConnected, listConnectionCards } from "@/server/services/connections";
 import { CONNECTION_PROVIDERS } from "@/lib/connections/registry";
 import type { TenantContext } from "@/server/auth/guards";
 
@@ -109,12 +106,7 @@ describe("provider registry", () => {
     // And nothing else does. This is the assertion that matters: the page offers
     // a connect control for exactly these, so any other card reading "Available"
     // would be promising an action that is not on the screen.
-    const connectable = new Set([
-      "GOOGLE_SEARCH_CONSOLE",
-      "GOOGLE_ANALYTICS",
-      "SEMRUSH",
-      "AHREFS",
-    ]);
+    const connectable = new Set(["GOOGLE_SEARCH_CONSOLE", "GOOGLE_ANALYTICS", "SEMRUSH", "AHREFS"]);
 
     for (const card of cards) {
       if (connectable.has(card.provider)) continue;
@@ -159,6 +151,20 @@ describe("provider registry", () => {
   });
 });
 
+describe("what the interface asks for", () => {
+  it("names the Semrush API version, because a v4 key silently will not work", async () => {
+    // The connector calls api.semrush.com with the key in the query string,
+    // which is Analytics API v3. A key from a newer Semrush API surface is
+    // refused by v3 and the person is left guessing which key they needed.
+    const page = await readFile("src/app/websites/[websiteId]/connections/page.tsx", "utf8");
+    const help = page.slice(page.indexOf("SEMRUSH:"), page.indexOf("AHREFS:"));
+
+    expect(help).toContain("Semrush Analytics API v3 key required");
+    expect(help).toContain("Subscription info");
+    expect(help).toContain("A v4 key will not work with this connection");
+  });
+});
+
 describe("connection state", () => {
   it("reports every provider NOT_CONNECTED when nothing has been touched", async () => {
     const context = await makeContext("default");
@@ -173,9 +179,7 @@ describe("connection state", () => {
     const context = await makeContext("norows");
     await listConnectionCards(context);
 
-    expect(await prisma.connection.count({ where: { websiteId: context.website.id } })).toBe(
-      0,
-    );
+    expect(await prisma.connection.count({ where: { websiteId: context.website.id } })).toBe(0);
   });
 
   it("reflects a stored status without inventing one", async () => {

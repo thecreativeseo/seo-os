@@ -25,6 +25,7 @@ import {
   DEFAULT_MAX_ROWS,
   SemrushError,
   databaseForMarket,
+  SEMRUSH_SYNC_CODES,
   fetchOrganicPositions,
 } from "@/server/connectors/semrush/client";
 import {
@@ -162,14 +163,17 @@ export function idempotencyKeyFor(syncType: SyncType, window: SyncWindow): strin
 function errorCodeFor(error: unknown): SyncErrorCode {
   if (error instanceof SyncError) return error.code;
 
+  // Semrush names the account states its API distinguishes - units, report
+  // limit, total limit, database access - and this log does not, so the
+  // collapse is written down in the connector rather than cast away here.
+  if (error instanceof SemrushError) return SEMRUSH_SYNC_CODES[error.code];
+
   if (
     error instanceof SearchConsoleError ||
     error instanceof AnalyticsError ||
-    error instanceof SemrushError ||
     error instanceof AhrefsError
   ) {
-    // Each connector's codes are a subset of ours by construction, so the union
-    // above stays exhaustive rather than needing a mapping table per vendor.
+    // These connectors' codes are a subset of ours by construction.
     return error.code as SyncErrorCode;
   }
 
@@ -487,13 +491,7 @@ export async function runGscSync(
   const { connection, propertyId } = await connectionFor(context, "GOOGLE_SEARCH_CONSOLE");
   const window = resolveSyncWindow(connection, { now, days: options.days });
 
-  const { run, alreadyDone } = await claimRun(
-    context,
-    connection,
-    "GSC_METRICS",
-    window,
-    now,
-  );
+  const { run, alreadyDone } = await claimRun(context, connection, "GSC_METRICS", window, now);
 
   if (alreadyDone) {
     return {
@@ -528,7 +526,10 @@ export async function runGscSync(
 
     // Normalize first, so a row that cannot be placed is counted as skipped rather
     // than stored against a guessed identity.
-    const urls = new Map<string, { normalized: string; hostname: string; protocol: string; path: string }>();
+    const urls = new Map<
+      string,
+      { normalized: string; hostname: string; protocol: string; path: string }
+    >();
     const queries = new Map<string, { raw: string; normalized: string }>();
     const staged: {
       date: string;
@@ -729,13 +730,7 @@ export async function runGa4Sync(
   const { connection, propertyId } = await connectionFor(context, "GOOGLE_ANALYTICS");
   const window = resolveSyncWindow(connection, { now, days: options.days });
 
-  const { run, alreadyDone } = await claimRun(
-    context,
-    connection,
-    "GA4_METRICS",
-    window,
-    now,
-  );
+  const { run, alreadyDone } = await claimRun(context, connection, "GA4_METRICS", window, now);
 
   if (alreadyDone) {
     return {
@@ -771,8 +766,12 @@ export async function runGa4Sync(
       },
     });
 
-    const urls = new Map<string, { normalized: string; hostname: string; protocol: string; path: string }>();
-    const staged: { date: string; url: string; metrics: Ga4Result["rows"][number]["metrics"] }[] = [];
+    const urls = new Map<
+      string,
+      { normalized: string; hostname: string; protocol: string; path: string }
+    >();
+    const staged: { date: string; url: string; metrics: Ga4Result["rows"][number]["metrics"] }[] =
+      [];
     let skipped = 0;
 
     for (const row of result.rows) {
@@ -794,11 +793,7 @@ export async function runGa4Sync(
       staged.push({ date: row.date, url: url.value.normalized, metrics: row.metrics });
     }
 
-    const pageIds = await resolvePages(
-      context.website.id,
-      [...urls.values()],
-      "GOOGLE_ANALYTICS",
-    );
+    const pageIds = await resolvePages(context.website.id, [...urls.values()], "GOOGLE_ANALYTICS");
 
     // A metric this property cannot report stays null for every row. Reading it off
     // the row alone would store null for a page that simply had none that day,
@@ -989,13 +984,7 @@ export async function runSemrushSync(
     throw new SyncError("Semrush is not connected.", "not_connected");
   }
 
-  const { run, alreadyDone } = await claimRun(
-    context,
-    connection,
-    "SEMRUSH_ORGANIC",
-    window,
-    now,
-  );
+  const { run, alreadyDone } = await claimRun(context, connection, "SEMRUSH_ORGANIC", window, now);
 
   if (alreadyDone) {
     return {
@@ -1033,7 +1022,9 @@ export async function runSemrushSync(
       rowsReceived: result.rows.length,
       // Hashed over the identities returned, not the response body: the body is
       // large and the point is only to tell one pull from another.
-      checksumSource: result.rows.map((row) => `${row.normalizedKeyword}:${row.position}`).join("\n"),
+      checksumSource: result.rows
+        .map((row) => `${row.normalizedKeyword}:${row.position}`)
+        .join("\n"),
       extra: {
         database,
         truncated: result.truncated,
@@ -1198,10 +1189,7 @@ export async function runAhrefsSync(
 }
 
 /** Recent runs for a website, newest first. */
-export async function listSyncRuns(
-  context: TenantContext,
-  limit = 20,
-): Promise<SyncRun[]> {
+export async function listSyncRuns(context: TenantContext, limit = 20): Promise<SyncRun[]> {
   return prisma.syncRun.findMany({
     where: websiteScope(context),
     orderBy: { createdAt: "desc" },

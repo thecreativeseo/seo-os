@@ -11,6 +11,8 @@ import {
   type GoogleProvider,
   type RemoteProperty,
 } from "@/server/connectors/google/oauth";
+import { SemrushError } from "@/server/connectors/semrush/client";
+import { AhrefsError } from "@/server/connectors/ahrefs/client";
 import type { Connection } from "@/generated/prisma/client";
 import type { DiscoveryFailureCode } from "@/lib/connections/discovery";
 import {
@@ -201,10 +203,33 @@ export async function connectApiKey(
     } catch (error) {
       // The provider's own message is not passed on: for Semrush the key travels
       // in the query string, so an upstream error body can contain the secret.
+      // One safe line, so a refused connection can be diagnosed. The numeric
+      // code and the HTTP status are not secrets; the body and the URL are,
+      // and for Semrush the URL carries the key, so neither is touched.
+      console.error(
+        "connection.verify",
+        JSON.stringify({
+          provider,
+          operation: "verify_connection",
+          httpStatus: error instanceof SemrushError ? error.httpStatus : null,
+          providerErrorCode: error instanceof SemrushError ? error.providerErrorCode : null,
+          classifiedCode:
+            error instanceof Error && "code" in error && typeof error.code === "string"
+              ? error.code
+              : null,
+        }),
+      );
+
       throw new ConnectionAuthError(
-        error instanceof Error && "code" in error && typeof error.code === "string"
-          ? messageForVerifyFailure(error.code)
-          : "That key could not be verified with the provider.",
+        // The connector's own message, from its own fixed table. Never the
+        // upstream text, which can echo a request that carries the key.
+        error instanceof SemrushError || error instanceof AhrefsError
+          ? error.message
+          : messageForVerifyFailure(
+              error instanceof Error && "code" in error && typeof error.code === "string"
+                ? error.code
+                : "",
+            ),
         "key_rejected",
       );
     }
@@ -255,16 +280,18 @@ export async function connectApiKey(
   });
 }
 
+/**
+ * The fallback for a provider that has no message table of its own.
+ *
+ * Semrush and Ahrefs both carry theirs, which name the provider and the
+ * remedy; this is what is left for anything else. It used to answer for both
+ * of them, which is how an exhausted Semrush account was told "the provider
+ * rejected that key" about a key that was perfectly good.
+ */
 function messageForVerifyFailure(code: string): string {
   switch (code) {
-    case "invalid_key":
-      return "The provider rejected that key.";
-    case "quota_exhausted":
-      return "That key is valid but the account has no API units left.";
-    case "not_subscribed":
-      return "That account's plan does not include API access.";
-    case "unknown_database":
-      return "The provider has no database for this website's market.";
+    case "missing_key":
+      return "Enter the API key.";
     default:
       return "That key could not be verified with the provider.";
   }

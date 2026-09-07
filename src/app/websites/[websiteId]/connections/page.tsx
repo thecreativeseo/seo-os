@@ -53,7 +53,7 @@ const KEY_CONNECTABLE = new Set(["SEMRUSH", "AHREFS"]);
 
 const KEY_HELP: Record<string, string> = {
   SEMRUSH:
-    "Found under Subscription info → API units in your Semrush account. Stored encrypted, never shown again, and verified with a single-row request before it is saved. Rows are billed as API units.",
+    "Semrush Analytics API v3 key required. Found under Subscription info → API units in your Semrush account. A v4 key will not work with this connection. Stored encrypted, never shown again, and verified with a single-row request before it is saved. Rows are billed as API units.",
   AHREFS:
     "An API key from your Ahrefs account's API settings. Stored encrypted, never shown again, and verified with a single-row request before it is saved. Rows consume API units.",
 };

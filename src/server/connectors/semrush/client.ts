@@ -47,36 +47,90 @@ export const DEFAULT_MAX_ROWS = 50_000;
  */
 export const MIN_REQUEST_INTERVAL_MS = 100;
 
+/**
+ * Semrush's own documented codes, as our own vocabulary.
+ *
+ * The v3 SEO API reports machine errors in the response body, usually with a
+ * 200, so the numeric code is the evidence and the HTTP status is metadata.
+ * The previous table had two of them wrong: 134 was read as a bad key when it
+ * means the total request limit was reached, so every account that hit its
+ * ceiling was told to check its key; and 50, NOTHING FOUND, was treated as a
+ * failure although it is how the API says a report is empty.
+ *
+ * RATE_LIMITED, PROVIDER_UNAVAILABLE and INVALID_PROVIDER_RESPONSE are spelled
+ * the same way the Google connection classifier spells them. Deliberately: the
+ * two providers answer the same three questions and should not need two
+ * vocabularies to say so, but a shared enum would force each vendor's specific
+ * codes onto the other.
+ */
 export type SemrushErrorCode =
-  | "invalid_key"
-  | "quota_exhausted"
-  | "rate_limited"
-  | "unknown_database"
-  | "not_subscribed"
-  | "upstream_error"
-  | "request_failed"
-  | "invalid_response";
+  | "NO_DATA"
+  | "INVALID_API_KEY"
+  | "API_ACCESS_DISABLED"
+  | "REPORT_LIMIT_EXCEEDED"
+  | "API_UNITS_EXHAUSTED"
+  | "DATABASE_ACCESS_DENIED"
+  | "TOTAL_LIMIT_EXCEEDED"
+  | "REPORT_TYPE_DISABLED"
+  | "RATE_LIMITED"
+  | "PROVIDER_UNAVAILABLE"
+  | "PROVIDER_ERROR"
+  | "INVALID_PROVIDER_RESPONSE";
 
 /**
  * Our messages, not Semrush's.
  *
  * A fixed table because the upstream body may contain the request, and the
  * request contains the key. Nothing read from the wire reaches a log, a SyncRun
- * row, or a screen.
+ * row, or a screen. Each one names what a person can actually do: only the two
+ * key states ask them to look at the key, and the four account states say which
+ * limit was reached instead of blaming the credential.
  */
 export const SEMRUSH_ERROR_MESSAGES: Record<SemrushErrorCode, string> = {
-  invalid_key: "Semrush rejected the API key. Check it and connect again.",
-  quota_exhausted: "This Semrush account has no API units left.",
-  rate_limited: "Semrush is rate limiting these requests. Try again shortly.",
-  unknown_database: "Semrush has no database for this website's market.",
-  not_subscribed: "This Semrush plan does not include API access to that report.",
-  upstream_error: "Semrush could not answer this request.",
-  request_failed: "Semrush could not be reached.",
-  invalid_response: "Semrush returned data in a shape SEO OS could not read.",
+  NO_DATA: "Semrush has no data for this website in the selected database.",
+  INVALID_API_KEY:
+    "Semrush did not accept this Analytics API v3 key. Check that you copied the v3 key from Subscription info → API units.",
+  API_ACCESS_DISABLED: "Your Semrush subscription does not currently include API access.",
+  REPORT_LIMIT_EXCEEDED: "Your Semrush limit for this report has been reached.",
+  API_UNITS_EXHAUSTED: "Your Semrush API unit balance is zero. Add API units or upgrade your plan.",
+  DATABASE_ACCESS_DENIED:
+    "Your Semrush account does not have access to the selected regional database.",
+  TOTAL_LIMIT_EXCEEDED: "Your Semrush total API request limit has been reached.",
+  REPORT_TYPE_DISABLED: "This Semrush report is not available for the current subscription.",
+  RATE_LIMITED: "Semrush asked us to slow down. Try again shortly.",
+  PROVIDER_UNAVAILABLE: "Semrush is temporarily unavailable. Try again later.",
+  PROVIDER_ERROR: "Semrush could not answer this request.",
+  INVALID_PROVIDER_RESPONSE: "Semrush returned data in a shape SEO OS could not read.",
 };
 
+/**
+ * What a SyncRun records. The connector's vocabulary is finer than the sync
+ * log's, so the collapse happens here, visibly, rather than through a cast that
+ * happens to typecheck.
+ */
+export const SEMRUSH_SYNC_CODES = {
+  NO_DATA: "upstream_error",
+  INVALID_API_KEY: "invalid_key",
+  API_ACCESS_DISABLED: "not_subscribed",
+  REPORT_LIMIT_EXCEEDED: "quota_exhausted",
+  API_UNITS_EXHAUSTED: "quota_exhausted",
+  DATABASE_ACCESS_DENIED: "permission_denied",
+  TOTAL_LIMIT_EXCEEDED: "quota_exhausted",
+  REPORT_TYPE_DISABLED: "not_subscribed",
+  RATE_LIMITED: "rate_limited",
+  PROVIDER_UNAVAILABLE: "request_failed",
+  PROVIDER_ERROR: "upstream_error",
+  INVALID_PROVIDER_RESPONSE: "invalid_response",
+} as const satisfies Record<SemrushErrorCode, string>;
+
 export class SemrushError extends Error {
-  constructor(readonly code: SemrushErrorCode) {
+  constructor(
+    readonly code: SemrushErrorCode,
+    /** The HTTP status, or 0 when the request never got an answer. Diagnostic only. */
+    readonly httpStatus: number = 0,
+    /** The numeric code Semrush put in the body, e.g. "132". Never the body itself. */
+    readonly providerErrorCode: string | null = null,
+  ) {
     super(SEMRUSH_ERROR_MESSAGES[code]);
     this.name = "SemrushError";
   }
@@ -267,58 +321,75 @@ async function request(doFetch: typeof fetch, query: Record<string, string>): Pr
   } catch {
     // Deliberately not inspecting the thrown error. A fetch failure can carry the
     // request URL in its message, and the URL holds the key.
-    throw new SemrushError("request_failed");
+    throw new SemrushError("PROVIDER_UNAVAILABLE");
   }
 
-  if (response.status === 429) throw new SemrushError("rate_limited");
+  if (response.status === 429) throw new SemrushError("RATE_LIMITED", 429);
 
   let body: string;
 
   try {
     body = await response.text();
   } catch {
-    throw new SemrushError("invalid_response");
+    throw new SemrushError("INVALID_PROVIDER_RESPONSE", response.status);
   }
 
-  if (!response.ok) throw classify(body, "upstream_error");
-
   // The v3 API answers 200 with an error in the body, so status alone proves
-  // nothing. Anything that is not a CSV header is treated as an error.
-  if (body.startsWith("ERROR")) throw classify(body, "upstream_error");
+  // nothing. The body code is the evidence; the status is carried for diagnosis.
+  if (!response.ok || body.startsWith("ERROR")) {
+    const error = classify(body, response.status);
+    // NOTHING FOUND is how this API says a report is empty. A domain can
+    // genuinely rank for nothing, and the key that asked was accepted.
+    if (error.code === "NO_DATA") return "";
+    throw error;
+  }
 
   return body;
 }
 
 /**
- * Maps an upstream error body to one of ours.
+ * Maps an upstream error body to one of ours, by the official v3 code table.
  *
- * Matched on the numeric code, which is stable, rather than on the message text,
- * which is not. Unrecognised codes fall through to a generic error instead of
- * being reported as something specific we have not actually identified.
+ * Matched on the numeric code, which is stable, rather than on the message
+ * text, which is not. An unrecognised code becomes PROVIDER_ERROR rather than
+ * being reported as something specific nobody identified.
  *
- * The body is read here and never propagated: `SemrushError` carries only a code
- * from our own table.
+ * The body is read here and never propagated: SemrushError carries a code from
+ * our own table, the HTTP status, and the numeric code Semrush sent. Not the
+ * body, which can echo the request, and the request carries the key.
  */
-function classify(body: string, fallback: SemrushErrorCode): SemrushError {
-  const code = /ERROR\s+(\d+)/.exec(body)?.[1];
+function classify(body: string, httpStatus: number): SemrushError {
+  const providerCode = /ERROR\s+(\d+)/.exec(body)?.[1] ?? null;
 
-  switch (code) {
-    // Documented on developer.semrush.com: 120 wrong key, 130 not subscribed,
-    // 131 wrong database, 132/133 units exhausted, 135 API disabled.
-    case "120":
-    case "134":
-      return new SemrushError("invalid_key");
-    case "130":
-    case "135":
-      return new SemrushError("not_subscribed");
-    case "131":
-      return new SemrushError("unknown_database");
-    case "132":
-    case "133":
-      return new SemrushError("quota_exhausted");
-    default:
-      return new SemrushError(fallback);
-  }
+  const code: SemrushErrorCode = ((): SemrushErrorCode => {
+    switch (providerCode) {
+      case "50":
+        return "NO_DATA";
+      case "110":
+      case "120":
+        return "INVALID_API_KEY";
+      case "130":
+        return "API_ACCESS_DISABLED";
+      case "131":
+        return "REPORT_LIMIT_EXCEEDED";
+      case "132":
+        return "API_UNITS_EXHAUSTED";
+      case "133":
+        return "DATABASE_ACCESS_DENIED";
+      case "134":
+        return "TOTAL_LIMIT_EXCEEDED";
+      case "135":
+        return "REPORT_TYPE_DISABLED";
+      case "429":
+        return "RATE_LIMITED";
+      case "500":
+        return "PROVIDER_UNAVAILABLE";
+      default:
+        return providerCode === null ? "INVALID_PROVIDER_RESPONSE" : "PROVIDER_ERROR";
+    }
+  })();
+
+  return new SemrushError(code, httpStatus, providerCode);
 }
 
 /**
@@ -358,7 +429,7 @@ export function parseCsv(body: string): {
   // Not the report we asked for. Better to refuse than to store a column we
   // cannot identify against a field we only assume it means.
   if (REQUIRED_FIELDS.some((field) => index[field] === undefined)) {
-    throw new SemrushError("invalid_response");
+    throw new SemrushError("INVALID_PROVIDER_RESPONSE");
   }
 
   const rows: NormalizedImportRow[] = [];
