@@ -16,7 +16,7 @@ connect Google Search Console and was told by Google:
 > testers.
 
 This is not an SEO OS authorization failure and not a tenant or team problem.
-It is the Google OAuth application's **publishing status**, which is *Testing*.
+It is the Google OAuth application's **publishing status**, which is _Testing_.
 In that state Google only lets accounts listed as test users complete the
 consent flow, whatever SEO OS thinks of them.
 
