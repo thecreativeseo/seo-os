@@ -15,7 +15,7 @@ import {
   startDraft,
 } from "@/server/services/content-draft";
 import type { Role } from "@/generated/prisma/client";
-import { teardownTenants } from "./teardown";
+import { registerOrganizations, teardownTenants } from "./teardown";
 
 /**
  * A tenant with everything QA reads - approved context, an approved fact, a
@@ -45,6 +45,7 @@ export class QaFixtures {
       data: { name: `QA ${label}`, slug: `qa-${label}-${suffix}` },
     });
     this.organizationIds.push(organization.id);
+    registerOrganizations([organization.id]);
     const membership = await prisma.organizationMembership.create({
       data: {
         organizationId: organization.id,

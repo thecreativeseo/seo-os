@@ -2,7 +2,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { PrismaClient } from "@/generated/prisma/client";
-import { deleteOrganizations } from "../helpers/teardown";
+import { deleteOrganizations, deleteUsers, registerOrganizations } from "../helpers/teardown";
 
 /**
  * M2 database verification. Requires a live connection (DIRECT_URL).
@@ -31,7 +31,7 @@ afterAll(async () => {
   }
   // Users are not owned by an Organization, so nothing cascades them away.
   if (createdUserIds.length > 0) {
-    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    await deleteUsers(createdUserIds);
   }
   await prisma.$disconnect();
 });
@@ -43,6 +43,7 @@ async function createFixture() {
     data: { name: `Trigger Test ${suffix}`, slug: `trigger-test-${suffix}` },
   });
   createdOrganizationIds.push(organization.id);
+  registerOrganizations([organization.id]);
 
   const workspace = await prisma.workspace.create({
     data: { organizationId: organization.id, name: "Test", slug: `test-${suffix}` },

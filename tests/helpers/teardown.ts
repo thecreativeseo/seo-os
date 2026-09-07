@@ -102,6 +102,19 @@ function recordInLedger(kind: "organization" | "user", ids: readonly string[]): 
 }
 
 /**
+ * Writes ids to the ledger the moment a fixture creates the organization.
+ *
+ * A worker that is killed - by a timeout, by the runner, by a person - never
+ * reaches its afterAll, and a ledger written only at teardown time learns
+ * nothing from it. Recording at creation means the global sweep, at the end of
+ * this run or the start of the next, still knows exactly which rows were ours.
+ * An id that its own suite has since removed is simply not found by the sweep.
+ */
+export function registerOrganizations(ids: readonly string[]): void {
+  recordInLedger("organization", ids);
+}
+
+/**
  * Deletes organizations by id, in batches, letting the declared cascades run.
  *
  * A batch that still fails after its retries is tried one id at a time, so a

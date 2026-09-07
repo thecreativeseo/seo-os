@@ -1,5 +1,6 @@
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "@/generated/prisma/client";
+import { PrismaClient, type Prisma } from "@/generated/prisma/client";
+import { resolveTransactionBudget, type TransactionBudget } from "@/server/db/transaction-budget";
 
 /**
  * The application's Prisma client.
@@ -24,6 +25,32 @@ import { PrismaClient } from "@/generated/prisma/client";
 
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
+/**
+ * Everything the client is constructed with apart from the adapter, as a pure
+ * function of the environment so a test can look at it without connecting.
+ *
+ * Logging never includes query parameters: they can carry business data, and
+ * in later phases credential references. Errors and warnings only.
+ *
+ * The transaction budget appears only under NODE_ENV=test. Everywhere else the
+ * key is absent, not set to a default, so Prisma's own defaults apply exactly
+ * as they did before src/server/db/transaction-budget.ts existed.
+ */
+export type ClientOptions = {
+  log: Prisma.LogLevel[];
+  transactionOptions?: TransactionBudget;
+};
+
+export function clientOptions(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): ClientOptions {
+  const budget = resolveTransactionBudget(env);
+  return {
+    log: env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],
+    ...(budget ? { transactionOptions: budget } : {}),
+  };
+}
+
 function createPrismaClient(): PrismaClient {
   const connectionString = process.env.DATABASE_URL;
 
@@ -35,12 +62,7 @@ function createPrismaClient(): PrismaClient {
 
   const adapter = new PrismaPg({ connectionString });
 
-  return new PrismaClient({
-    adapter,
-    // Never log query parameters: they can carry business data, and in future
-    // phases could carry credential references. Errors and warnings only.
-    log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"],
-  });
+  return new PrismaClient({ adapter, ...clientOptions() });
 }
 
 let instance: PrismaClient | undefined = globalForPrisma.prisma;

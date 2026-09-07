@@ -153,6 +153,31 @@ the process exits.
 web request, which needs no worker. Set it to `queue` on the web service to
 hand diagnoses to the worker, which then needs the AI variables too.
 
+## The test suite's transaction budget
+
+Nothing in this section applies to a deployed service.
+
+The test suite runs about a hundred files in parallel against the shared
+Supabase project, each building whole tenants inside interactive transactions.
+Measured from a developer machine, a round trip is 61ms at the median and
+319ms at the ninetieth percentile under that load, and a healthy tenant
+transaction was measured taking six to twelve seconds. Prisma's defaults give
+an interactive transaction two seconds to start and five to finish, so tests
+failed on the stopwatch, in unrelated suites, and passed alone.
+
+Under `NODE_ENV=test` only, the Prisma client is constructed with a larger
+budget: 10 seconds to acquire a connection, 30 seconds to run. The values live
+in `src/server/db/transaction-budget.ts` and can be overridden for an
+experiment with `PRISMA_TEST_TRANSACTION_MAX_WAIT_MS` and
+`PRISMA_TEST_TRANSACTION_TIMEOUT_MS`; a value that is not a positive whole
+number of milliseconds falls back to the default for that value. In every
+other environment the option is absent and Prisma's defaults stand. This is a
+change to how patient the suite is, not to what any product transaction does.
+
+Fixture tenants are recorded in a ledger the moment they are created and
+swept by the run's global teardown, so a run that is killed does not leave
+them behind; see `tests/helpers/teardown.ts`.
+
 ## The investor demo data
 
 Nothing seeds itself. The demo data is created by hand, on the demo website
