@@ -5,9 +5,24 @@ import { revalidatePath } from "next/cache";
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { REQUIRED } from "@/server/auth/roles";
 import { SitemapError } from "@/server/connectors/sitemap/fetch";
-import { addSitemap, removeSitemap, syncSitemap } from "@/server/services/sitemap";
+import {
+  addSitemap,
+  discoverAndAddSitemaps,
+  removeSitemap,
+  syncSitemap,
+} from "@/server/services/sitemap";
 
 export type SitemapActionState = { error?: string; message?: string };
+
+/** A URL with no meaningful path — the site root — means “find my sitemap”. */
+function isBareOrigin(input: string): boolean {
+  try {
+    const { pathname, search } = new URL(input);
+    return (pathname === "" || pathname === "/") && search === "";
+  } catch {
+    return false;
+  }
+}
 
 async function withWebsite(
   formData: FormData,
@@ -45,6 +60,12 @@ export async function addSitemapAction(
   }
 
   return withWebsite(formData, async (context) => {
+    // A bare domain is a request to discover: prefer what robots.txt declares
+    // over guessing a conventional path.
+    if (isBareOrigin(url)) {
+      const added = await discoverAndAddSitemaps(context);
+      return `${added.length} sitemap${added.length === 1 ? "" : "s"} found in robots.txt and added.`;
+    }
     await addSitemap(context, url);
   });
 }

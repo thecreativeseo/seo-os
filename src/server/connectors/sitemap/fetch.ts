@@ -26,24 +26,58 @@ export const FETCH_TIMEOUT_MS = 15_000;
 export const MAX_NESTED_SITEMAPS = 50;
 
 export type SitemapFetchError =
+  // URL-shape refusals, decided before any request is made.
   | "invalid_url"
   | "unsupported_protocol"
   | "host_mismatch"
   | "ip_address_not_allowed"
+  // What the request came back as. "http_error" was the whole story before;
+  // it hid a 404 from a 403 from a 500, so each now stands on its own and the
+  // HTTP status is carried alongside.
+  | "not_found"
+  | "forbidden"
+  | "rate_limited"
+  | "server_error"
+  | "redirect"
+  | "timeout"
   | "unreachable"
   | "http_error"
-  | "too_large"
+  // The request succeeded but the body is not a sitemap.
+  | "invalid_content_type"
+  | "invalid_xml"
   | "not_xml"
+  | "too_large"
   | "empty";
 
 export class SitemapError extends Error {
   constructor(
     message: string,
     readonly code: SitemapFetchError,
+    /** The HTTP status, when the failure was an HTTP response rather than a refusal. */
+    readonly status?: number,
   ) {
     super(message);
     this.name = "SitemapError";
   }
+}
+
+/** Options shared by the fetch entry points. `fetchImpl` is injected in tests. */
+export type SitemapFetchOptions = {
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+};
+
+/** A polite, honest identifier. Some servers answer an empty User-Agent with 403. */
+const SITEMAP_USER_AGENT = "SEO-OS/1.0 (+sitemap fetch)";
+
+/** Turns an HTTP status into a specific code, preserving the number for the message. */
+export function classifyHttpStatus(status: number): SitemapFetchError {
+  if (status >= 300 && status < 400) return "redirect";
+  if (status === 401 || status === 403) return "forbidden";
+  if (status === 404 || status === 410) return "not_found";
+  if (status === 429) return "rate_limited";
+  if (status >= 500) return "server_error";
+  return "http_error";
 }
 
 /**
@@ -93,20 +127,29 @@ export function parseSitemapLocations(xml: string): {
   return { kind, locations };
 }
 
-async function fetchXml(url: string): Promise<string> {
+async function fetchXml(url: string, options: SitemapFetchOptions = {}): Promise<string> {
+  const fetchImpl = options.fetchImpl ?? fetch;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? FETCH_TIMEOUT_MS);
 
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await fetchImpl(url, {
       signal: controller.signal,
-      headers: { Accept: "application/xml, text/xml, */*" },
+      headers: {
+        Accept: "application/xml, text/xml, application/xhtml+xml, */*",
+        "User-Agent": SITEMAP_USER_AGENT,
+      },
       // A redirect could land somewhere the host check already rejected, so the
-      // fetcher does not follow them silently.
+      // fetcher refuses to chase a target the SSRF guard never saw.
       redirect: "manual",
     });
-  } catch {
+  } catch (error) {
+    // Our own timeout aborts with this name; anything else is a genuine
+    // connection failure — DNS, refused, reset.
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new SitemapError("The sitemap did not respond in time.", "timeout");
+    }
     throw new SitemapError("Could not reach that sitemap.", "unreachable");
   } finally {
     clearTimeout(timeout);
@@ -114,13 +157,18 @@ async function fetchXml(url: string): Promise<string> {
 
   if (response.status >= 300 && response.status < 400) {
     throw new SitemapError(
-      "That sitemap redirects. Use the final URL directly.",
-      "http_error",
+      "That sitemap redirects. Enter the final URL directly.",
+      "redirect",
+      response.status,
     );
   }
 
   if (!response.ok) {
-    throw new SitemapError(`That sitemap returned ${response.status}.`, "http_error");
+    throw new SitemapError(
+      `The server returned HTTP ${response.status} for that sitemap.`,
+      classifyHttpStatus(response.status),
+      response.status,
+    );
   }
 
   const length = Number(response.headers.get("content-length") ?? "0");
@@ -134,8 +182,21 @@ async function fetchXml(url: string): Promise<string> {
     throw new SitemapError("That sitemap is too large to process.", "too_large");
   }
 
-  if (!text.includes("<loc")) {
-    throw new SitemapError("That does not look like a sitemap.", "not_xml");
+  // A 200 can still be the wrong thing: a login wall, a soft-404 HTML page, a
+  // JSON error. An HTML body is never a sitemap however valid it looks, but a
+  // sitemap served under an odd content-type still is one.
+  const head = text.slice(0, 512).toLowerCase();
+  const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+  const looksHtml =
+    contentType.includes("text/html") || head.includes("<!doctype html") || head.includes("<html");
+  const looksSitemap = /<(urlset|sitemapindex)[\s>]/i.test(text) || text.includes("<loc");
+
+  if (looksHtml && !looksSitemap) {
+    throw new SitemapError("That URL returned a web page, not a sitemap.", "invalid_content_type");
+  }
+
+  if (!looksSitemap) {
+    throw new SitemapError("That response was not a valid sitemap.", "invalid_xml");
   }
 
   return text;
@@ -159,6 +220,7 @@ export type SitemapResult = {
 export async function fetchSitemap(
   sitemapUrl: string,
   websiteHostname: string,
+  options: SitemapFetchOptions = {},
 ): Promise<SitemapResult> {
   const validated = validateSitemapUrl(sitemapUrl, websiteHostname);
 
@@ -166,7 +228,7 @@ export async function fetchSitemap(
     throw new SitemapError(SITEMAP_ERROR_MESSAGES[validated.code], validated.code);
   }
 
-  const xml = await fetchXml(validated.url);
+  const xml = await fetchXml(validated.url, options);
   const parsed = parseSitemapLocations(xml);
 
   const skipped: { url: string; reason: string }[] = [];
@@ -210,7 +272,7 @@ export async function fetchSitemap(
     }
 
     try {
-      const childXml = await fetchXml(childValidated.url);
+      const childXml = await fetchXml(childValidated.url, options);
       const childParsed = parseSitemapLocations(childXml);
       nestedSitemaps += 1;
 
@@ -233,9 +295,17 @@ export const SITEMAP_ERROR_MESSAGES: Record<SitemapFetchError, string> = {
   unsupported_protocol: "Only http and https sitemaps are supported.",
   host_mismatch: "A sitemap must be on the same domain as the website.",
   ip_address_not_allowed: "Enter a domain name rather than an IP address.",
-  unreachable: "Could not reach that sitemap.",
-  http_error: "That sitemap could not be fetched.",
-  too_large: "That sitemap is too large to process.",
+  not_found: "The sitemap could not be found at this URL.",
+  forbidden: "The website refused access to the sitemap.",
+  rate_limited: "The website is rate limiting requests. Try again shortly.",
+  server_error: "The website returned a server error while the sitemap was fetched.",
+  redirect: "That URL redirects. Enter the final sitemap URL directly.",
+  timeout: "The sitemap did not respond in time.",
+  unreachable: "The sitemap could not be reached.",
+  http_error: "The sitemap could not be fetched.",
+  invalid_content_type: "That URL responded, but it returned a web page rather than a sitemap.",
+  invalid_xml: "That URL responded, but it was not a valid sitemap XML file.",
   not_xml: "That does not look like a sitemap.",
+  too_large: "That sitemap is too large to process.",
   empty: "That sitemap lists no URLs.",
 };

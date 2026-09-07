@@ -1,6 +1,7 @@
 import { prisma } from "@/server/db/prisma";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
 import { freshnessInDays, isStale } from "@/lib/metrics/compare";
+import { STALE_RUN_MINUTES } from "@/server/services/sync";
 import { CONNECTION_PROVIDERS } from "@/lib/connections/registry";
 import type { ConnectionStatus, SyncRun } from "@/generated/prisma/client";
 
@@ -11,6 +12,21 @@ import type { ConnectionStatus, SyncRun } from "@/generated/prisma/client";
  * trusted right now? Every field is a fact about the pipeline — never a secret, and
  * never a reassurance the pipeline cannot support.
  */
+/**
+ * What the newest attempt is doing right now — independent of whether any
+ * earlier attempt ever succeeded. "stale" is a RUNNING run old enough that the
+ * process behind it is provably gone; the next sync will retire it.
+ */
+export type AttemptState = "none" | "running" | "stale" | "succeeded" | "partial" | "failed";
+
+export type LatestAttempt = {
+  state: AttemptState;
+  /** When the run began. Drives "Syncing since …" for a live run. */
+  startedAt: Date | null;
+  finishedAt: Date | null;
+  errorCode: string | null;
+};
+
 export type SourceHealth = {
   provider: string;
   name: string;
@@ -20,10 +36,37 @@ export type SourceHealth = {
   latestDataDate: Date | null;
   freshnessDays: number | null;
   stale: boolean;
-  lastRun: Pick<SyncRun, "status" | "finishedAt" | "recordsWritten" | "errorCode"> | null;
-  /** Rows this source has contributed. Coverage, stated as a count rather than a claim. */
+  /** The newest attempt's state — never conflated with successful freshness below. */
+  attempt: LatestAttempt;
+  /**
+   * Rows this source has contributed to the database. Coverage, stated as a
+   * count rather than a claim: rows can exist from an interrupted run that never
+   * advanced freshness, so this is never on its own evidence of a good sync.
+   */
   rowCount: number;
 };
+
+const STALE_RUN_MS = STALE_RUN_MINUTES * 60_000;
+
+function describeAttempt(
+  run: Pick<SyncRun, "status" | "startedAt" | "finishedAt" | "errorCode" | "createdAt"> | null,
+  now: Date,
+): LatestAttempt {
+  if (!run) return { state: "none", startedAt: null, finishedAt: null, errorCode: null };
+
+  const startedAt = run.startedAt ?? run.createdAt;
+  const base = { startedAt, finishedAt: run.finishedAt, errorCode: run.errorCode };
+
+  if (run.status === "RUNNING") {
+    const stale = now.getTime() - startedAt.getTime() >= STALE_RUN_MS;
+    return { ...base, state: stale ? "stale" : "running" };
+  }
+  if (run.status === "SUCCEEDED") return { ...base, state: "succeeded" };
+  if (run.status === "PARTIAL") return { ...base, state: "partial" };
+  if (run.status === "FAILED") return { ...base, state: "failed" };
+  // QUEUED or CANCELLED: nothing is being read and nothing succeeded.
+  return { ...base, state: "none" };
+}
 
 export async function getDataHealth(
   context: TenantContext,
@@ -48,7 +91,7 @@ export async function getDataHealth(
         latestDataDate: null,
         freshnessDays: null,
         stale: false,
-        lastRun: null,
+        attempt: { state: "none", startedAt: null, finishedAt: null, errorCode: null },
         rowCount: 0,
       });
       continue;
@@ -58,7 +101,13 @@ export async function getDataHealth(
       prisma.syncRun.findFirst({
         where: { connectionId: connection.id },
         orderBy: { createdAt: "desc" },
-        select: { status: true, finishedAt: true, recordsWritten: true, errorCode: true },
+        select: {
+          status: true,
+          startedAt: true,
+          finishedAt: true,
+          errorCode: true,
+          createdAt: true,
+        },
       }),
       connection.provider === "GOOGLE_SEARCH_CONSOLE"
         ? prisma.gscMetricDaily.count({ where: { sourceConnectionId: connection.id } })
@@ -83,7 +132,7 @@ export async function getDataHealth(
       freshnessDays: freshnessInDays(latest, now),
       // Only meaningful once something has actually arrived.
       stale: latest !== null && isStale(latest, now),
-      lastRun,
+      attempt: describeAttempt(lastRun, now),
       rowCount,
     });
   }

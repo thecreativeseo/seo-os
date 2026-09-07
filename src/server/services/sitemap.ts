@@ -7,7 +7,9 @@ import {
   SitemapError,
   fetchSitemap,
   validateSitemapUrl,
+  type SitemapFetchOptions,
 } from "@/server/connectors/sitemap/fetch";
+import { discoverSitemapsFromRobots } from "@/server/connectors/sitemap/robots";
 import type { Sitemap } from "@/generated/prisma/client";
 
 /**
@@ -27,10 +29,7 @@ export async function listSitemaps(context: TenantContext): Promise<Sitemap[]> {
   });
 }
 
-export async function addSitemap(
-  context: TenantContext,
-  url: string,
-): Promise<Sitemap> {
+export async function addSitemap(context: TenantContext, url: string): Promise<Sitemap> {
   const validated = validateSitemapUrl(url, context.website.normalizedDomain);
 
   if (!validated.ok) {
@@ -59,6 +58,33 @@ export async function addSitemap(
 
     return sitemap;
   });
+}
+
+/**
+ * Adds whatever this site declares in robots.txt.
+ *
+ * Used when someone hands SEO OS a bare domain rather than a sitemap URL: the
+ * honest answer to "where is your sitemap" is what the site itself says, not a
+ * conventional guess. An explicit sitemap URL bypasses this and is added as-is.
+ */
+export async function discoverAndAddSitemaps(
+  context: TenantContext,
+  options: SitemapFetchOptions = {},
+): Promise<Sitemap[]> {
+  const declared = await discoverSitemapsFromRobots(context.website.normalizedDomain, options);
+
+  if (declared.length === 0) {
+    throw new SitemapError(
+      "No sitemap is declared in this site’s robots.txt. Enter the sitemap URL directly.",
+      "not_found",
+    );
+  }
+
+  const added: Sitemap[] = [];
+  for (const url of declared) {
+    added.push(await addSitemap(context, url));
+  }
+  return added;
 }
 
 export type SitemapSyncResult = {
@@ -189,10 +215,7 @@ export async function syncSitemap(
   };
 }
 
-export async function removeSitemap(
-  context: TenantContext,
-  sitemapId: string,
-): Promise<void> {
+export async function removeSitemap(context: TenantContext, sitemapId: string): Promise<void> {
   const existing = await prisma.sitemap.findFirst({
     where: { id: sitemapId, ...websiteScope(context) },
   });

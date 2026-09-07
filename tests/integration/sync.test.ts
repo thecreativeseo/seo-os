@@ -2,7 +2,14 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { prisma } from "@/server/db/prisma";
 import type { TenantContext } from "@/server/auth/guards";
-import { runGa4Sync, runGscSync, SyncError } from "@/server/services/sync";
+import {
+  idempotencyKeyFor,
+  resolveSyncWindow,
+  runGa4Sync,
+  runGscSync,
+  SyncError,
+} from "@/server/services/sync";
+import { getDataHealth } from "@/server/services/data-health";
 import { SearchConsoleError } from "@/server/connectors/google/search-console";
 import type { SearchAnalyticsResult } from "@/server/connectors/google/search-console";
 import type { Ga4Result } from "@/server/connectors/google/analytics";
@@ -119,9 +126,27 @@ describe("Search Console sync", () => {
       accessTokenFor: TOKEN,
       source: async () =>
         gscPayload(host, [
-          { date: "2026-08-29", path: "/pricing", query: "seo pricing", clicks: 10, impressions: 200 },
-          { date: "2026-08-30", path: "/pricing", query: "seo pricing", clicks: 12, impressions: 220 },
-          { date: "2026-08-30", path: "/blog/audit", query: "seo audit", clicks: 4, impressions: 90 },
+          {
+            date: "2026-08-29",
+            path: "/pricing",
+            query: "seo pricing",
+            clicks: 10,
+            impressions: 200,
+          },
+          {
+            date: "2026-08-30",
+            path: "/pricing",
+            query: "seo pricing",
+            clicks: 12,
+            impressions: 220,
+          },
+          {
+            date: "2026-08-30",
+            path: "/blog/audit",
+            query: "seo audit",
+            clicks: 4,
+            impressions: 90,
+          },
         ]),
     });
 
@@ -200,7 +225,13 @@ describe("Search Console sync", () => {
       accessTokenFor: TOKEN,
       source: async () =>
         gscPayload(host, [
-          { date: "2026-08-30", path: "/pricing", query: "seo pricing", clicks: 9, impressions: 180 },
+          {
+            date: "2026-08-30",
+            path: "/pricing",
+            query: "seo pricing",
+            clicks: 9,
+            impressions: 180,
+          },
         ]),
     });
 
@@ -216,7 +247,13 @@ describe("Search Console sync", () => {
       accessTokenFor: TOKEN,
       source: async () =>
         gscPayload(host, [
-          { date: "2026-08-30", path: "/pricing", query: "seo pricing", clicks: 12, impressions: 240 },
+          {
+            date: "2026-08-30",
+            path: "/pricing",
+            query: "seo pricing",
+            clicks: 12,
+            impressions: 240,
+          },
         ]),
     });
 
@@ -335,7 +372,11 @@ describe("Search Console sync", () => {
     });
 
     await expect(
-      runGscSync(context, { now: NOW, accessTokenFor: TOKEN, source: async () => gscPayload("x", []) }),
+      runGscSync(context, {
+        now: NOW,
+        accessTokenFor: TOKEN,
+        source: async () => gscPayload("x", []),
+      }),
     ).rejects.toBeInstanceOf(SyncError);
   });
 });
@@ -360,7 +401,13 @@ describe("GA4 sync", () => {
       accessTokenFor: TOKEN,
       source: async () =>
         gscPayload(host, [
-          { date: "2026-08-30", path: "/pricing", query: "seo pricing", clicks: 10, impressions: 200 },
+          {
+            date: "2026-08-30",
+            path: "/pricing",
+            query: "seo pricing",
+            clicks: 10,
+            impressions: 200,
+          },
         ]),
     });
 
@@ -457,5 +504,189 @@ describe("GA4 sync", () => {
     });
     expect(rows).toHaveLength(1);
     expect(rows[0]!.sessions).toBe(12);
+  });
+});
+
+describe("sync lifecycle and stale-run recovery", () => {
+  it("leaves a caught provider error as FAILED with a finishedAt, never RUNNING", async () => {
+    const context = await makeContext("failfin");
+    await connect(context, "GOOGLE_SEARCH_CONSOLE");
+
+    const outcome = await runGscSync(context, {
+      now: NOW,
+      days: 7,
+      accessTokenFor: TOKEN,
+      source: async () => {
+        throw new SearchConsoleError("boom", "rate_limited");
+      },
+    });
+
+    expect(outcome.status).toBe("FAILED");
+    const run = await prisma.syncRun.findUniqueOrThrow({ where: { id: outcome.run.id } });
+    expect(run.status).toBe("FAILED");
+    expect(run.finishedAt).not.toBeNull();
+  });
+
+  it("recovers a stale RUNNING run to FAILED and lets the new run proceed", async () => {
+    const context = await makeContext("stalerec");
+    const connection = await connect(context, "GOOGLE_SEARCH_CONSOLE");
+    const host = context.website.normalizedDomain;
+
+    // An orphan a dead process left behind: RUNNING, well past the threshold, for
+    // the exact period the next sync will target.
+    const window = resolveSyncWindow({ latestDataDate: null }, { now: NOW, days: 7 });
+    const key = idempotencyKeyFor("GSC_METRICS", window);
+    const orphan = await prisma.syncRun.create({
+      data: {
+        websiteId: context.website.id,
+        connectionId: connection.id,
+        provider: "GOOGLE_SEARCH_CONSOLE",
+        syncType: "GSC_METRICS",
+        status: "RUNNING",
+        startedAt: new Date(NOW.getTime() - 30 * 60_000),
+        idempotencyKey: key,
+        periodStart: new Date(`${window.startDate}T00:00:00.000Z`),
+        periodEnd: new Date(`${window.endDate}T00:00:00.000Z`),
+      },
+    });
+
+    const outcome = await runGscSync(context, {
+      now: NOW,
+      days: 7,
+      accessTokenFor: TOKEN,
+      source: async () =>
+        gscPayload(host, [
+          { date: window.endDate, path: "/a", query: "alpha", clicks: 3, impressions: 30 },
+        ]),
+    });
+
+    expect(["SUCCEEDED", "PARTIAL"]).toContain(outcome.status);
+
+    // The orphan is preserved as a recovered failure, not silently overwritten.
+    const recovered = await prisma.syncRun.findUniqueOrThrow({ where: { id: orphan.id } });
+    expect(recovered.status).toBe("FAILED");
+    expect(recovered.errorCode).toBe("stale_run_recovered");
+    expect(recovered.finishedAt).not.toBeNull();
+
+    // Two rows: the archived orphan and the fresh attempt.
+    expect(await prisma.syncRun.count({ where: { connectionId: connection.id } })).toBe(2);
+  });
+
+  it("protects a genuinely active RUNNING run from recovery", async () => {
+    const context = await makeContext("active");
+    const connection = await connect(context, "GOOGLE_SEARCH_CONSOLE");
+
+    const window = resolveSyncWindow({ latestDataDate: null }, { now: NOW, days: 7 });
+    const key = idempotencyKeyFor("GSC_METRICS", window);
+    const active = await prisma.syncRun.create({
+      data: {
+        websiteId: context.website.id,
+        connectionId: connection.id,
+        provider: "GOOGLE_SEARCH_CONSOLE",
+        syncType: "GSC_METRICS",
+        status: "RUNNING",
+        // One minute ago: well inside the staleness threshold.
+        startedAt: new Date(NOW.getTime() - 60_000),
+        idempotencyKey: key,
+        periodStart: new Date(`${window.startDate}T00:00:00.000Z`),
+        periodEnd: new Date(`${window.endDate}T00:00:00.000Z`),
+      },
+    });
+
+    await expect(
+      runGscSync(context, {
+        now: NOW,
+        days: 7,
+        accessTokenFor: TOKEN,
+        source: async () => gscPayload(context.website.normalizedDomain, []),
+      }),
+    ).rejects.toBeInstanceOf(SyncError);
+
+    const still = await prisma.syncRun.findUniqueOrThrow({ where: { id: active.id } });
+    expect(still.status).toBe("RUNNING");
+  });
+
+  it("shows a previous success and a later failure as separate facts", async () => {
+    const context = await makeContext("prevsucc");
+    const connection = await connect(context, "GOOGLE_SEARCH_CONSOLE");
+    const host = context.website.normalizedDomain;
+
+    const EARLY = new Date("2026-08-20T09:00:00Z");
+    await runGscSync(context, {
+      now: EARLY,
+      days: 7,
+      accessTokenFor: TOKEN,
+      source: async () =>
+        gscPayload(host, [
+          { date: "2026-08-18", path: "/a", query: "alpha", clicks: 4, impressions: 40 },
+        ]),
+    });
+    const afterSuccess = await prisma.connection.findUniqueOrThrow({
+      where: { id: connection.id },
+    });
+    expect(afterSuccess.latestDataDate).not.toBeNull();
+
+    const LATE = new Date("2026-08-27T09:00:00Z");
+    const failed = await runGscSync(context, {
+      now: LATE,
+      days: 7,
+      accessTokenFor: TOKEN,
+      source: async () => {
+        throw new SearchConsoleError("boom", "rate_limited");
+      },
+    });
+    expect(failed.status).toBe("FAILED");
+
+    const health = await getDataHealth(context, LATE);
+    const gsc = health.find((s) => s.provider === "GOOGLE_SEARCH_CONSOLE");
+    expect(gsc).toBeDefined();
+    // Known-good freshness is preserved even though the newest attempt failed.
+    expect(gsc!.latestDataDate).not.toBeNull();
+    expect(gsc!.attempt.state).toBe("failed");
+  });
+
+  it("never presents rows from an interrupted run as fresh data", async () => {
+    const context = await makeContext("orphanrows");
+    const connection = await connect(context, "GOOGLE_SEARCH_CONSOLE");
+    const host = context.website.normalizedDomain;
+
+    // A completed sync writes real rows the honest way…
+    await runGscSync(context, {
+      now: NOW,
+      days: 7,
+      accessTokenFor: TOKEN,
+      source: async () =>
+        gscPayload(host, [
+          { date: "2026-08-30", path: "/x", query: "q", clicks: 2, impressions: 20 },
+        ]),
+    });
+
+    // …then we reproduce the production orphan exactly: the metric rows are
+    // committed, but freshness never advanced and the run is stuck RUNNING.
+    await prisma.connection.update({
+      where: { id: connection.id },
+      data: { lastSyncedAt: null, latestDataDate: null },
+    });
+    const run = await prisma.syncRun.findFirstOrThrow({
+      where: { connectionId: connection.id },
+    });
+    await prisma.syncRun.update({
+      where: { id: run.id },
+      data: {
+        status: "RUNNING",
+        finishedAt: null,
+        recordsWritten: 0,
+        startedAt: new Date(NOW.getTime() - 30 * 60_000),
+      },
+    });
+
+    const health = await getDataHealth(context, NOW);
+    const gsc = health.find((s) => s.provider === "GOOGLE_SEARCH_CONSOLE");
+    expect(gsc).toBeDefined();
+    // Rows really exist, and are honestly counted as coverage…
+    expect(gsc!.rowCount).toBeGreaterThan(0);
+    // …but there is no successful dataset, and the attempt is an interrupted orphan.
+    expect(gsc!.latestDataDate).toBeNull();
+    expect(gsc!.attempt.state).toBe("stale");
   });
 });

@@ -1,13 +1,11 @@
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { hasRole } from "@/server/auth/roles";
-import { getDataHealth } from "@/server/services/data-health";
+import { getDataHealth, type LatestAttempt } from "@/server/services/data-health";
+import { SITEMAP_ERROR_MESSAGES, type SitemapFetchError } from "@/server/connectors/sitemap/fetch";
 import { listSitemaps } from "@/server/services/sitemap";
 import { listSyncRuns } from "@/server/services/sync";
 import { Badge, EmptyState, PageHeader } from "@/components/governance/primitives";
-import {
-  AddSitemapForm,
-  SitemapRowActions,
-} from "@/components/connections/sitemap-controls";
+import { AddSitemapForm, SitemapRowActions } from "@/components/connections/sitemap-controls";
 import { SyncButton } from "@/components/connections/sync-controls";
 
 export const metadata = { title: "Data Health · SEO OS" };
@@ -19,6 +17,53 @@ export const metadata = { title: "Data Health · SEO OS" };
  * here is a fact about the pipeline — no secrets, and no reassurance the pipeline
  * cannot support.
  */
+/** A stored sitemap error code becomes a sentence; the code stays as a hint. */
+function sitemapErrorMessage(code: string): string {
+  return SITEMAP_ERROR_MESSAGES[code as SitemapFetchError] ?? "That sitemap could not be fetched.";
+}
+
+/**
+ * The newest attempt, said plainly and never as successful freshness. A live
+ * run says when it began; an interrupted one says it will retry rather than
+ * masquerading as still running.
+ */
+function AttemptCell({ attempt }: { attempt: LatestAttempt }) {
+  if (attempt.state === "running") {
+    return (
+      <span className="text-foreground">
+        Syncing since{" "}
+        {attempt.startedAt?.toLocaleTimeString("en-GB", {
+          hour: "2-digit",
+          minute: "2-digit",
+        })}
+      </span>
+    );
+  }
+  if (attempt.state === "stale") {
+    return (
+      <span className="text-amber-700 dark:text-amber-400">
+        Interrupted · will retry on next sync
+      </span>
+    );
+  }
+  if (attempt.state === "succeeded" || attempt.state === "partial") {
+    return (
+      <>
+        {attempt.state === "succeeded" ? "Succeeded" : "Partial"}
+        {attempt.finishedAt ? ` · ${attempt.finishedAt.toLocaleDateString("en-GB")}` : ""}
+      </>
+    );
+  }
+  if (attempt.state === "failed") {
+    return (
+      <span className="text-red-600">
+        Failed{attempt.errorCode ? ` · ${attempt.errorCode}` : ""}
+      </span>
+    );
+  }
+  return <>Never run</>;
+}
+
 export default async function DataHealthPage({
   params,
 }: {
@@ -47,8 +92,7 @@ export default async function DataHealthPage({
 
         {active.length === 0 ? (
           <EmptyState>
-            No source is connected yet, so SEO OS is reporting no search metrics at
-            all.
+            No source is connected yet, so SEO OS is reporting no search metrics at all.
           </EmptyState>
         ) : (
           <div className="border-border overflow-x-auto rounded-lg border">
@@ -59,7 +103,7 @@ export default async function DataHealthPage({
                   <th className="px-3 py-2 font-medium">Status</th>
                   <th className="px-3 py-2 font-medium">Property</th>
                   <th className="px-3 py-2 font-medium">Latest data</th>
-                  <th className="px-3 py-2 font-medium">Last sync</th>
+                  <th className="px-3 py-2 font-medium">Latest attempt</th>
                   <th className="px-3 py-2 text-right font-medium">Rows</th>
                   {canWrite ? <th className="px-3 py-2 font-medium">Sync</th> : null}
                 </tr>
@@ -86,23 +130,14 @@ export default async function DataHealthPage({
                           ) : null}
                         </span>
                       ) : (
-                        <span className="text-muted-foreground">Nothing received</span>
+                        <span className="text-muted-foreground">None yet</span>
                       )}
                     </td>
                     <td className="text-muted-foreground px-3 py-3 text-xs">
-                      {source.lastRun ? (
-                        <>
-                          {source.lastRun.status}
-                          {source.lastRun.finishedAt
-                            ? ` · ${source.lastRun.finishedAt.toLocaleDateString("en-GB")}`
-                            : ""}
-                          {/* An error code from our own vocabulary; never the
-                              provider's message, which can carry request details. */}
-                          {source.lastRun.errorCode ? ` · ${source.lastRun.errorCode}` : ""}
-                        </>
-                      ) : (
-                        "Never run"
-                      )}
+                      {/* The latest attempt — distinct from the successful data
+                          date in the previous column. An error code is from our
+                          own vocabulary, never the provider's message. */}
+                      <AttemptCell attempt={source.attempt} />
                     </td>
                     <td className="px-3 py-3 text-right tabular-nums">
                       {source.rowCount.toLocaleString("en-GB")}
@@ -116,10 +151,7 @@ export default async function DataHealthPage({
                         source.propertyName &&
                         (source.provider === "GOOGLE_SEARCH_CONSOLE" ||
                           source.provider === "GOOGLE_ANALYTICS") ? (
-                          <SyncButton
-                            websiteId={websiteId}
-                            provider={source.provider}
-                          />
+                          <SyncButton websiteId={websiteId} provider={source.provider} />
                         ) : (
                           <span className="text-muted-foreground text-xs">—</span>
                         )}
@@ -134,8 +166,8 @@ export default async function DataHealthPage({
 
         {active.some((source) => source.stale) ? (
           <p className="rounded-lg border border-amber-400 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-300">
-            At least one source is further behind than the two to three days Search
-            Console normally reports. Figures for recent days are incomplete.
+            At least one source is further behind than the two to three days Search Console normally
+            reports. Figures for recent days are incomplete.
           </p>
         ) : null}
       </section>
@@ -143,8 +175,8 @@ export default async function DataHealthPage({
       <section className="space-y-3">
         <h2 className="text-sm font-medium">Recent runs</h2>
         <p className="text-muted-foreground text-sm">
-          Every attempt, including the ones that failed. A failed run leaves the
-          figures above unchanged rather than making the data look newer than it is.
+          Every attempt, including the ones that failed. A failed run leaves the figures above
+          unchanged rather than making the data look newer than it is.
         </p>
 
         {runs.length === 0 ? (
@@ -169,9 +201,7 @@ export default async function DataHealthPage({
                     <td className="px-4 py-3 text-xs">
                       {(run.startedAt ?? run.createdAt).toLocaleString("en-GB")}
                     </td>
-                    <td className="text-muted-foreground px-3 py-3 text-xs">
-                      {run.syncType}
-                    </td>
+                    <td className="text-muted-foreground px-3 py-3 text-xs">{run.syncType}</td>
                     <td className="text-muted-foreground px-3 py-3 text-xs">
                       {run.periodStart && run.periodEnd
                         ? `${run.periodStart.toISOString().slice(0, 10)} → ${run.periodEnd
@@ -210,10 +240,9 @@ export default async function DataHealthPage({
             <dd>
               Date, page and query
               <p className="text-muted-foreground text-xs">
-                Country and device are recorded as ALL in this phase. Ingesting the
-                full breakdown multiplies row count roughly fiftyfold; the columns and
-                unique key already carry the documented grain, so widening it later is
-                a configuration change and a backfill.
+                Country and device are recorded as ALL in this phase. Ingesting the full breakdown
+                multiplies row count roughly fiftyfold; the columns and unique key already carry the
+                documented grain, so widening it later is a configuration change and a backfill.
               </p>
             </dd>
           </div>
@@ -222,8 +251,8 @@ export default async function DataHealthPage({
             <dd>
               Not retained
               <p className="text-muted-foreground text-xs">
-                Each sync records what it received — period, row counts, a checksum —
-                but the response body itself is not stored yet.
+                Each sync records what it received — period, row counts, a checksum — but the
+                response body itself is not stored yet.
               </p>
             </dd>
           </div>
@@ -233,8 +262,8 @@ export default async function DataHealthPage({
       <section className="space-y-3">
         <h2 className="text-sm font-medium">Sitemaps</h2>
         <p className="text-muted-foreground text-sm">
-          A sitemap is what the site says exists. It is evidence of intent, not of
-          indexation, and SEO OS never presents it as the latter.
+          A sitemap is what the site says exists. It is evidence of intent, not of indexation, and
+          SEO OS never presents it as the latter.
         </p>
 
         {sitemaps.length === 0 ? (
@@ -254,7 +283,8 @@ export default async function DataHealthPage({
                     </p>
                     {sitemap.lastError ? (
                       <p className="mt-1 text-xs text-red-600">
-                        Last attempt failed: {sitemap.lastError}
+                        {sitemapErrorMessage(sitemap.lastError)}
+                        <span className="text-muted-foreground"> ({sitemap.lastError})</span>
                       </p>
                     ) : null}
                   </div>

@@ -79,7 +79,11 @@ export type SyncErrorCode =
   | "quota_exhausted"
   | "unknown_database"
   | "not_subscribed"
-  | "no_market";
+  | "no_market"
+  // A run left at RUNNING by a process that died between committing rows and
+  // finalising — Railway recycling the container, an OOM, a dropped request.
+  // It is a recovered orphan, not a fresh failure, and says so.
+  | "stale_run_recovered";
 
 export class SyncError extends Error {
   constructor(
@@ -210,6 +214,8 @@ const ERROR_SUMMARIES: Record<SyncErrorCode, string> = {
   unknown_database: "The provider has no regional database for this website's market.",
   not_subscribed: "This provider plan does not include API access to that report.",
   no_market: "Set the website's primary market before syncing this provider.",
+  stale_run_recovered:
+    "A previous run was interrupted before it finished and has been marked failed. The figures above are unchanged.",
 };
 
 export type SyncOutcome = {
@@ -249,6 +255,53 @@ async function connectionFor(
  * does no work at all, which is the point of the key. A previously failed run is
  * reused rather than replaced so the history stays one row per period.
  */
+/**
+ * Recovers runs a dead process left behind.
+ *
+ * A sync commits its metric rows as it goes and only afterwards, in a separate
+ * transaction, marks the run SUCCEEDED and advances the connection's freshness.
+ * An ordinary exception is caught and the run is marked FAILED. But a process
+ * that is killed outright — a container recycle, an OOM, a dropped request —
+ * cannot run a catch block, so its run stays RUNNING forever and the period it
+ * was working on can never be synced again.
+ *
+ * Before a new run for a connection, any RUNNING run for that same connection
+ * older than the staleness threshold is therefore provably not executing (P1
+ * runs one manual sync at a time per connection) and is marked FAILED. Its
+ * idempotency key is archived so the orphan is preserved as history rather than
+ * overwritten by the fresh attempt. A run still inside the threshold is left
+ * alone: it might genuinely be in flight.
+ */
+async function recoverStaleRuns(connectionId: string, now: Date): Promise<number> {
+  const cutoff = new Date(now.getTime() - STALE_RUN_MINUTES * 60_000);
+
+  const running = await prisma.syncRun.findMany({
+    where: { connectionId, status: "RUNNING" },
+  });
+
+  let recovered = 0;
+  for (const run of running) {
+    const startedAt = run.startedAt ?? run.createdAt;
+    if (startedAt >= cutoff) continue;
+
+    await prisma.syncRun.update({
+      where: { id: run.id },
+      data: {
+        status: "FAILED",
+        finishedAt: now,
+        errorCode: "stale_run_recovered",
+        errorSummary: ERROR_SUMMARIES.stale_run_recovered,
+        // Free the canonical key so the retry is a distinct row and this one
+        // survives as the record of an interrupted attempt.
+        idempotencyKey: `${run.idempotencyKey}:stale:${run.id.slice(0, 8)}`,
+      },
+    });
+    recovered += 1;
+  }
+
+  return recovered;
+}
+
 async function claimRun(
   context: TenantContext,
   connection: Connection,
@@ -257,6 +310,11 @@ async function claimRun(
   now: Date,
 ): Promise<{ run: SyncRun; alreadyDone: boolean }> {
   const idempotencyKey = idempotencyKeyFor(syncType, window);
+
+  // Clear out anything a dead process abandoned for this connection first. A
+  // RUNNING run for this period that survives this call is therefore recent
+  // enough to still be executing, and is protected below.
+  await recoverStaleRuns(connection.id, now);
 
   const existing = await prisma.syncRun.findUnique({
     where: { connectionId_idempotencyKey: { connectionId: connection.id, idempotencyKey } },
@@ -267,13 +325,8 @@ async function claimRun(
   }
 
   if (existing?.status === "RUNNING") {
-    const startedAt = existing.startedAt ?? existing.createdAt;
-    const ageMinutes = (now.getTime() - startedAt.getTime()) / 60_000;
-
-    // A process that died mid-run would otherwise lock the period forever.
-    if (ageMinutes < STALE_RUN_MINUTES) {
-      throw new SyncError("A sync for this period is already running.", "already_running");
-    }
+    // Recovery already retired the stale ones, so this is a genuinely active run.
+    throw new SyncError("A sync for this period is already running.", "already_running");
   }
 
   const data = {
