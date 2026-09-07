@@ -894,6 +894,7 @@ export type QaRunSummary = Pick<
   | "infoCount"
   | "notCheckedCount"
   | "errorCode"
+  | "checkerVersion"
   | "startedAt"
   | "completedAt"
 > & { requestedBy: string };
@@ -920,6 +921,7 @@ export async function listQaRuns(
     infoCount: row.infoCount,
     notCheckedCount: row.notCheckedCount,
     errorCode: row.errorCode,
+    checkerVersion: row.checkerVersion,
     startedAt: row.startedAt,
     completedAt: row.completedAt,
     requestedBy: requestedBy.email,
@@ -1272,6 +1274,293 @@ export async function listCmsApprovals(
     orderBy: { approvedAt: "desc" },
     include: { approvedBy: { select: { email: true } } },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Reading for the screens (M5.4 §2, §16, §17)
+// ---------------------------------------------------------------------------
+
+/** One row of the QA queue: where the work stands, and what QA says about it. */
+export type QaQueueRow = {
+  workItemId: string;
+  title: string;
+  contentType: string | null;
+  itemStatus: string;
+  revisionNumber: number | null;
+  revisionHash: string | null;
+  briefVersion: number | null;
+  runId: string | null;
+  runStatus: string | null;
+  outcome: string | null;
+  blockingCount: number;
+  warningCount: number;
+  infoCount: number;
+  notCheckedCount: number;
+  runAt: Date | null;
+  runCurrent: boolean;
+  aiProvider: string | null;
+  aiModel: string | null;
+  approved: boolean;
+  approvalStale: boolean;
+  approvalStaleReasons: CmsApprovalStaleReason[];
+  approvedBy: string | null;
+  approvedAt: Date | null;
+  selfDecided: boolean;
+  updatedAt: Date;
+};
+
+const QA_QUEUE_STATUSES = ["QA", "AWAITING_EDITOR_REVIEW", "APPROVED_FOR_CMS"] as const;
+
+/**
+ * Every work item at or past the QA gate, with its latest run and its
+ * approval. Batched: the queue is read in a handful of queries rather than
+ * one per row, and the effective readiness of an approval is computed by the
+ * same reader the gate uses.
+ */
+export async function listQaQueue(context: TenantContext): Promise<QaQueueRow[]> {
+  const items = await prisma.contentWorkItem.findMany({
+    where: { status: { in: [...QA_QUEUE_STATUSES] }, ...websiteScope(context) },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true, title: true, type: true, status: true, updatedAt: true },
+  });
+  if (items.length === 0) return [];
+  const ids = items.map((item) => item.id);
+
+  const [drafts, runs, fingerprint] = await Promise.all([
+    prisma.contentDraft.findMany({
+      where: { contentWorkItemId: { in: ids }, status: "APPROVED", ...websiteScope(context) },
+      include: {
+        approvedRevision: { select: { id: true, revisionNumber: true, contentHash: true } },
+        brief: { select: { version: true } },
+      },
+    }),
+    prisma.contentQaRun.findMany({
+      where: { contentWorkItemId: { in: ids }, ...websiteScope(context) },
+      orderBy: { createdAt: "desc" },
+      include: { aiRun: { select: { provider: true, model: true } } },
+    }),
+    currentInputsFingerprint(context),
+  ]);
+
+  const draftByItem = new Map(drafts.map((draft) => [draft.contentWorkItemId, draft]));
+  const latestByItem = new Map<string, (typeof runs)[number]>();
+  for (const run of runs) {
+    if (!latestByItem.has(run.contentWorkItemId)) latestByItem.set(run.contentWorkItemId, run);
+  }
+  const laterForRevision = new Set<string>();
+  for (const run of runs) {
+    if (run.status !== "COMPLETED") continue;
+    const later = runs.some(
+      (other) =>
+        other.status === "COMPLETED" &&
+        other.contentRevisionId === run.contentRevisionId &&
+        other.createdAt > run.createdAt,
+    );
+    if (later) laterForRevision.add(run.id);
+  }
+
+  const rows: QaQueueRow[] = [];
+  for (const item of items) {
+    const draft = draftByItem.get(item.id);
+    const revision = draft?.approvedRevision ?? null;
+    const bound =
+      draft !== undefined &&
+      revision !== null &&
+      draft.approvedRevisionHash === revision.contentHash &&
+      draft.currentRevisionId === revision.id;
+    const run = latestByItem.get(item.id) ?? null;
+    const approval =
+      item.status === "APPROVED_FOR_CMS" ? await cmsApprovalFor(context, item.id) : null;
+    const runCurrent =
+      run !== null &&
+      run.status === "COMPLETED" &&
+      bound &&
+      run.contentRevisionId === revision!.id &&
+      run.revisionHash === revision!.contentHash &&
+      run.inputsFingerprint === fingerprint &&
+      !laterForRevision.has(run.id);
+
+    rows.push({
+      workItemId: item.id,
+      title: item.title,
+      contentType: item.type,
+      itemStatus: item.status,
+      revisionNumber: bound ? revision!.revisionNumber : null,
+      revisionHash: bound ? revision!.contentHash : null,
+      briefVersion: draft?.brief.version ?? null,
+      runId: run?.id ?? null,
+      runStatus: run?.status ?? null,
+      outcome: run?.outcome ?? null,
+      blockingCount: run?.blockingCount ?? 0,
+      warningCount: run?.warningCount ?? 0,
+      infoCount: run?.infoCount ?? 0,
+      notCheckedCount: run?.notCheckedCount ?? 0,
+      runAt: run?.completedAt ?? run?.startedAt ?? null,
+      runCurrent,
+      aiProvider: run?.aiRun?.provider ?? null,
+      aiModel: run?.aiRun?.model ?? null,
+      approved: approval !== null,
+      approvalStale: approval !== null && !approval.executable,
+      approvalStaleReasons: approval?.staleReasons ?? [],
+      approvedBy: approval?.approval.approvedBy.email ?? null,
+      approvedAt: approval?.approval.approvedAt ?? null,
+      selfDecided: approval?.approval.selfDecided ?? false,
+      updatedAt: item.updatedAt,
+    });
+  }
+  return rows;
+}
+
+/** What the draft workspace and the report header need about one work item. */
+export type QaSummary = {
+  itemStatus: string;
+  approvedRevision: ApprovedRevisionRef | null;
+  latest:
+    | (QaRunSummary & {
+        current: boolean;
+        aiProvider: string | null;
+        aiModel: string | null;
+        currency: QaCurrency;
+      })
+    | null;
+  approval: CmsApprovalView | null;
+  /** The approved revision is pinned to a brief version that is no longer the approved one. */
+  briefSuperseded: boolean;
+};
+
+export async function qaSummaryFor(
+  context: TenantContext,
+  workItemId: string,
+): Promise<QaSummary | null> {
+  const item = await prisma.contentWorkItem.findFirst({
+    where: { id: workItemId, ...websiteScope(context) },
+    select: { id: true, status: true },
+  });
+  if (!item) return null;
+
+  const [ref, run, approval, newerBrief] = await Promise.all([
+    approvedRevisionFor(context, item.id),
+    prisma.contentQaRun.findFirst({
+      where: { contentWorkItemId: item.id, ...websiteScope(context) },
+      orderBy: { createdAt: "desc" },
+      include: {
+        aiRun: { select: { provider: true, model: true } },
+        requestedBy: { select: { email: true } },
+      },
+    }),
+    cmsApprovalFor(context, item.id),
+    prisma.contentBrief.findFirst({
+      where: { contentWorkItemId: item.id, status: "APPROVED", ...websiteScope(context) },
+      select: { id: true },
+    }),
+  ]);
+
+  const currency = run ? await qaCurrency(context, run) : null;
+  return {
+    itemStatus: item.status,
+    approvedRevision: ref,
+    latest:
+      run && currency
+        ? {
+            id: run.id,
+            status: run.status,
+            outcome: run.outcome,
+            revisionNumber: run.revisionNumber,
+            revisionHash: run.revisionHash,
+            briefVersion: run.briefVersion,
+            blockingCount: run.blockingCount,
+            warningCount: run.warningCount,
+            infoCount: run.infoCount,
+            notCheckedCount: run.notCheckedCount,
+            errorCode: run.errorCode,
+            checkerVersion: run.checkerVersion,
+            startedAt: run.startedAt,
+            completedAt: run.completedAt,
+            requestedBy: run.requestedBy.email,
+            current: currency.current,
+            currency,
+            aiProvider: run.aiRun?.provider ?? null,
+            aiModel: run.aiRun?.model ?? null,
+          }
+        : null,
+    approval,
+    briefSuperseded: Boolean(ref && newerBrief && newerBrief.id !== ref.briefId),
+  };
+}
+
+/** The provenance of one run, for the report's provenance block (M5.4 §8). */
+export type QaProvenance = {
+  runId: string;
+  checkerVersion: string;
+  inputsFingerprint: string;
+  contextVersionId: string | null;
+  evidencePackage: {
+    id: string;
+    contentHash: string;
+    sealedAt: Date | null;
+    evidenceCount: number;
+    retrievalPolicy: { name: string; version: number } | null;
+  } | null;
+  aiRun: {
+    id: string;
+    provider: string;
+    model: string;
+    promptTemplateVersion: number | null;
+    outputSchemaVersion: string;
+    status: string;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    errorCode: string | null;
+  } | null;
+  requestedBy: string;
+  startedAt: Date;
+  completedAt: Date | null;
+};
+
+export async function qaProvenanceFor(
+  context: TenantContext,
+  runId: string,
+): Promise<QaProvenance | null> {
+  const run = await prisma.contentQaRun.findFirst({
+    where: { id: runId, ...websiteScope(context) },
+    include: {
+      requestedBy: { select: { email: true } },
+      evidencePackage: {
+        select: {
+          id: true,
+          contentHash: true,
+          sealedAt: true,
+          evidenceCount: true,
+          retrievalPolicy: { select: { name: true, version: true } },
+        },
+      },
+      aiRun: {
+        select: {
+          id: true,
+          provider: true,
+          model: true,
+          promptTemplateVersion: true,
+          outputSchemaVersion: true,
+          status: true,
+          inputTokens: true,
+          outputTokens: true,
+          errorCode: true,
+        },
+      },
+    },
+  });
+  if (!run) return null;
+  return {
+    runId: run.id,
+    checkerVersion: run.checkerVersion,
+    inputsFingerprint: run.inputsFingerprint,
+    contextVersionId: run.contextVersionId,
+    evidencePackage: run.evidencePackage,
+    aiRun: run.aiRun,
+    requestedBy: run.requestedBy.email,
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+  };
 }
 
 export type { ApprovedRevisionRef, ContentQaStatus };

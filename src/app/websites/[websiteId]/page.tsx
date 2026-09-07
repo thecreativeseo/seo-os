@@ -19,6 +19,8 @@ import { MetricCard, SeverityBadge } from "@/components/metrics/primitives";
 import { listDiagnoses } from "@/server/services/diagnosis";
 import { listRecommendations, listReviewQueue } from "@/server/services/decision";
 import { listDrafts } from "@/server/services/content-draft";
+import { listQaQueue } from "@/server/services/content-qa";
+import { qaWorkItemLabel } from "@/lib/content/qa-ux";
 import { ConfidenceBadge, VerdictBadge, humanize } from "@/components/diagnosis/primitives";
 
 export const metadata = { title: "Command Center · SEO OS" };
@@ -104,8 +106,21 @@ export default async function CommandCenterPage({
   // P4 (section 30): what approved work is ready to execute? Drafts awaiting
   // an editor, and drafts approved and ready for QA.
   const drafts = await listDrafts(context);
+  const qaRows = await listQaQueue(context);
   const draftsAwaitingReview = drafts.filter((row) => row.awaitingReview).length;
   const draftsReadyForQa = drafts.filter((row) => row.status === "APPROVED").length;
+  // The QA gate (M5.4 §19). Nothing here is published: approved for CMS means
+  // a person authorized it, and execution comes later.
+  const qaBlockers = qaRows.filter((row) => row.outcome === "FAIL").length;
+  const qaAwaitingApproval = qaRows.filter(
+    (row) => row.itemStatus === "AWAITING_EDITOR_REVIEW",
+  ).length;
+  const qaApproved = qaRows.filter((row) => row.itemStatus === "APPROVED_FOR_CMS").length;
+  const qaNextStep =
+    qaRows.find((row) => row.outcome === "FAIL") ??
+    qaRows.find((row) => row.itemStatus === "AWAITING_EDITOR_REVIEW") ??
+    qaRows.find((row) => row.itemStatus === "QA" && row.runStatus === null) ??
+    null;
 
   return (
     <main className="space-y-10">
@@ -305,8 +320,8 @@ export default async function CommandCenterPage({
       <section className="space-y-3">
         <div className="flex flex-wrap items-baseline justify-between gap-3">
           <h2 className="text-sm font-medium">What approved work is ready to execute?</h2>
-          <Link href={`/websites/${websiteId}/drafts`} className="text-sm hover:underline">
-            Drafts
+          <Link href={`/websites/${websiteId}/qa`} className="text-sm hover:underline">
+            QA
           </Link>
         </div>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -317,6 +332,13 @@ export default async function CommandCenterPage({
               href: "drafts?awaiting=1",
             },
             { label: "Ready for QA", count: draftsReadyForQa, href: "drafts?approved=1" },
+            { label: "QA blockers", count: qaBlockers, href: "qa?state=blocked" },
+            {
+              label: "Awaiting final approval",
+              count: qaAwaitingApproval,
+              href: "qa?state=awaiting",
+            },
+            { label: "Approved for CMS", count: qaApproved, href: "qa?state=approved" },
           ].map((tile) => (
             <Link
               key={tile.label}
@@ -328,6 +350,19 @@ export default async function CommandCenterPage({
             </Link>
           ))}
         </div>
+        {qaNextStep ? (
+          <p className="text-muted-foreground text-sm">
+            Next in QA:{" "}
+            <Link
+              href={`/websites/${websiteId}/content/${qaNextStep.workItemId}/qa`}
+              className="text-foreground hover:underline"
+            >
+              {qaNextStep.title}
+            </Link>{" "}
+            · {qaWorkItemLabel(qaNextStep.itemStatus, qaNextStep.outcome)}. Approved for CMS means a
+            person authorized it; nothing is published.
+          </p>
+        ) : null}
       </section>
 
       <section className="space-y-3">

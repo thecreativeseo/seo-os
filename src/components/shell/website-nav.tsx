@@ -44,13 +44,13 @@ const GROUPS: { heading: string; sections: Section[] }[] = [
   },
   {
     heading: "Execution",
-    // P4 (docs/P4_SPEC.md §38). Content Work → Briefs → Drafts exist; QA and
-    // Publishing are M5 and M6 and are shown disabled so the flow reads whole.
+    // P4 (docs/P4_SPEC.md §38). Content Work → Briefs → Drafts → QA exist;
+    // Publishing is M6 and is shown disabled so the flow reads whole.
     sections: [
       { slug: "content", label: "Content Work" },
       { slug: "briefs", label: "Briefs" },
       { slug: "drafts", label: "Drafts" },
-      { slug: "qa", label: "QA", comingNext: true },
+      { slug: "qa", label: "QA" },
       { slug: "publishing", label: "Publishing", comingNext: true },
     ],
   },

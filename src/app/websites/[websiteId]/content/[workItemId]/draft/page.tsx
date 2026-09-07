@@ -35,6 +35,8 @@ import {
 import { DraftForm } from "@/components/execution/draft-form";
 import { BriefPanel } from "@/components/execution/brief-panel";
 import { ClaimsPanel } from "@/components/execution/claims-panel";
+import { QaSummaryCard } from "@/components/execution/qa-summary";
+import { qaSummaryFor } from "@/server/services/content-qa";
 import { DraftStateNotice } from "@/components/execution/draft-state";
 import { FindingsPanel, ReviewBlockers } from "@/components/execution/findings-panel";
 import {
@@ -108,6 +110,7 @@ export default async function DraftPage({
       : openView;
   if (requestedDraftId && (!view || view.draft.contentWorkItemId !== item.id)) notFound();
   const panel = view ? await getBriefPanel(context, view.brief.id) : null;
+  const qaSummary = await qaSummaryFor(context, item.id);
 
   const canWrite = hasRole(context.membership.role, REQUIRED.WRITE);
   const canReview = hasRole(context.membership.role, REQUIRED.REVIEW);
@@ -567,6 +570,9 @@ export default async function DraftPage({
             </section>
 
             <aside className="min-w-0 space-y-6 xl:order-3">
+              {qaSummary ? (
+                <QaSummaryCard summary={qaSummary} websiteId={websiteId} workItemId={item.id} />
+              ) : null}
               {current ? (
                 <>
                   <ProvenancePanel

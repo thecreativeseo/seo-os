@@ -9,6 +9,8 @@ import { DemoBadge } from "@/components/metrics/primitives";
 import { StatusBadge, humanize } from "@/components/diagnosis/primitives";
 import { AuthorLabel } from "@/components/execution/provenance-panel";
 import { RevisionDetail } from "@/components/execution/revision-detail";
+import { RevisionQaRuns } from "@/components/execution/qa-summary";
+import { qaRunsForRevision, qaSummaryFor } from "@/server/services/content-qa";
 
 export const metadata = { title: "Revision · SEO OS" };
 
@@ -28,6 +30,11 @@ export default async function RevisionPage({
   if (!revision) notFound();
   const view = await getDraft(context, revision.contentDraftId);
   if (!view || view.draft.contentWorkItemId !== item.id) notFound();
+
+  const [qaRuns, qaSummary] = await Promise.all([
+    qaRunsForRevision(context, revision.id),
+    qaSummaryFor(context, item.id),
+  ]);
 
   const base = `/websites/${websiteId}/content/${item.id}/draft`;
   const isCurrent = revision.id === view.draft.currentRevisionId;
@@ -83,6 +90,13 @@ export default async function RevisionPage({
             decidedAt: item.decision.decidedAt,
           },
         }}
+      />
+
+      <RevisionQaRuns
+        runs={qaRuns}
+        websiteId={websiteId}
+        workItemId={item.id}
+        currentRunId={qaSummary?.latest?.current ? qaSummary.latest.id : null}
       />
     </main>
   );

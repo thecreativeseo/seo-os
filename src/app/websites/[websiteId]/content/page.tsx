@@ -3,6 +3,8 @@ import Link from "next/link";
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { REQUIRED, hasRole } from "@/server/auth/roles";
 import { listApprovedNotStarted, listContentWorkItems } from "@/server/services/content-work";
+import { listQaQueue } from "@/server/services/content-qa";
+import { qaColumnLabel } from "@/lib/content/qa-ux";
 import { EmptyState, PageHeader } from "@/components/governance/primitives";
 import { DemoBadge } from "@/components/metrics/primitives";
 import { PriorityBadge } from "@/components/opportunity/primitives";
@@ -34,10 +36,24 @@ export default async function ContentWorkPage({
   const showAll = status === "all";
   const canStart = hasRole(context.membership.role, REQUIRED.WRITE);
 
-  const [approved, items] = await Promise.all([
+  const [approved, items, qaRows] = await Promise.all([
     listApprovedNotStarted(context),
     listContentWorkItems(context, { status: showAll ? "all" : "open" }),
+    listQaQueue(context),
   ]);
+  // The QA state of each work item, in the words the QA queue uses (M5.4 §18).
+  const qaByItem = new Map(
+    qaRows.map((row) => [
+      row.workItemId,
+      qaColumnLabel({
+        itemStatus: row.itemStatus,
+        outcome: row.outcome,
+        runStatus: row.runStatus,
+        stale: row.runStatus === "COMPLETED" && !row.runCurrent,
+        approved: row.approved,
+      }),
+    ]),
+  );
 
   const eligible = approved.filter((row) => row.eligibility.eligible);
   const ineligible = approved.filter((row) => !row.eligibility.eligible);
@@ -172,6 +188,7 @@ export default async function ContentWorkPage({
                   <th className="px-3 py-2 font-medium">Page / Topic</th>
                   <th className="px-3 py-2 font-medium">Owner</th>
                   <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-3 py-2 font-medium">QA</th>
                 </tr>
               </thead>
               <tbody className="divide-border divide-y">
@@ -236,6 +253,18 @@ export default async function ContentWorkPage({
                     </td>
                     <td className="px-3 py-2">
                       <WorkItemStatusBadge status={item.status} />
+                    </td>
+                    <td className="px-3 py-2 text-xs">
+                      {qaByItem.has(item.id) ? (
+                        <Link
+                          href={`/websites/${websiteId}/content/${item.id}/qa`}
+                          className="hover:underline"
+                        >
+                          {qaByItem.get(item.id)}
+                        </Link>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
                     </td>
                   </tr>
                 ))}
