@@ -89,7 +89,7 @@ export type SemrushErrorCode =
 export const SEMRUSH_ERROR_MESSAGES: Record<SemrushErrorCode, string> = {
   NO_DATA: "Semrush has no data for this website in the selected database.",
   INVALID_API_KEY:
-    "Semrush did not accept this Analytics API v3 key. Check that you copied the v3 key from Subscription info → API units.",
+    "Semrush did not accept this Analytics API v3 key. In Semrush, open My Profile → API Keys and copy the existing Version 3 key; any key you create now is Version 4.",
   API_ACCESS_DISABLED: "Your Semrush subscription does not currently include API access.",
   REPORT_LIMIT_EXCEEDED: "Your Semrush limit for this report has been reached.",
   API_UNITS_EXHAUSTED: "Your Semrush API unit balance is zero. Add API units or upgrade your plan.",

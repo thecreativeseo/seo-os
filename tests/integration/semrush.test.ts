@@ -337,7 +337,7 @@ describe("mapping Semrush errors", () => {
     expect(error).toBeInstanceOf(SemrushError);
     expect((error as Error).message).not.toContain(KEY);
     expect((error as Error).message).toBe(
-      "Semrush did not accept this Analytics API v3 key. Check that you copied the v3 key from Subscription info → API units.",
+      "Semrush did not accept this Analytics API v3 key. In Semrush, open My Profile → API Keys and copy the existing Version 3 key; any key you create now is Version 4.",
     );
   });
 

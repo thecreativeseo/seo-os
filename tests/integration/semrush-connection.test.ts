@@ -115,7 +115,11 @@ describe("a website with no Semrush rankings", () => {
 
 describe("what a refused connection says", () => {
   const cases: [string, string, RegExp][] = [
-    ["ERROR 120 :: WRONG KEY - ID PAIR", "the key", /did not accept this Analytics API v3 key/i],
+    [
+      "ERROR 120 :: WRONG KEY - ID PAIR",
+      "the key, and where the v3 one lives",
+      /My Profile → API Keys/i,
+    ],
     ["ERROR 130 :: API DISABLED", "API access", /does not currently include API access/i],
     ["ERROR 131 :: LIMIT EXCEEDED", "report limit", /limit for this report has been reached/i],
     ["ERROR 132 :: API UNITS BALANCE IS ZERO", "units", /API unit balance is zero/i],
