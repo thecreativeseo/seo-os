@@ -174,6 +174,14 @@ number of milliseconds falls back to the default for that value. In every
 other environment the option is absent and Prisma's defaults stand. This is a
 change to how patient the suite is, not to what any product transaction does.
 
+The same file caps how many connections a test client may open: three for the
+shared client, one for a test-only client on `DIRECT_URL` (two for
+`database.test.ts`, which issues concurrent reads). pg defaults to ten per
+pool, and twelve workers at ten each exhausted the pooler with
+`unable to check out connection from the pool after 15000ms`. Overridable
+with `PRISMA_TEST_POOL_MAX` and `PRISMA_TEST_DIRECT_POOL_MAX`. Outside test
+no maximum is passed and pg's default stands.
+
 Fixture tenants are recorded in a ledger the moment they are created and
 swept by the run's global teardown, so a run that is killed does not leave
 them behind; see `tests/helpers/teardown.ts`.

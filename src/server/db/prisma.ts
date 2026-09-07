@@ -1,6 +1,10 @@
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient, type Prisma } from "@/generated/prisma/client";
-import { resolveTransactionBudget, type TransactionBudget } from "@/server/db/transaction-budget";
+import {
+  poolOptions,
+  resolveTransactionBudget,
+  type TransactionBudget,
+} from "@/server/db/test-settings";
 
 /**
  * The application's Prisma client.
@@ -60,7 +64,11 @@ function createPrismaClient(): PrismaClient {
     );
   }
 
-  const adapter = new PrismaPg({ connectionString });
+  // Under test the pool is capped: a worker runs one file at a time and its
+  // tests in sequence, so it needs a few connections, not pg's default ten,
+  // and a hundred files at once must not exhaust a shared pooler. Outside test
+  // no max is passed and pg decides exactly as before.
+  const adapter = new PrismaPg({ connectionString, ...poolOptions() });
 
   return new PrismaClient({ adapter, ...clientOptions() });
 }

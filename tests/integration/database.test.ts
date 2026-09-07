@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { PrismaClient } from "@/generated/prisma/client";
 import { deleteOrganizations, deleteUsers, registerOrganizations } from "../helpers/teardown";
+import { directPoolOptions } from "@/server/db/test-settings";
 
 /**
  * M2 database verification. Requires a live connection (DIRECT_URL).
@@ -17,7 +18,13 @@ import { deleteOrganizations, deleteUsers, registerOrganizations } from "../help
 const connectionString = process.env.DIRECT_URL;
 
 const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: connectionString ?? "" }),
+  // Two, not one: the seeded-structure test issues a Promise.all of five
+  // counts, so a second connection is genuinely used. DIRECT_URL is the
+  // pooler's session mode, so it stops there.
+  adapter: new PrismaPg({
+    connectionString: connectionString ?? "",
+    ...directPoolOptions(process.env, 2),
+  }),
 });
 
 const createdOrganizationIds: string[] = [];

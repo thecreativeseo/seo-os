@@ -3,6 +3,7 @@ import type { User as SupabaseUser } from "@supabase/supabase-js";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { PrismaClient } from "@/generated/prisma/client";
+import { directPoolOptions } from "@/server/db/test-settings";
 import { resolveInternalUser } from "@/server/auth/resolve-user";
 
 /**
@@ -17,7 +18,12 @@ import { resolveInternalUser } from "@/server/auth/resolve-user";
  */
 
 const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString: process.env.DIRECT_URL ?? "" }),
+  // Every query in this suite is sequential, so one connection is enough, and
+  // DIRECT_URL is the pooler's session mode where connections are scarcest.
+  adapter: new PrismaPg({
+    connectionString: process.env.DIRECT_URL ?? "",
+    ...directPoolOptions(),
+  }),
 });
 
 const createdUserIds: string[] = [];
