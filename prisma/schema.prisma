@@ -402,6 +402,7 @@ model Website {
   publishApprovals        PublishApproval[]
   executionVerifications  ExecutionVerification[]
   cmsSandboxPosts         CmsSandboxPost[]
+  connectionCapabilities  ConnectionCapability[]
 
   @@unique([workspaceId, normalizedDomain])
   @@index([workspaceId])
@@ -667,6 +668,15 @@ model Connection {
   // P1: property selection is a deliberate second step. Authorising an account is
   // not the same as choosing which property SEO OS reads, and a site with several
   // properties must not have one guessed for it.
+  // M6 (D6, D7). A CMS connection names a destination this server will call.
+  // baseUrl is validated by the WordPress URL policy before it is stored and
+  // again before it is used; the credential itself never lands on this model.
+  authType            CmsAuthType? @map("auth_type")
+  baseUrl             String?      @map("base_url")
+  /// Display only: who the CMS says we are connected as. Never the login name.
+  externalAccountName String?      @map("external_account_name")
+  lastCheckedAt       DateTime?    @map("last_checked_at")
+
   externalPropertyId   String?   @map("external_property_id")
   externalPropertyName String?   @map("external_property_name")
   propertySelectedAt   DateTime? @map("property_selected_at")
@@ -678,6 +688,7 @@ model Connection {
   website   Website?  @relation(fields: [websiteId], references: [id], onDelete: Cascade)
 
   credential      Credential?
+  capabilities    ConnectionCapability[]
   sourceSnapshots SourceSnapshot[]
   syncRuns        SyncRun[]
   gscMetrics      GscMetricDaily[]
@@ -692,6 +703,35 @@ model Connection {
   @@unique([websiteId, provider])
   @@index([workspaceId])
   @@map("connection")
+}
+
+/// M6 (D8). One answer to one question about what a connection's credentials
+/// may do, with where the answer came from and when it was asked. Written only
+/// by a connection test: nothing here is ever derived from the existence of a
+/// credential. entityType is null for a capability the CMS does not scope.
+model ConnectionCapability {
+  id           String         @id @default(uuid()) @db.Uuid
+  websiteId    String         @map("website_id") @db.Uuid
+  connectionId String         @map("connection_id") @db.Uuid
+  capability   CmsCapability
+  entityType   CmsEntityType? @map("entity_type")
+  granted      Boolean
+  /// How it was discovered - 'wp_users_me', 'simulated'. Never 'assumed'.
+  source       String
+  checkedAt    DateTime       @map("checked_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  website    Website    @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  connection Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  // The identity index is recreated in SQL with NULLS NOT DISTINCT, under this
+  // same name, so a capability with no entity scope is unique too rather than
+  // infinitely repeatable.
+  @@unique([connectionId, capability, entityType], map: "connection_capability_identity")
+  @@index([websiteId])
+  @@index([connectionId])
+  @@map("connection_capability")
 }
 
 // ---------------------------------------------------------------------------
@@ -2450,6 +2490,24 @@ enum CmsAuthType {
   SIMULATED
 }
 
+/// M6 (D14). The WordPress entity kinds SEO OS can target. Core only: a post
+/// or a page, never a custom post type, because core is what we can promise.
+enum CmsEntityType {
+  POST
+  PAGE
+}
+
+/// M6 (D8). What a CMS connection's credentials are known to permit.
+/// Discovered by asking the CMS, never inferred from the fact that credentials
+/// exist. Scoped per entity type where the CMS scopes it that way: a WordPress
+/// user may create posts and not pages.
+enum CmsCapability {
+  READ_CONTENT
+  CREATE_DRAFT
+  UPDATE_DRAFT
+  PUBLISH
+}
+
 enum PublishingMode {
   READ_ONLY
   DRAFT_ONLY
@@ -2513,6 +2571,11 @@ enum VerificationType {
   URL_RESOLVES
   HTTP_STATUS
   TITLE_MATCH
+  /// M6 (D9). A created entity must read back as a draft, with the excerpt we
+  /// sent, and under the slug we asked for.
+  CMS_STATUS_DRAFT
+  SLUG_MATCH
+  EXCERPT_MATCH
   META_DESCRIPTION_MATCH
   H1_MATCH
   CONTENT_PRESENT
@@ -2862,6 +2925,7 @@ model ContentQaRun {
 
   results      ContentQaResult[]
   cmsApprovals ContentCmsApproval[]
+  executions   Execution[]          @relation("QaRunExecutions")
 
   // Plus, in SQL: one RUNNING run per work item (content_qa_run_running_per_item);
   // a completed or failed run never changes (content_qa_run_completed_immutable).
@@ -2911,6 +2975,7 @@ model ContentCmsApproval {
   qaRun           ContentQaRun    @relation(fields: [qaRunId], references: [id], onDelete: Cascade)
   brief           ContentBrief    @relation("BriefCmsApprovals", fields: [briefId], references: [id], onDelete: Cascade)
   approvedBy      User            @relation("CmsApprover", fields: [approvedByUserId], references: [id], onDelete: Restrict)
+  executions      Execution[]     @relation("CmsApprovalExecutions")
 
   // Plus, in SQL: one APPROVED approval per work item
   // (content_cms_approval_active_per_item); an approval only ever goes
@@ -2984,35 +3049,54 @@ model PublishingPolicy {
 /// One thing done to the CMS on the tenant's behalf (§21), bound to the exact
 /// revision it was proposed for.
 model Execution {
-  id                 String             @id @default(uuid()) @db.Uuid
-  websiteId          String             @map("website_id") @db.Uuid
-  recommendationId   String             @map("recommendation_id") @db.Uuid
-  decisionId         String             @map("decision_id") @db.Uuid
-  contentWorkItemId  String             @map("content_work_item_id") @db.Uuid
-  contentRevisionId  String             @map("content_revision_id") @db.Uuid
+  id                   String             @id @default(uuid()) @db.Uuid
+  websiteId            String             @map("website_id") @db.Uuid
+  recommendationId     String             @map("recommendation_id") @db.Uuid
+  decisionId           String             @map("decision_id") @db.Uuid
+  contentWorkItemId    String             @map("content_work_item_id") @db.Uuid
+  contentRevisionId    String             @map("content_revision_id") @db.Uuid
   /// The revision's hash when this was proposed. Preflight recomputes and compares.
-  revisionHash       String             @map("revision_hash")
-  executionType      ExecutionType      @map("execution_type")
-  provider           ConnectionProvider
-  connectionId       String             @map("connection_id") @db.Uuid
-  status             ExecutionStatus    @default(PROPOSED)
+  revisionHash         String             @map("revision_hash")
+  executionType        ExecutionType      @map("execution_type")
+  /// M6 (Requirement A). The human authorization this execution acts on, and
+  /// the run it rested on. Required for CREATE_CMS_DRAFT and proven coherent
+  /// by execution_cms_binding: same website, work item, revision, hash and run
+  /// as the approval, which was APPROVED when this row was written. A later
+  /// invalidation of that approval is history and does not reach back here.
+  contentCmsApprovalId String?            @map("content_cms_approval_id") @db.Uuid
+  qaRunId              String?            @map("qa_run_id") @db.Uuid
+  /// M6 (Requirement B, D14). Post or page, chosen explicitly and kept, so a
+  /// historical execution can still say which it created.
+  targetEntityType     CmsEntityType?     @map("target_entity_type")
+  /// M6 (D3). Derived server-side from the operation's identity, never
+  /// supplied by a browser. Unique per website: the same operation twice is
+  /// the same execution.
+  idempotencyKey       String?            @map("idempotency_key")
+  /// What the publishing policy said when this ran. A later policy change must
+  /// not rewrite what was permitted then.
+  permissionMode       PublishingMode?    @map("permission_mode")
+  /// What the CMS says the entity is now. For M6 anything but 'draft' is an alarm.
+  externalStatus       String?            @map("external_status")
+  provider             ConnectionProvider
+  connectionId         String             @map("connection_id") @db.Uuid
+  status               ExecutionStatus    @default(PROPOSED)
   /// Provider attempts so far. A retry is a new step under the same execution,
   /// so the approval stays bound to it.
-  attempt            Int                @default(0)
-  requestedByUserId  String?            @map("requested_by_user_id") @db.Uuid
-  approvedByUserId   String?            @map("approved_by_user_id") @db.Uuid
-  executedByUserId   String?            @map("executed_by_user_id") @db.Uuid
-  externalEntityId   String?            @map("external_entity_id")
-  externalUrl        String?            @map("external_url")
-  beforeSnapshotJson Json?              @map("before_snapshot_json")
-  afterSnapshotJson  Json?              @map("after_snapshot_json")
-  startedAt          DateTime?          @map("started_at")
-  completedAt        DateTime?          @map("completed_at")
-  verifiedAt         DateTime?          @map("verified_at")
-  errorCode          String?            @map("error_code")
-  errorSummary       String?            @map("error_summary")
-  createdAt          DateTime           @default(now()) @map("created_at")
-  updatedAt          DateTime           @updatedAt @map("updated_at")
+  attempt              Int                @default(0)
+  requestedByUserId    String?            @map("requested_by_user_id") @db.Uuid
+  approvedByUserId     String?            @map("approved_by_user_id") @db.Uuid
+  executedByUserId     String?            @map("executed_by_user_id") @db.Uuid
+  externalEntityId     String?            @map("external_entity_id")
+  externalUrl          String?            @map("external_url")
+  beforeSnapshotJson   Json?              @map("before_snapshot_json")
+  afterSnapshotJson    Json?              @map("after_snapshot_json")
+  startedAt            DateTime?          @map("started_at")
+  completedAt          DateTime?          @map("completed_at")
+  verifiedAt           DateTime?          @map("verified_at")
+  errorCode            String?            @map("error_code")
+  errorSummary         String?            @map("error_summary")
+  createdAt            DateTime           @default(now()) @map("created_at")
+  updatedAt            DateTime           @updatedAt @map("updated_at")
 
   website         Website                 @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   recommendation  Recommendation          @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
@@ -3020,6 +3104,8 @@ model Execution {
   contentWorkItem ContentWorkItem         @relation(fields: [contentWorkItemId], references: [id], onDelete: Cascade)
   revision        ContentRevision         @relation(fields: [contentRevisionId], references: [id], onDelete: Cascade)
   connection      Connection              @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  cmsApproval     ContentCmsApproval?     @relation("CmsApprovalExecutions", fields: [contentCmsApprovalId], references: [id], onDelete: Restrict)
+  qaRun           ContentQaRun?           @relation("QaRunExecutions", fields: [qaRunId], references: [id], onDelete: Restrict)
   requestedBy     User?                   @relation("ExecutionRequester", fields: [requestedByUserId], references: [id], onDelete: SetNull)
   approvedBy      User?                   @relation("ExecutionApprover", fields: [approvedByUserId], references: [id], onDelete: SetNull)
   executedBy      User?                   @relation("ExecutionExecutor", fields: [executedByUserId], references: [id], onDelete: SetNull)
@@ -3028,8 +3114,12 @@ model Execution {
   verifications   ExecutionVerification[]
 
   // Plus, in SQL: one active execution per (work item, type)
-  // (execution_active_per_item_type).
+  // (execution_active_per_item_type); one idempotency key per website
+  // (execution_idempotency_key); one external entity per (work item, type) and
+  // per (connection, entity) (execution_external_*); the approval chain and the
+  // frozen external id (execution_cms_binding, execution_external_id_immutable).
   @@index([websiteId, status])
+  @@index([contentCmsApprovalId])
   @@index([contentWorkItemId, executionType])
   @@map("execution")
 }

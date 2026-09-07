@@ -2,7 +2,7 @@
 
 SEO OS runs as two services from one repository, sharing one Supabase project.
 
-Current stable commit: the head of `main`. As of P4 M5 the schema is at 27
+Current stable commit: the head of `main`. As of P4 M6.1 the schema is at 28
 migrations; `npx prisma migrate status` should say the database is up to date
 before and after a deploy. Deploys from `main` are manual: press Deploy in
 the Railway dashboard. The web service runs `prisma migrate deploy` before

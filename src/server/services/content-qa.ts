@@ -161,22 +161,32 @@ type Gathered = {
   contextVersionId: string | null;
 };
 
-async function fingerprintInputs(context: TenantContext): Promise<{
+/**
+ * A client to read through. Defaults to the global one; M6 passes its own
+ * transaction, so an execution's authoritative checks and the write it
+ * authorizes happen on a single connection.
+ */
+type QaReader = typeof prisma | Prisma.TransactionClient;
+
+async function fingerprintInputs(
+  context: TenantContext,
+  client: QaReader = prisma,
+): Promise<{
   inputs: FingerprintInputs;
   contextVersion: { id: string; prohibitedClaims: string[]; avoidTopics: string[] } | null;
 }> {
   const [facts, rules, contextVersion] = await Promise.all([
-    prisma.brandFact.findMany({
+    client.brandFact.findMany({
       where: websiteScope(context),
       select: { id: true, value: true, approvalStatus: true, archivedAt: true },
       orderBy: { id: "asc" },
     }),
-    prisma.seoRule.findMany({
+    client.seoRule.findMany({
       where: { ...websiteScope(context), active: true, archivedAt: null },
       select: { id: true, rule: true, severity: true, checkJson: true },
       orderBy: { id: "asc" },
     }),
-    prisma.businessContextVersion.findFirst({
+    client.businessContextVersion.findFirst({
       where: { status: "APPROVED", businessContext: { websiteId: context.website.id } },
       orderBy: { versionNumber: "desc" },
       select: { id: true, prohibitedClaims: true, avoidTopics: true },
@@ -202,8 +212,11 @@ async function fingerprintInputs(context: TenantContext): Promise<{
 }
 
 /** The fingerprint of what QA would judge against right now. */
-export async function currentInputsFingerprint(context: TenantContext): Promise<string> {
-  const { inputs } = await fingerprintInputs(context);
+export async function currentInputsFingerprint(
+  context: TenantContext,
+  client: QaReader = prisma,
+): Promise<string> {
+  const { inputs } = await fingerprintInputs(context, client);
   return inputsFingerprint(inputs);
 }
 

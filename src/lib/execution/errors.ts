@@ -19,6 +19,18 @@ export const EXECUTION_ERROR_CODES = [
   "approval_missing",
   "verification_failed",
   "content_mismatch",
+  // M6.1. Refusals that happen before any external call, and the two answers
+  // about an attempt whose outcome we could not observe.
+  "forbidden",
+  "not_configured",
+  "connection_disabled",
+  "invalid_site_url",
+  "target_type_unresolved",
+  "already_executed",
+  "execution_in_progress",
+  "execution_cancelled",
+  "ambiguous_timeout",
+  "reconciled_absent",
 ] as const;
 
 export type ExecutionErrorCode = (typeof EXECUTION_ERROR_CODES)[number];
@@ -36,7 +48,53 @@ export const EXECUTION_ERROR_MESSAGES: Record<ExecutionErrorCode, string> = {
   approval_missing: "This needs a publish approval before it can run.",
   verification_failed: "Published, but the live page did not match what was approved.",
   content_mismatch: "The CMS holds different content from the approved revision.",
+  forbidden: "This is done by a person with the right role, and not by a job.",
+  not_configured: "No CMS connection is set up for this website yet.",
+  connection_disabled: "The CMS connection is not currently connected.",
+  invalid_site_url: "The CMS connection does not have a usable site address.",
+  target_type_unresolved: "Choose whether this should be a post or a page first.",
+  already_executed: "This work already has a CMS draft.",
+  execution_in_progress: "A CMS action for this work is already running.",
+  execution_cancelled: "This CMS action was cancelled and cannot be run again.",
+  ambiguous_timeout: "We could not tell whether the CMS created this. It needs reconciling.",
+  reconciled_absent: "We checked the CMS and it created nothing, so this is safe to try again.",
 };
+
+/**
+ * The failures that prove no external entity can exist (M6 plan D10, D11).
+ *
+ * A new attempt is only safe when we know the last one changed nothing. That is
+ * a short list, and everything not on it is treated as unsafe: an answer we
+ * could not parse, a timeout, a 500 all leave open the possibility that a post
+ * was created and we did not hear about it. Retrying those risks a duplicate in
+ * somebody's CMS, which is not recoverable by us.
+ *
+ * reconciled_absent is on the list because it is the only code that means we
+ * went and looked. It is written by reconciliation, never inferred.
+ */
+export const RETRY_SAFE_FAILURE_CODES: readonly ExecutionErrorCode[] = [
+  "connection_failed",
+  "unauthorized",
+  "capability_missing",
+  "policy_denied",
+  "rate_limited",
+  "not_configured",
+  "connection_disabled",
+  "invalid_site_url",
+  "reconciled_absent",
+];
+
+/**
+ * Whether a failed attempt may be tried again.
+ *
+ * Default deny: a code that is not on the safe list, including one we do not
+ * recognise, means the outcome is unresolved and a person or a reconciliation
+ * has to settle it first.
+ */
+export function isRetrySafeFailure(code: string | null): boolean {
+  if (code === null) return false;
+  return (RETRY_SAFE_FAILURE_CODES as readonly string[]).includes(code);
+}
 
 export class ExecutionError extends Error {
   constructor(
