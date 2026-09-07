@@ -167,13 +167,22 @@ function words(value: string): string {
   return lower.charAt(0).toUpperCase() + lower.slice(1);
 }
 
-/** A work item's status in words. QA reads "Ready for QA" until M5 runs checks. */
+/**
+ * A work item's status in words.
+ *
+ * ContentWorkItemStatus and ContentDraftStatus share the name
+ * AWAITING_EDITOR_REVIEW and mean different things: on a draft it is the
+ * editorial review of M4.5, on a work item it is the decision after QA about
+ * whether the piece may go to the CMS. Each keeps its own words, and neither
+ * enum is renamed. Where the QA outcome is known, qaWorkItemLabel in
+ * lib/content/qa-ux says more ("QA blocked", "QA passed").
+ */
 export function workItemStatusLabel(status: string): string {
   switch (status) {
     case "QA":
       return "Ready for QA";
     case "AWAITING_EDITOR_REVIEW":
-      return "Awaiting editor review";
+      return "Awaiting final approval";
     case "APPROVED_FOR_CMS":
       return "Approved for CMS";
     case "CMS_DRAFT_CREATED":

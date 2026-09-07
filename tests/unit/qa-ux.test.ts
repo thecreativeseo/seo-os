@@ -291,7 +291,7 @@ describe("what a person may do", () => {
       needsNotCheckedAcknowledgement: false,
       needsBriefAcknowledgement: false,
     });
-    expect(qaControls({ ...gate, notCheckedCount: 2, briefSuperseded: true })).toMatchObject({
+    expect(qaControls({ ...gate, notCheckedTypes: 2, briefSuperseded: true })).toMatchObject({
       needsNotCheckedAcknowledgement: true,
       needsBriefAcknowledgement: true,
     });

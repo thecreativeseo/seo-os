@@ -5,6 +5,8 @@ import { useStubProvider as installStubProvider, resetProvider } from "@/server/
 import type { TenantContext } from "@/server/auth/guards";
 import { prisma } from "@/server/db/prisma";
 import { DemoSeedError, PROTECTED_DOMAINS } from "@/server/demo/p3";
+import { approveForCms, runQa } from "@/server/services/content-qa";
+import type { ContentQaOutput } from "@/lib/ai/schemas/content-qa";
 import { decide } from "@/server/services/decision";
 import { startFromRecommendation } from "@/server/services/content-work";
 import {
@@ -77,11 +79,62 @@ export type P4DemoResult = {
   reopenedDraftId: string;
   /** The supersession story: the old draft kept, the new one pinned to v2. */
   supersession: { oldDraftId: string; newDraftId: string };
+  /** The three M5 stories, by work item and QA run. */
+  qa: {
+    /** Passed QA, then a person approved it for the CMS. */
+    approved: { workItemId: string; runId: string; approvalId: string } | null;
+    /** Blocked: the fact a claim rests on was revoked before QA. */
+    blocked: { workItemId: string; runId: string } | null;
+    /** Passed with warnings, with a check that could not run at all. */
+    notChecked: { workItemId: string; runId: string; types: string[] } | null;
+  };
 };
 
 const DEFAULT_REFRESH_PATH = "/blog/cohort-analysis-guide";
 const REFRESH_TITLE = "Refresh the cohort analysis guide for teams choosing a tool";
 const COMPARE_TITLE = "Compare cohort analysis tools for teams outgrowing spreadsheets";
+const EXPORT_TITLE = "Explain how cohort exports work for analysts who live in spreadsheets";
+
+/**
+ * The claim story B rests on, and the fact behind it. The fact is approved
+ * while the piece is written and reviewed, and revoked before QA - which is
+ * exactly how a business changes its mind, and exactly what QA has to catch.
+ */
+const EXPORT_CLAIM = "Cohort reports export to CSV";
+const EXPORT_FACT_KEY = "cohort-export-format";
+
+const EXPORT_BODY = [
+  "# Exporting cohort reports",
+  "",
+  "## What exports look like",
+  "",
+  "Cohort reports export to CSV. Every cohort, every period, and the counts behind each cell, in the same shape you see on screen.",
+  "",
+  "## When to export",
+  "",
+  "Export when the question has moved past the tool: a board pack, a model that mixes cohorts with revenue, or a colleague who works in a spreadsheet and always will.",
+  "",
+  "## What to check afterwards",
+  "",
+  "Check the period boundaries and the cohort definition before anyone builds on the numbers. A cohort that starts on a different day is a different cohort.",
+].join("\n");
+
+/** Story C: a title and description change. No questions to answer, by nature. */
+const TITLE_META_BODY = [
+  "# Cohort analysis tools: the comparison, up front",
+  "",
+  "## What changes",
+  "",
+  "The page keeps its content. The title and the description change, so that the comparison a reader came for is the first thing they see and the product name comes second.",
+  "",
+  "The current title leads with the product. Someone comparing tools reads past it, because nothing in it says the page compares anything. The new title leads with the comparison and keeps the product name where it still earns the click.",
+  "",
+  "The description does the same work in a sentence: what the page compares, and who it is for. Nothing in the body of the page changes, so nothing a reader has already found moves.",
+  "",
+  "## Why it is worth doing",
+  "",
+  "The page already appears for the comparison; it just does not read like a comparison in the result. A title and a description that match the search are the cheapest change on the page, and the one whose effect is easiest to read afterwards.",
+].join("\n");
 
 /** The good draft of the refresh story - what the stub writes, and what the person restores. */
 const GOOD_REFRESH_BODY = [
@@ -104,6 +157,13 @@ function citableIds(request: GenerateStructuredRequest<unknown>): string[] {
   return [...(request.untrustedData ?? "").matchAll(/^\[([^\]]+)\]/gm)].map((match) => match[1]!);
 }
 
+/** The evidence id of the record whose rendered block holds this text. */
+function idHolding(request: GenerateStructuredRequest<unknown>, needle: string): string | null {
+  const blocks = (request.untrustedData ?? "").split(/\n(?=\[)/);
+  const hit = blocks.find((block) => block.startsWith("[fact:") && block.includes(needle));
+  return hit ? (/^\[([^\]]+)\]/.exec(hit)?.[1] ?? null) : null;
+}
+
 function byKind(ids: string[], kind: string): string[] {
   return ids.filter((id) => id.startsWith(`${kind}:`));
 }
@@ -117,6 +177,80 @@ function scriptFor(request: GenerateStructuredRequest<unknown>): ContentBriefOut
   const owns = byKind(ids, "own");
   const isNew = request.task.includes("Target page: none");
   const isCompare = request.task.includes(COMPARE_TITLE);
+  const isExport = request.task.includes(EXPORT_TITLE);
+  const isTitleMeta = request.task.includes("Work item type: TITLE_META_UPDATE");
+  const exportFact = idHolding(request, EXPORT_CLAIM);
+
+  if (isExport) {
+    return {
+      title: "How cohort exports work",
+      content_type: "GUIDE",
+      search_intent: "INFORMATIONAL",
+      primary_conversion: "Start a free trial",
+      audience: "Analysts who take numbers out of tools and into spreadsheets",
+      customer_problem: "They cannot tell what an export contains until they have run one.",
+      desired_outcome: "The reader knows what they get and what to check before using it.",
+      recommended_angle: "Say what the file holds, then when exporting is the right move.",
+      key_questions: ["What does an export contain?"],
+      required_sections: [
+        { heading: "What exports look like", purpose: "The file, described." },
+        { heading: "When to export", purpose: "The judgement call." },
+      ],
+      optional_sections: [],
+      internal_link_targets: [],
+      external_evidence_requirements: [],
+      approved_claims: exportFact
+        ? [{ text: EXPORT_CLAIM, evidence_id: exportFact }]
+        : facts.slice(0, 1).map((evidence_id) => ({ text: EXPORT_CLAIM, evidence_id })),
+      prohibited_claims: ctx.slice(0, 1).map((evidence_id) => ({
+        text: "Do not quote customer counts",
+        evidence_id,
+      })),
+      seo_rule_constraints: rules.slice(0, 2).map((evidence_id) => ({
+        evidence_id,
+        constraint: "Applies to the title, the headings and the body.",
+      })),
+      secondary_keyword_evidence_ids: [],
+      brand_voice_notes: "Direct, specific, no hype.",
+      missing_evidence: [],
+    };
+  }
+
+  if (isTitleMeta) {
+    // A title and description change answers no reader questions: the brief
+    // says so rather than inventing some, and QA reports honestly that
+    // answer readiness could not be checked.
+    return {
+      title: "Title and description for the comparison page",
+      content_type: "GUIDE",
+      search_intent: "COMMERCIAL",
+      primary_conversion: null,
+      audience: "Readers comparing cohort analysis tools",
+      customer_problem: "The result does not read like the comparison the page actually is.",
+      desired_outcome: "The title and description say what the page compares, and for whom.",
+      recommended_angle: "Lead with the comparison, keep the product name second.",
+      key_questions: [],
+      required_sections: [
+        { heading: "What changes", purpose: "The title and the description, and why." },
+        { heading: "Why it is worth doing", purpose: "The case, in a paragraph." },
+      ],
+      optional_sections: [],
+      internal_link_targets: [],
+      external_evidence_requirements: [],
+      approved_claims: [],
+      prohibited_claims: ctx.slice(0, 1).map((evidence_id) => ({
+        text: "Do not quote customer counts",
+        evidence_id,
+      })),
+      seo_rule_constraints: rules.slice(0, 2).map((evidence_id) => ({
+        evidence_id,
+        constraint: "Applies to the title and the description.",
+      })),
+      secondary_keyword_evidence_ids: [],
+      brand_voice_notes: "Direct, specific, no hype.",
+      missing_evidence: [],
+    };
+  }
 
   return {
     title: isCompare
@@ -191,6 +325,47 @@ function draftScriptFor(request: GenerateStructuredRequest<unknown>): ContentDra
   const facts = byKind(ids, "fact");
   const owns = byKind(ids, "own");
   const good = !request.task.includes(REFRESH_TITLE);
+  const isExport = request.task.includes(EXPORT_TITLE);
+  const isTitleMeta = request.task.includes("Type: TITLE_META_UPDATE");
+  const exportFact = idHolding(request, EXPORT_CLAIM);
+
+  if (isExport) {
+    return {
+      title: "Exporting cohort reports",
+      slug: "exporting-cohort-reports",
+      excerpt: "What a cohort export contains, when to run one, and what to check afterwards.",
+      meta_title: "Exporting Cohort Reports | Investor Demo",
+      meta_description: "What a cohort export contains, when to run one, and what to check.",
+      body_markdown: EXPORT_BODY,
+      claims: [
+        {
+          text: EXPORT_CLAIM,
+          evidence_id: exportFact ?? facts[0] ?? null,
+        },
+      ],
+      internal_links_used: [],
+      sections_covered: ["What exports look like", "When to export"],
+      open_questions: [],
+      change_summary: "First draft from the approved brief.",
+    };
+  }
+
+  if (isTitleMeta) {
+    return {
+      title: "Cohort analysis tools compared: spreadsheet, product analytics, or a dedicated tool",
+      slug: "cohort-analysis-tools",
+      excerpt: "Which cohort analysis tool fits, and when a spreadsheet is still the right answer.",
+      meta_title: "Cohort Analysis Tools Compared | Investor Demo",
+      meta_description:
+        "Compare cohort analysis tools: spreadsheet, product analytics, or a dedicated tool.",
+      body_markdown: TITLE_META_BODY,
+      claims: [],
+      internal_links_used: [],
+      sections_covered: ["What changes", "Why it is worth doing"],
+      open_questions: [],
+      change_summary: "First draft from the approved brief.",
+    };
+  }
 
   const body = good
     ? GOOD_REFRESH_BODY
@@ -237,6 +412,61 @@ function draftScriptFor(request: GenerateStructuredRequest<unknown>): ContentDra
     change_summary: good
       ? "First draft from the approved brief."
       : "First draft from the approved brief.",
+  };
+}
+
+/**
+ * The scripted QA judge. It answers what the task asks - the questions and
+ * the rules it was given, by their exact text and ids - and, for the refresh
+ * story, reports the two things a person should see a model report: an intent
+ * that only partly matches, and a missing call to action. Everything it says
+ * is capped and verified by the server before it counts.
+ */
+function qaScriptFor(request: GenerateStructuredRequest<unknown>): ContentQaOutput {
+  const task = request.task;
+  const questions = [...task.matchAll(/^- Q\d+: (.+)$/gm)].map((match) => match[1]!.trim());
+  const rules = [...task.matchAll(/\[rule:([^\]]+)\]/g)].map((match) => match[1]!);
+  const isRefresh = task.includes(REFRESH_TITLE);
+  const hasConversion = !/^Primary conversion: not stated$/m.test(task);
+  const hasKeyword = !/^Primary keyword: not stated$/m.test(task);
+
+  return {
+    intent_alignment: isRefresh
+      ? {
+          status: "PARTIAL",
+          rationale:
+            "The walkthrough serves the reader well; the tool comparison stops short of the decision the brief asks for.",
+          excerpts: ["A spreadsheet works for one product and one question."],
+        }
+      : { status: "ALIGNED", rationale: "It answers the search the brief names.", excerpts: [] },
+    answer_readiness: questions.map((question, index) => ({
+      question,
+      status: isRefresh && index === questions.length - 1 ? "PARTIAL" : "ANSWERED",
+      heading: null,
+      form: "DIRECT",
+      excerpt: null,
+    })),
+    rule_judgments: rules.map((rule_id) => ({
+      rule_id: `rule:${rule_id}`,
+      status: "RESPECTED",
+      rationale: "The text reads as the rule asks.",
+      excerpt: null,
+    })),
+    unlisted_claims: [],
+    prohibited_paraphrases: [],
+    call_to_action: hasConversion
+      ? isRefresh
+        ? {
+            status: "ABSENT",
+            rationale: "Nothing invites the reader to start a trial.",
+            excerpt: null,
+          }
+        : { status: "PRESENT", rationale: "The close asks for the next step.", excerpt: null }
+      : null,
+    keyword_use: hasKeyword
+      ? { status: "NATURAL", rationale: "It sits where a reader expects it.", excerpt: null }
+      : null,
+    brand_voice: { status: "MATCHES", rationale: "Direct and specific.", excerpt: null },
   };
 }
 
@@ -358,12 +588,16 @@ export async function seedP4Demo(
   }
 
   installStubProvider({
-    respond: (request) =>
-      request.schemaName === "content_draft" ? draftScriptFor(request) : scriptFor(request),
+    respond: (request) => {
+      if (request.schemaName === "content_draft") return draftScriptFor(request);
+      if (request.schemaName === "content_qa") return qaScriptFor(request);
+      return scriptFor(request);
+    },
   });
 
   let reviewDraftId = "";
   let reopenedDraftId = "";
+  let qa: P4DemoResult["qa"] = { approved: null, blocked: null, notChecked: null };
   let supersession = { oldDraftId: "", newDraftId: "" };
 
   try {
@@ -527,6 +761,140 @@ export async function seedP4Demo(
       changeSummary: "Rewrote the cost comparison with the current prices; the rest stands.",
     });
     reopenedDraftId = compareDraftB.id;
+
+    // ---- M5 stories ------------------------------------------------------
+    // Story B needs a fact that is true while the piece is written and
+    // reviewed, and revoked before QA. Re-running the seed puts it back.
+    const existingFact = await prisma.brandFact.findFirst({
+      where: { websiteId: context.website.id, factKey: EXPORT_FACT_KEY },
+    });
+    const exportFact = existingFact
+      ? await prisma.brandFact.update({
+          where: { id: existingFact.id },
+          data: { approvalStatus: "APPROVED", value: EXPORT_CLAIM, archivedAt: null },
+        })
+      : await prisma.brandFact.create({
+          data: {
+            websiteId: context.website.id,
+            category: "Product",
+            factKey: EXPORT_FACT_KEY,
+            value: EXPORT_CLAIM,
+            approvalStatus: "APPROVED",
+            source: "USER_PROVIDED",
+          },
+        });
+
+    const exportRecommendation = await prisma.recommendation.create({
+      data: {
+        websiteId: context.website.id,
+        type: "CONTENT_CREATE",
+        status: "AWAITING_REVIEW",
+        priority: "MEDIUM",
+        title: EXPORT_TITLE,
+        summary: "Analysts keep asking what an export contains before they run one.",
+        rationale: "Support answers this by hand every week; the answer belongs on the site.",
+        createdByUserId: context.user.id,
+      },
+    });
+    await decide(context, exportRecommendation.id, {
+      decision: "APPROVED",
+      reason: "One page, one question, and we already know the answer.",
+    });
+    const exportItem = await startFromRecommendation(context, exportRecommendation.id);
+
+    const exportBrief = await generateBrief(context, exportItem.id);
+    if (!exportBrief.ok) {
+      throw new DemoSeedError(
+        `The export brief failed: ${exportBrief.error.message}`,
+        "run_failed",
+      );
+    }
+    await approveBrief(context, exportBrief.brief.id);
+    const { draft: exportDraft } = await startDraft(context, exportItem.id);
+    const exportRevision = await generateRevision(context, exportDraft.id, {
+      generationToken: "demo-export-1",
+    });
+    if (!exportRevision.ok) {
+      throw new DemoSeedError(`The export draft failed: ${exportRevision.message}`, "run_failed");
+    }
+    await requestDraftReview(context, exportDraft.id);
+    await approveDraft(context, exportDraft.id, {
+      note: "Accurate as written, and the fact behind it is approved.",
+    });
+
+    // Story C: a title and description change. Its brief asks no reader
+    // questions, so answer readiness has nothing to check - which the report
+    // has to say rather than pass over.
+    const titleMetaItem = p3Started.find((item) => item.type === "TITLE_META_UPDATE") ?? null;
+    let notCheckedRunId: string | null = null;
+    if (titleMetaItem) {
+      const brief = await generateBrief(context, titleMetaItem.id);
+      if (!brief.ok) {
+        throw new DemoSeedError(`The title brief failed: ${brief.error.message}`, "run_failed");
+      }
+      await approveBrief(context, brief.brief.id);
+      const { draft } = await startDraft(context, titleMetaItem.id);
+      const written = await generateRevision(context, draft.id, {
+        generationToken: "demo-title-meta-1",
+      });
+      if (!written.ok) {
+        throw new DemoSeedError(`The title draft failed: ${written.message}`, "run_failed");
+      }
+      await requestDraftReview(context, draft.id);
+      await approveDraft(context, draft.id, { note: "Reads as the brief asks." });
+    }
+
+    // Every editorial approval is done. Now the business changes its mind
+    // about one fact - and QA, not a person, is what catches the piece that
+    // still rests on it.
+    await prisma.brandFact.update({
+      where: { id: exportFact.id },
+      data: { approvalStatus: "REJECTED" },
+    });
+
+    // QA runs last, in this order, so the approved story stays current: the
+    // facts and rules behind it do not move again after it is approved.
+    const blockedRun = await runQa(context, exportItem.id);
+    if (!blockedRun.ok) {
+      throw new DemoSeedError(`QA on the export story failed: ${blockedRun.message}`, "run_failed");
+    }
+    if (titleMetaItem) {
+      const run = await runQa(context, titleMetaItem.id);
+      if (!run.ok) {
+        throw new DemoSeedError(`QA on the title story failed: ${run.message}`, "run_failed");
+      }
+      notCheckedRunId = run.run.id;
+    }
+    const passedRun = await runQa(context, refreshItem.id);
+    if (!passedRun.ok) {
+      throw new DemoSeedError(`QA on the refresh story failed: ${passedRun.message}`, "run_failed");
+    }
+    const approval = await approveForCms(context, refreshItem.id, {
+      note: "Read the warnings and the checks that could not run. Nothing blocking; ready for the CMS.",
+      acknowledgeNotChecked: true,
+    });
+
+    const notCheckedTypes = notCheckedRunId
+      ? (
+          await prisma.contentQaResult.findMany({
+            where: { qaRunId: notCheckedRunId, status: "NOT_CHECKED" },
+            select: { qaType: true },
+          })
+        ).map((row) => String(row.qaType))
+      : [];
+
+    qa = {
+      approved: {
+        workItemId: refreshItem.id,
+        runId: passedRun.run.id,
+        approvalId: approval.approval.id,
+      },
+      blocked: { workItemId: exportItem.id, runId: blockedRun.run.id },
+      notChecked:
+        titleMetaItem && notCheckedRunId
+          ? { workItemId: titleMetaItem.id, runId: notCheckedRunId, types: notCheckedTypes }
+          : null,
+    };
   } finally {
     resetProvider();
   }
@@ -561,5 +929,6 @@ export async function seedP4Demo(
     reviewDraftId,
     reopenedDraftId,
     supersession,
+    qa,
   };
 }

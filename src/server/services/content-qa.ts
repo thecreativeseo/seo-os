@@ -103,6 +103,9 @@ export const QA_REVISION_CHANGED_MESSAGE =
 
 export type QaRunFailureCode = "revision_changed" | "checker_error" | "package_error";
 
+/** Where QA may be run: at the gate, and on work already approved for CMS. */
+const QA_RUNNABLE_STATUSES: string[] = ["QA", "AWAITING_EDITOR_REVIEW", "APPROVED_FOR_CMS"];
+
 export type QaRunOutcome =
   | { ok: true; run: ContentQaRun; results: QaTypeResult[]; workItem: ContentWorkItem }
   | { ok: false; code: QaRunFailureCode; message: string; run: ContentQaRun };
@@ -473,9 +476,12 @@ export async function runQa(
 ): Promise<QaRunOutcome> {
   requireHumanWriter(context, "Run QA");
   const item = await scopedItem(context, workItemId);
-  if (item.status !== "QA" && item.status !== "AWAITING_EDITOR_REVIEW") {
+  // Approved work may be checked again: when a fact or a rule moves, the
+  // approval goes stale and the way back is a fresh run and a fresh approval.
+  // Running QA never changes the work item beyond its own outcome.
+  if (!QA_RUNNABLE_STATUSES.includes(item.status)) {
     throw new ContentQaError(
-      "QA runs on work that is ready for QA or awaiting final approval.",
+      "QA runs on work that is ready for QA, awaiting final approval, or approved for CMS.",
       "invalid_state",
     );
   }

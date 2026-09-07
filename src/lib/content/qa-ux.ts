@@ -630,7 +630,8 @@ export type QaControlsInput = {
   runOutcome?: string | null;
   runCurrent?: boolean;
   blockingCount?: number;
-  notCheckedCount?: number;
+  /** QA types that could not be checked at all - what an approval must acknowledge. */
+  notCheckedTypes?: number;
   /** An effective approval, and whether it still authorizes execution. */
   approved?: boolean;
   approvalStale?: boolean;
@@ -690,7 +691,7 @@ export function qaControls(input: QaControlsInput): QaControls {
     runReason,
     canApprove: approveReason === null,
     approveReason,
-    needsNotCheckedAcknowledgement: (input.notCheckedCount ?? 0) > 0,
+    needsNotCheckedAcknowledgement: (input.notCheckedTypes ?? 0) > 0,
     needsBriefAcknowledgement: Boolean(input.briefSuperseded),
     canReturn: inGate && input.canWrite,
     returnReason: !inGate

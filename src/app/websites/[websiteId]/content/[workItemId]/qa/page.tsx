@@ -71,7 +71,11 @@ export default async function QaReportPage({
     runOutcome: latest?.outcome ?? null,
     runCurrent: latest?.current,
     blockingCount: latest?.blockingCount ?? 0,
-    notCheckedCount: latest?.notCheckedCount ?? 0,
+    // The service requires an acknowledgement for a QA type that could not be
+    // checked at all; a partly covered type is a warning, not a gap.
+    notCheckedTypes: view
+      ? view.results.filter((result) => result.status === "NOT_CHECKED").length
+      : 0,
     approved: summary.approval !== null,
     approvalStale: summary.approval !== null && !summary.approval.executable,
     briefSuperseded: summary.briefSuperseded,

@@ -2,6 +2,12 @@
 
 SEO OS runs as two services from one repository, sharing one Supabase project.
 
+Current stable commit: the head of `main`. As of P4 M5 the schema is at 27
+migrations; `npx prisma migrate status` should say the database is up to date
+before and after a deploy. Deploys from `main` are manual: press Deploy in
+the Railway dashboard. The web service runs `prisma migrate deploy` before
+each deploy, and the health check is `/api/health`.
+
 | Service    | What it is                                 | Config file           | Start command    |
 | ---------- | ------------------------------------------ | --------------------- | ---------------- |
 | **web**    | The Next.js app: UI, Server Actions, OAuth | `railway.json`        | `npm run start`  |
@@ -142,6 +148,38 @@ the process exits.
 `DIAGNOSIS_RUNNER` is blank (inline) by default: a diagnosis runs inside the
 web request, which needs no worker. Set it to `queue` on the web service to
 hand diagnoses to the worker, which then needs the AI variables too.
+
+## The investor demo data
+
+Nothing seeds itself. The demo data is created by hand, on the demo website
+only, by running the seeds in order against the shared database:
+
+```bash
+DEMO_OWNER_EMAIL=<the demo owner's email> npm run db:seed:demo      # P0
+DEMO_OWNER_EMAIL=<the demo owner's email> npm run db:seed:demo:p1
+DEMO_OWNER_EMAIL=<the demo owner's email> npm run db:seed:demo:p2
+DEMO_OWNER_EMAIL=<the demo owner's email> npm run db:seed:demo:p3
+DEMO_OWNER_EMAIL=<the demo owner's email> npm run db:seed:demo:p4
+```
+
+The P4 seed is the one that matters for M5. It is deterministic: run it twice
+and the visible state is the same. It resets only the work items and the
+recommendations it owns on the demo website, and it refuses to run against a
+website that is not marked as a demo - `thecreativeseo.com` among them. AI
+runs and evidence packages from earlier work are left alone as history.
+
+It writes through the real services with a stub provider, so no API key is
+needed to seed, and the three M5 stories it leaves are:
+
+| Story                 | Where it ends           | What it shows                                                                                    |
+| --------------------- | ----------------------- | ------------------------------------------------------------------------------------------------ |
+| Refresh               | Approved for CMS        | QA passed with warnings, measured and judged findings, a person's approval on one exact revision |
+| Export                | QA blocked              | A claim whose approved fact was withdrawn: a measured, blocking finding                          |
+| Title and description | Awaiting final approval | A check that could not run at all, waiting on a person to accept it                              |
+
+Semantic QA needs `ANTHROPIC_API_KEY` on the web service. Without it the
+deterministic checks still run and the judged ones are recorded as not
+checked, with the reason - the product works, and says what it could not do.
 
 ## History-preserving tables
 

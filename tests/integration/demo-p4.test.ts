@@ -112,7 +112,10 @@ describe("the P4 demo seed", () => {
 
       const first = await seedP4Demo(tenant);
       const statuses = first.briefs.map((row) => row.status).sort();
+      // Three approved: the refresh v2, the compare v2, and the export brief
+      // the M5 blocked story is written from.
       expect(statuses).toEqual([
+        "APPROVED",
         "APPROVED",
         "APPROVED",
         "AWAITING_REVIEW",
@@ -124,8 +127,11 @@ describe("the P4 demo seed", () => {
         where: { websiteId: tenant.website.id },
         orderBy: { createdAt: "asc" },
       });
+      // Four: the three M3/M4 stories, and the export piece the M5 blocked
+      // story is built from.
       expect(items.map((row) => row.type).sort()).toEqual([
         "CONTENT_REFRESH",
+        "NEW_CONTENT",
         "NEW_CONTENT",
         "NEW_CONTENT",
       ]);
@@ -133,7 +139,8 @@ describe("the P4 demo seed", () => {
       const refresh = items.find((row) => row.id === first.refreshItemId)!;
       const created = items.find((row) => row.id === first.newContentItemId)!;
       const compare = items.find((row) => row.id === first.compareItemId)!;
-      expect(refresh.status).toBe("QA");
+      // M5: the refresh story ends approved for CMS, on the revision QA judged.
+      expect(refresh.status).toBe("APPROVED_FOR_CMS");
       expect(created.status).toBe("BRIEFING");
       expect(compare.status).toBe("DRAFTING");
 
@@ -166,7 +173,7 @@ describe("the P4 demo seed", () => {
       expect(draft.approvedRevisionHash).toBe(draft.revisions[1]!.contentHash);
       expect(draft.approvedByUserId).toBe(tenant.user.id);
       expect(draft.approvedReviewId).not.toBeNull();
-      expect(refresh.status).toBe("QA");
+      expect(refresh.status).toBe("APPROVED_FOR_CMS");
       const refreshReviews = await prisma.contentDraftReview.findMany({
         where: { contentDraftId: draft.id },
       });
@@ -236,20 +243,121 @@ describe("the P4 demo seed", () => {
       const reviewRowsFirst = await prisma.contentDraftReview.count({
         where: { websiteId: tenant.website.id },
       });
-      expect(reviewRowsFirst).toBe(2);
+      // Three: the refresh, the compare, and the export story of M5.
+      expect(reviewRowsFirst).toBe(3);
+
+      // ---- The three M5 stories (M5.5 §3) --------------------------------
+      // A: passed QA, and a person approved exactly that revision for the CMS.
+      expect(first.qa.approved).not.toBeNull();
+      const approvedRun = await prisma.contentQaRun.findUniqueOrThrow({
+        where: { id: first.qa.approved!.runId },
+        include: { results: true },
+      });
+      expect(approvedRun).toMatchObject({
+        status: "COMPLETED",
+        outcome: "PASS_WITH_WARNINGS",
+        blockingCount: 0,
+        contentWorkItemId: first.refreshItemId,
+      });
+      expect(approvedRun.warningCount).toBeGreaterThan(0);
+      expect(approvedRun.results).toHaveLength(10);
+      // Deterministic and AI-judged findings are both visible on it.
+      const approvedFindings = approvedRun.results.flatMap(
+        (row) => (row.issuesJson as { findings: { source: string; severity: string }[] }).findings,
+      );
+      expect(approvedFindings.some((finding) => finding.source === "AI_JUDGED")).toBe(true);
+      expect(approvedFindings.some((finding) => finding.source === "DETERMINISTIC")).toBe(true);
+      expect(approvedFindings.some((finding) => finding.severity === "BLOCKING")).toBe(false);
+      const approval = await prisma.contentCmsApproval.findUniqueOrThrow({
+        where: { id: first.qa.approved!.approvalId },
+      });
+      expect(approval).toMatchObject({
+        status: "APPROVED",
+        qaRunId: approvedRun.id,
+        contentRevisionId: approvedRun.contentRevisionId,
+        revisionHash: approvedRun.revisionHash,
+        notCheckedAcknowledged: true,
+      });
+      expect(
+        (await prisma.contentWorkItem.findUniqueOrThrow({ where: { id: first.refreshItemId } }))
+          .status,
+      ).toBe("APPROVED_FOR_CMS");
+
+      // B: the fact behind a claim was revoked, so QA blocks it. No model
+      // judgment is involved in the blocker.
+      expect(first.qa.blocked).not.toBeNull();
+      const blockedRun = await prisma.contentQaRun.findUniqueOrThrow({
+        where: { id: first.qa.blocked!.runId },
+        include: { results: true },
+      });
+      expect(blockedRun).toMatchObject({ status: "COMPLETED", outcome: "FAIL" });
+      expect(blockedRun.blockingCount).toBeGreaterThanOrEqual(1);
+      const facts = blockedRun.results.find((row) => row.qaType === "BRAND_FACT_VALIDATION")!;
+      expect(facts.status).toBe("FAIL");
+      expect(facts.source).toBe("DETERMINISTIC");
+      const blockers = facts.blockingIssuesJson as { code: string; source: string }[];
+      expect(blockers[0]).toMatchObject({ code: "STALE_CLAIM", source: "DETERMINISTIC" });
+      expect(
+        (
+          await prisma.contentWorkItem.findUniqueOrThrow({
+            where: { id: first.qa.blocked!.workItemId },
+          })
+        ).status,
+      ).toBe("QA");
+      expect(
+        await prisma.contentCmsApproval.count({
+          where: { contentWorkItemId: first.qa.blocked!.workItemId },
+        }),
+      ).toBe(0);
+
+      // C: a check that could not run at all, waiting on a person to accept it.
+      if (first.qa.notChecked) {
+        const notCheckedRun = await prisma.contentQaRun.findUniqueOrThrow({
+          where: { id: first.qa.notChecked.runId },
+          include: { results: true },
+        });
+        expect(notCheckedRun.outcome).toBe("PASS_WITH_WARNINGS");
+        expect(notCheckedRun.blockingCount).toBe(0);
+        expect(first.qa.notChecked.types.length).toBeGreaterThan(0);
+        expect(first.qa.notChecked.types).toContain("ANSWER_READINESS");
+        const skipped = notCheckedRun.results.filter((row) => row.status === "NOT_CHECKED");
+        expect(skipped.length).toBe(first.qa.notChecked.types.length);
+        expect(skipped.every((row) => row.notCheckedReason !== null)).toBe(true);
+        expect(
+          (
+            await prisma.contentWorkItem.findUniqueOrThrow({
+              where: { id: first.qa.notChecked.workItemId },
+            })
+          ).status,
+        ).toBe("AWAITING_EDITOR_REVIEW");
+      }
 
       // Run again: the stories are rebuilt, not duplicated.
       const second = await seedP4Demo(tenant);
       expect(second.briefs.map((row) => row.status).sort()).toEqual(statuses);
       expect(await prisma.contentWorkItem.count({ where: { websiteId: tenant.website.id } })).toBe(
-        3,
+        4,
       );
-      expect(await prisma.contentDraft.count({ where: { websiteId: tenant.website.id } })).toBe(3);
+      expect(await prisma.contentDraft.count({ where: { websiteId: tenant.website.id } })).toBe(4);
       expect(
         await prisma.contentDraftReview.count({ where: { websiteId: tenant.website.id } }),
-      ).toBe(2);
-      expect(await prisma.contentBrief.count({ where: { websiteId: tenant.website.id } })).toBe(5);
+      ).toBe(3);
+      expect(await prisma.contentBrief.count({ where: { websiteId: tenant.website.id } })).toBe(6);
       expect(second.reviewDraftId).not.toBe(first.reviewDraftId);
+
+      // The M5 stories are rebuilt too: the same shape, not doubled, and the
+      // fact story B needs is approved again before it is revoked again.
+      expect(await prisma.contentQaRun.count({ where: { websiteId: tenant.website.id } })).toBe(2);
+      expect(await prisma.contentQaResult.count({ where: { websiteId: tenant.website.id } })).toBe(
+        20,
+      );
+      expect(
+        await prisma.contentCmsApproval.count({
+          where: { websiteId: tenant.website.id, status: "APPROVED" },
+        }),
+      ).toBe(1);
+      expect(second.qa.approved?.runId).not.toBe(first.qa.approved?.runId);
+      expect(second.qa.blocked).not.toBeNull();
     },
     SEED_TIMEOUT,
   );
