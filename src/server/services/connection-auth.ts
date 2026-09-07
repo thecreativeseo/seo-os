@@ -329,8 +329,14 @@ export async function discoverProperties(
   try {
     accessToken = await getAccessToken(connection.id);
   } catch (error) {
-    // getAccessToken has already recorded REAUTH_REQUIRED on the connection.
-    if (error instanceof ConnectionAuthError && error.code === "reauth_required") {
+    // Both of these are answers, not crashes. A refused refresh has already
+    // recorded REAUTH_REQUIRED on the connection; a connection whose credential
+    // row is gone - disconnected in another tab, or removed by hand - equally
+    // needs authorizing again, and reconnecting is the remedy for both.
+    if (
+      error instanceof ConnectionAuthError &&
+      (error.code === "reauth_required" || error.code === "no_credential")
+    ) {
       return { ok: false, code: "REAUTH_REQUIRED", diagnostic: null };
     }
     throw error;

@@ -81,7 +81,14 @@ export default async function ConnectionsPage({
   /** Set only for the provider being set up, from what Google actually said. */
   let discoveryState: ConnectionState | null = null;
 
-  if (selectingProvider && canManage) {
+  // Only ask about a provider that has actually been authorized. `?select=` is
+  // a query parameter, so it can name anything; discovery would throw for a
+  // provider with no connection at all and take the whole page down with it.
+  const selectingStatus = selectingProvider
+    ? (cards.find((card) => card.provider === selectingProvider)?.status ?? "NOT_CONNECTED")
+    : null;
+
+  if (selectingProvider && canManage && selectingStatus !== "NOT_CONNECTED") {
     const discovery = await discoverProperties(context, selectingProvider);
     if (discovery.ok) {
       properties = discovery.properties;

@@ -314,6 +314,30 @@ describe("Analytics discovery", () => {
   });
 });
 
+describe("a connection whose credential is gone", () => {
+  it("asks for reconnection rather than throwing the page away", async () => {
+    const { context, connectionId } = await tenantWith("GOOGLE_SEARCH_CONSOLE");
+    // What disconnecting in another tab leaves behind, and what a dev server
+    // reported as an unhandled ConnectionAuthError and a 500 before this.
+    await prisma.credential.delete({ where: { connectionId } });
+    installGoogle([]);
+
+    const result = await discoverProperties(context, "GOOGLE_SEARCH_CONSOLE");
+    expect(result).toEqual({ ok: false, code: "REAUTH_REQUIRED", diagnostic: null });
+  });
+
+  it("refuses selection for the same reason, without reaching Google", async () => {
+    const { context, connectionId } = await tenantWith("GOOGLE_SEARCH_CONSOLE");
+    await prisma.credential.delete({ where: { connectionId } });
+    installGoogle([]);
+
+    await expect(
+      selectProperty(context, "GOOGLE_SEARCH_CONSOLE", "sc-domain:example.com"),
+    ).rejects.toMatchObject({ code: "REAUTH_REQUIRED" });
+    expect(requestedUrls.filter((url) => url.startsWith(SITES_URL))).toHaveLength(0);
+  });
+});
+
 describe("choosing a property", () => {
   const listing = {
     status: 200,
