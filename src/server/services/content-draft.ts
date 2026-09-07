@@ -56,6 +56,7 @@ import type {
   ContentDraftStatus,
   ContentRevision,
   ContentWorkItem,
+  ContentWorkItemStatus,
   EvidenceCategory,
 } from "@/generated/prisma/client";
 
@@ -308,7 +309,15 @@ export async function startDraftFromBrief(
 ): Promise<StartFromBriefResult> {
   requireHumanWriter(context);
   const item = await scopedItem(context, workItemId);
-  if (item.status !== "DRAFTING" && item.status !== "QA") {
+  // Wherever the QA gate can leave it: starting again from a newer brief
+  // supersedes the draft, and invalidates whatever approved it.
+  const RESTARTABLE_FROM: ContentWorkItemStatus[] = [
+    "DRAFTING",
+    "QA",
+    "AWAITING_EDITOR_REVIEW",
+    "APPROVED_FOR_CMS",
+  ];
+  if (!RESTARTABLE_FROM.includes(item.status)) {
     throw new ContentDraftError(
       item.status === "QUEUED" || item.status === "BRIEFING"
         ? "Drafting starts once a brief has been approved."
@@ -394,9 +403,7 @@ export async function startDraftFromBrief(
       });
     }
 
-    if (item.status === "QA") {
-      await transitionWorkItem(tx, context, item.id, "DRAFTING", "approved draft superseded");
-    }
+    await returnItemToDrafting(tx, context, item, "draft_superseded", "approved draft superseded");
 
     await recordAudit(tx, context, {
       entityType: "ContentDraft",
@@ -1311,6 +1318,50 @@ export async function saveRevision(
 // ---------------------------------------------------------------------------
 
 /** Open requests of a draft stop applying: the content changed or the draft was superseded. */
+/**
+ * Sends a work item back to drafting from wherever the QA gate left it, and
+ * invalidates the CMS approval that authorized the revision being left behind
+ * (M5 plan §18). The approval is never rewritten: it is marked invalid with a
+ * reason, and stays readable as the decision it was.
+ */
+async function returnItemToDrafting(
+  tx: Prisma.TransactionClient,
+  context: TenantContext,
+  item: ContentWorkItem,
+  reason: string,
+  note: string,
+): Promise<ContentWorkItem> {
+  const approval = await tx.contentCmsApproval.findFirst({
+    where: { contentWorkItemId: item.id, status: "APPROVED", ...websiteScope(context) },
+  });
+  if (approval) {
+    await tx.contentCmsApproval.update({
+      where: { id: approval.id },
+      data: { status: "INVALIDATED", invalidatedAt: new Date(), invalidatedReason: reason },
+    });
+    await recordAudit(tx, context, {
+      entityType: "ContentCmsApproval",
+      entityId: approval.id,
+      action: "RETIRE",
+      before: {
+        status: "APPROVED",
+        revisionId: approval.contentRevisionId,
+        qaRunId: approval.qaRunId,
+      },
+      after: { status: "INVALIDATED", reason, noLongerCurrent: true },
+    });
+  }
+
+  let current = item;
+  if (current.status === "APPROVED_FOR_CMS") {
+    current = await transitionWorkItem(tx, context, item.id, "QA", note);
+  }
+  if (current.status !== "DRAFTING") {
+    current = await transitionWorkItem(tx, context, item.id, "DRAFTING", note);
+  }
+  return current;
+}
+
 async function invalidateOpenRequests(
   tx: Prisma.TransactionClient,
   context: TenantContext,
@@ -1818,7 +1869,15 @@ export async function reopenDraft(
     });
   }
   const item = await scopedItem(context, draft.contentWorkItemId);
-  if (item.status !== "QA" && item.status !== "DRAFTING") {
+  // Anywhere the QA gate can leave it: ready for QA, awaiting final approval,
+  // approved for CMS, or already back in drafting.
+  const REOPENABLE_FROM: ContentWorkItemStatus[] = [
+    "QA",
+    "AWAITING_EDITOR_REVIEW",
+    "APPROVED_FOR_CMS",
+    "DRAFTING",
+  ];
+  if (!REOPENABLE_FROM.includes(item.status)) {
     throw new ContentDraftError(
       `The work item is ${statusWords(item.status)}; the draft cannot be reopened here.`,
       "invalid_state",
@@ -1840,10 +1899,13 @@ export async function reopenDraft(
         approvedReviewId: null,
       },
     });
-    const workItem =
-      item.status === "QA"
-        ? await transitionWorkItem(tx, context, item.id, "DRAFTING", "draft reopened for revision")
-        : item;
+    const workItem = await returnItemToDrafting(
+      tx,
+      context,
+      item,
+      trimmed,
+      "draft reopened for revision",
+    );
 
     if (draft.approvedReviewId) {
       await recordAudit(tx, context, {

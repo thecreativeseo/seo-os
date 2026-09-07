@@ -188,7 +188,12 @@ export class QaFixtures {
   }
 
   /** A work item Ready for QA: brief approved, a hand-written revision approved by a lead. */
-  async readyForQa(tenant: QaFixture, lead: TenantContext, bodyMarkdown = QA_BODY) {
+  async readyForQa(
+    tenant: QaFixture,
+    lead: TenantContext,
+    bodyMarkdown = QA_BODY,
+    options: { approveDraft?: boolean } = {},
+  ) {
     installStubProvider({ respond: briefAnswer });
     const recommendation = await prisma.recommendation.create({
       data: {
@@ -222,6 +227,10 @@ export class QaFixtures {
       changeSummary: "First hand-written revision.",
     });
     await requestDraftReview(tenant, draft.id);
+    if (options.approveDraft === false) {
+      // The caller approves it, once it has arranged whatever it needs first.
+      return { item, draft, revision: saved.revision, brief: generated.brief };
+    }
     const approved = await approveDraft(lead, draft.id, { note: "Ready for QA." });
     return { item: approved.workItem, draft, revision: saved.revision, brief: generated.brief };
   }

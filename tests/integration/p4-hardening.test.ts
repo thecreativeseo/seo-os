@@ -35,6 +35,8 @@ import {
 } from "@/server/services/content-draft";
 import { getPackage } from "@/server/services/evidence-assembler";
 import { getRun, listRuns } from "@/server/services/ai-run";
+import { approveForCms, cmsApprovalFor, runQa } from "@/server/services/content-qa";
+import { qaAnswer } from "../helpers/qa-stub";
 import type { Role } from "@/generated/prisma/client";
 
 /**
@@ -321,8 +323,11 @@ const briefEdit = (source: {
 
 function stub() {
   return installStubProvider({
-    respond: (request) =>
-      request.schemaName === "content_draft" ? draftAnswer(request) : briefAnswer(request),
+    respond: (request) => {
+      if (request.schemaName === "content_draft") return draftAnswer(request);
+      if (request.schemaName === "content_qa") return qaAnswer(request);
+      return briefAnswer(request);
+    },
   });
 }
 
@@ -441,11 +446,38 @@ describe("the whole P4 chain, through the real services", () => {
       approvedByUserId: lead.user.id,
     });
 
-    // Reopen if needed - and the approval stays as history.
+    // QA, and then the human gate: only a person takes it to the CMS.
+    const qa = await runQa(member, item.id);
+    expect(qa.ok).toBe(true);
+    if (!qa.ok) return;
+    expect(qa.run.contentRevisionId).toBe(third.revision.id);
+    expect(qa.run.revisionHash).toBe(third.revision.contentHash);
+    expect(qa.run.outcome).not.toBe("FAIL");
+    expect(qa.workItem.status).toBe("AWAITING_EDITOR_REVIEW");
+    await expect(approveForCms(member, item.id, {})).rejects.toMatchObject({ code: "forbidden" });
+    const cms = await approveForCms(lead, item.id, {
+      note: "QA read, nothing blocking.",
+      acknowledgeNotChecked: true,
+    });
+    expect(cms.approval).toMatchObject({
+      contentRevisionId: third.revision.id,
+      revisionHash: third.revision.contentHash,
+      qaRunId: qa.run.id,
+      status: "APPROVED",
+      approvedByUserId: lead.user.id,
+    });
+    expect(cms.workItem.status).toBe("APPROVED_FOR_CMS");
+    expect(await cmsApprovalFor(tenant, item.id)).toMatchObject({ executable: true });
+
+    // Reopen if needed - and both approvals stay as history.
     const reopened = await reopenDraft(member, draft.id, "Pricing changed.");
     expect(reopened.draft.status).toBe("DRAFTING");
     expect(reopened.workItem.status).toBe("DRAFTING");
     expect(await approvedRevisionFor(tenant, item.id)).toBeNull();
+    expect(await cmsApprovalFor(tenant, item.id)).toBeNull();
+    expect(
+      await prisma.contentCmsApproval.findUniqueOrThrow({ where: { id: cms.approval.id } }),
+    ).toMatchObject({ status: "INVALIDATED", invalidatedReason: "Pricing changed." });
     const fourth = await saveRevision(
       member,
       draft.id,

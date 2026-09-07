@@ -42,11 +42,16 @@ import {
   type FingerprintInputs,
 } from "@/lib/content/qa";
 import { revisionHash } from "@/lib/execution/hash";
-import { QA_RUN_TRANSITIONS, canTransition } from "@/lib/execution/statuses";
+import {
+  CMS_APPROVAL_TRANSITIONS,
+  QA_RUN_TRANSITIONS,
+  canTransition,
+} from "@/lib/execution/statuses";
 import { parseEvidenceId } from "@/lib/evidence/id";
 import { Prisma } from "@/generated/prisma/client";
 import type {
   ContentBrief,
+  ContentCmsApproval,
   ContentQaResult,
   ContentQaRun,
   ContentQaStatus,
@@ -73,7 +78,18 @@ export class ContentQaError extends Error {
   constructor(
     message: string,
     readonly code:
-      "not_found" | "forbidden" | "invalid_state" | "no_approved_revision" | "in_progress",
+      | "not_found"
+      | "forbidden"
+      | "invalid_state"
+      | "invalid_input"
+      | "no_approved_revision"
+      | "in_progress"
+      /** M5.3: the gate. */
+      | "qa_required"
+      | "qa_failed"
+      | "qa_stale"
+      | "brief_superseded"
+      | "not_checked_unacknowledged",
   ) {
     super(message);
     this.name = "ContentQaError";
@@ -927,6 +943,335 @@ export async function qaRunsForRevision(
   });
   const ids = new Set(rows.map((row) => row.id));
   return all.filter((row) => ids.has(row.id));
+}
+
+// ---------------------------------------------------------------------------
+// The approval gate (M5 plan §17-§19; docs/P4_SPEC.md §25)
+// ---------------------------------------------------------------------------
+
+export type ApproveForCmsInput = {
+  note?: string;
+  /** The draft is pinned to a brief version that is no longer the approved one. */
+  acknowledgeBriefMismatch?: boolean;
+  /** Some QA types had nothing to check with, and the person accepts that (D11). */
+  acknowledgeNotChecked?: boolean;
+};
+
+export type ApproveForCmsResult = {
+  approval: ContentCmsApproval;
+  workItem: ContentWorkItem;
+  run: ContentQaRun;
+};
+
+/** What a person accepted by approving. Codes and ids only: no content. */
+export type AcknowledgedJson = {
+  version: 1;
+  notChecked: { qaType: string; reason: string | null }[];
+  needsHumanConfirmation: { qaType: string; code: string; ruleId?: string }[];
+  warningCount: number;
+  infoCount: number;
+  briefSuperseded: boolean;
+};
+
+/** Why an approval that still says APPROVED may no longer authorize execution (D8). */
+export type CmsApprovalStaleReason =
+  "REVISION_CHANGED" | "QA_INPUTS_CHANGED" | "QA_SUPERSEDED" | "BRIEF_SUPERSEDED";
+
+export type CmsApprovalView = {
+  approval: ContentCmsApproval & { approvedBy: { email: string } };
+  /** The run it rests on, if that run is still there. */
+  run: ContentQaRun | null;
+  /**
+   * Whether it may authorize execution now. An approval is a historical fact
+   * and never changes; this is computed, and M6 must refuse execution when it
+   * is false (D8).
+   */
+  executable: boolean;
+  staleReasons: CmsApprovalStaleReason[];
+};
+
+function requireHumanReviewer(context: TenantContext, what: string): void {
+  if (context.user.authUserId === SYSTEM_AUTH_USER_ID) {
+    throw new ContentQaError(`${what} is done by a person, not by a job.`, "forbidden");
+  }
+  if (!hasRole(context.membership.role, REQUIRED.REVIEW)) {
+    throw new ContentQaError(`${what} needs an SEO lead, admin or owner.`, "forbidden");
+  }
+}
+
+/**
+ * Approves exactly one revision for execution, on the strength of one
+ * completed QA run.
+ *
+ * Everything the M4.5 approval checks about the revision, this checks again -
+ * the draft is approved, the pointer is intact, the hashes agree - and then
+ * the QA run itself: it judged this revision, it did not fail, it is the
+ * latest for the revision, and the facts, rules and context it judged against
+ * are still the ones in force. A person may accept warnings, unchecked types
+ * and a superseded brief; nobody may accept a blocking finding (D10).
+ *
+ * The approval is a record of a decision, not a state of the work: it pins
+ * the revision, the hash and the run, and it is never edited. When the
+ * content moves, it is invalidated with a reason and a fresh one is needed.
+ */
+export async function approveForCms(
+  context: TenantContext,
+  workItemId: string,
+  input: ApproveForCmsInput = {},
+): Promise<ApproveForCmsResult> {
+  requireHumanReviewer(context, "Approving content for CMS");
+  const item = await scopedItem(context, workItemId);
+  if (item.status === "APPROVED_FOR_CMS") {
+    throw new ContentQaError("This work is already approved for CMS.", "invalid_state");
+  }
+  if (item.status !== "AWAITING_EDITOR_REVIEW") {
+    throw new ContentQaError(
+      item.status === "QA"
+        ? "QA has not passed for this work yet. Run QA, and resolve anything blocking."
+        : `This work is ${item.status.toLowerCase().replace(/_/g, " ")}; it cannot be approved for CMS here.`,
+      "invalid_state",
+    );
+  }
+
+  const note = (input.note ?? "").trim();
+  if (note.length > 2000) {
+    throw new ContentQaError("Keep the note under 2,000 characters.", "invalid_input");
+  }
+
+  // The revision, exactly as M4.5 vouches for it.
+  const ref = await approvedRevisionFor(context, item.id);
+  if (!ref) {
+    throw new ContentQaError(
+      "This work has no approved revision to authorize. Approve a draft first.",
+      "no_approved_revision",
+    );
+  }
+
+  // The QA run: the latest one, on this revision, completed, not failed.
+  const latest = await prisma.contentQaRun.findFirst({
+    where: { contentWorkItemId: item.id, status: "COMPLETED", ...websiteScope(context) },
+    orderBy: { createdAt: "desc" },
+    include: { results: true },
+  });
+  if (!latest) {
+    throw new ContentQaError("QA has not been run for this work yet.", "qa_required");
+  }
+  if (latest.contentRevisionId !== ref.revisionId || latest.revisionHash !== ref.revisionHash) {
+    throw new ContentQaError(
+      "The latest QA run judged a different revision. Run QA again on the approved revision.",
+      "qa_stale",
+    );
+  }
+  if (latest.outcome === "FAIL" || latest.blockingCount > 0) {
+    throw new ContentQaError(
+      `QA failed with ${latest.blockingCount} blocking finding${latest.blockingCount === 1 ? "" : "s"}. Return the draft for revision; blocking findings cannot be accepted.`,
+      "qa_failed",
+    );
+  }
+  const fingerprint = await currentInputsFingerprint(context);
+  if (latest.inputsFingerprint !== fingerprint) {
+    throw new ContentQaError(
+      "The facts, rules or business context changed after this QA run. Run QA again before approving.",
+      "qa_stale",
+    );
+  }
+
+  // The brief the draft is pinned to, against the one approved now.
+  const newer = await prisma.contentBrief.findFirst({
+    where: { contentWorkItemId: item.id, status: "APPROVED", ...websiteScope(context) },
+    select: { id: true, version: true },
+  });
+  const briefSuperseded = Boolean(newer && newer.id !== ref.briefId);
+  if (briefSuperseded && !input.acknowledgeBriefMismatch) {
+    throw new ContentQaError(
+      `This revision was written for Brief v${ref.briefVersion}. Brief v${newer!.version} is now approved. To approve against v${ref.briefVersion} anyway, acknowledge the newer version explicitly.`,
+      "brief_superseded",
+    );
+  }
+
+  // What the person is accepting: types nothing could be checked for, and
+  // judgments a person has to stand behind (D6, D11).
+  const notChecked = latest.results
+    .filter((result) => result.status === "NOT_CHECKED")
+    .map((result) => ({ qaType: String(result.qaType), reason: result.notCheckedReason }));
+  if (notChecked.length > 0 && !input.acknowledgeNotChecked) {
+    throw new ContentQaError(
+      `${notChecked.length} QA ${notChecked.length === 1 ? "check" : "checks"} had nothing to check with. To approve anyway, acknowledge them explicitly.`,
+      "not_checked_unacknowledged",
+    );
+  }
+  const needsHumanConfirmation = latest.results.flatMap((result) => {
+    const issues = (result.issuesJson ?? {}) as { findings?: QaFinding[] };
+    return (issues.findings ?? [])
+      .filter((finding) => finding.needsHumanConfirmation)
+      .map((finding) => ({
+        qaType: String(result.qaType),
+        code: String(finding.code),
+        ...(finding.refs?.ruleId ? { ruleId: finding.refs.ruleId } : {}),
+      }));
+  });
+
+  const acknowledged: AcknowledgedJson = {
+    version: 1,
+    notChecked,
+    needsHumanConfirmation,
+    warningCount: latest.warningCount,
+    infoCount: latest.infoCount,
+    briefSuperseded,
+  };
+
+  const draft = await prisma.contentDraft.findFirstOrThrow({
+    where: { id: ref.draftId, ...websiteScope(context) },
+    select: { approvedByUserId: true },
+  });
+  const revision = await prisma.contentRevision.findFirstOrThrow({
+    where: { id: ref.revisionId, ...websiteScope(context) },
+    select: { createdByUserId: true },
+  });
+  const selfDecided =
+    revision.createdByUserId === context.user.id || draft.approvedByUserId === context.user.id;
+
+  if (!canTransition(CMS_APPROVAL_TRANSITIONS, "APPROVED", "INVALIDATED")) {
+    throw new ContentQaError("The approval table does not allow an approval.", "invalid_state");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    // The binding, once more, inside the transaction that records the decision.
+    const stillApproved = await tx.contentDraft.findFirst({
+      where: {
+        id: ref.draftId,
+        status: "APPROVED",
+        approvedRevisionId: ref.revisionId,
+        approvedRevisionHash: ref.revisionHash,
+        ...websiteScope(context),
+      },
+      select: { id: true },
+    });
+    if (!stillApproved) {
+      throw new ContentQaError(
+        "The approved revision changed while this was being approved. Nothing was recorded.",
+        "no_approved_revision",
+      );
+    }
+
+    const approval = await tx.contentCmsApproval.create({
+      data: {
+        websiteId: context.website.id,
+        contentWorkItemId: item.id,
+        contentDraftId: ref.draftId,
+        contentRevisionId: ref.revisionId,
+        revisionNumber: ref.revisionNumber,
+        revisionHash: ref.revisionHash,
+        qaRunId: latest.id,
+        briefId: ref.briefId,
+        briefVersion: ref.briefVersion,
+        briefSupersededAcknowledged: briefSuperseded,
+        notCheckedAcknowledged: notChecked.length > 0,
+        acknowledgedJson: acknowledged as unknown as Prisma.InputJsonValue,
+        approvedByUserId: context.user.id,
+        note: note || null,
+        selfDecided,
+      },
+    });
+    const workItem = await transitionWorkItem(
+      tx,
+      context,
+      item.id,
+      "APPROVED_FOR_CMS",
+      "approved for CMS",
+    );
+
+    await recordAudit(tx, context, {
+      entityType: "ContentCmsApproval",
+      entityId: approval.id,
+      action: "APPROVE",
+      after: {
+        workItemId: item.id,
+        draftId: ref.draftId,
+        revisionId: ref.revisionId,
+        revisionNumber: ref.revisionNumber,
+        revisionHash: ref.revisionHash,
+        qaRunId: latest.id,
+        qaOutcome: latest.outcome,
+        briefVersion: ref.briefVersion,
+        briefSupersededAcknowledged: briefSuperseded,
+        notCheckedAcknowledged: notChecked.length > 0,
+        notCheckedTypes: notChecked.map((row) => row.qaType),
+        needsHumanConfirmation: needsHumanConfirmation.length,
+        inputsFingerprint: latest.inputsFingerprint,
+        selfDecided,
+      },
+    });
+    await recordAudit(tx, context, {
+      entityType: "ContentWorkItem",
+      entityId: item.id,
+      action: "APPROVE",
+      before: { status: item.status },
+      after: { status: workItem.status, approvalId: approval.id, qaRunId: latest.id },
+    });
+
+    const { results: _results, ...run } = latest;
+    return { approval, workItem, run };
+  });
+}
+
+/** The active approval of a work item, and whether it still authorizes execution. */
+export async function cmsApprovalFor(
+  context: TenantContext,
+  workItemId: string,
+): Promise<CmsApprovalView | null> {
+  const approval = await prisma.contentCmsApproval.findFirst({
+    where: { contentWorkItemId: workItemId, status: "APPROVED", ...websiteScope(context) },
+    include: { approvedBy: { select: { email: true } } },
+  });
+  if (!approval) return null;
+
+  const [ref, run, fingerprint, later, newerBrief] = await Promise.all([
+    approvedRevisionFor(context, workItemId),
+    prisma.contentQaRun.findFirst({ where: { id: approval.qaRunId, ...websiteScope(context) } }),
+    currentInputsFingerprint(context),
+    prisma.contentQaRun.findFirst({
+      where: {
+        contentRevisionId: approval.contentRevisionId,
+        status: "COMPLETED",
+        createdAt: { gt: approval.approvedAt },
+        ...websiteScope(context),
+      },
+      select: { id: true },
+    }),
+    prisma.contentBrief.findFirst({
+      where: { contentWorkItemId: workItemId, status: "APPROVED", ...websiteScope(context) },
+      select: { id: true },
+    }),
+  ]);
+
+  const staleReasons: CmsApprovalStaleReason[] = [];
+  if (
+    !ref ||
+    ref.revisionId !== approval.contentRevisionId ||
+    ref.revisionHash !== approval.revisionHash
+  ) {
+    staleReasons.push("REVISION_CHANGED");
+  }
+  if (!run || run.inputsFingerprint !== fingerprint) staleReasons.push("QA_INPUTS_CHANGED");
+  if (later) staleReasons.push("QA_SUPERSEDED");
+  if (newerBrief && newerBrief.id !== approval.briefId && !approval.briefSupersededAcknowledged) {
+    staleReasons.push("BRIEF_SUPERSEDED");
+  }
+
+  return { approval, run, executable: staleReasons.length === 0, staleReasons };
+}
+
+/** Every approval a work item has had, newest first: history stays reachable. */
+export async function listCmsApprovals(
+  context: TenantContext,
+  workItemId: string,
+): Promise<(ContentCmsApproval & { approvedBy: { email: string } })[]> {
+  return prisma.contentCmsApproval.findMany({
+    where: { contentWorkItemId: workItemId, ...websiteScope(context) },
+    orderBy: { approvedAt: "desc" },
+    include: { approvedBy: { select: { email: true } } },
+  });
 }
 
 export type { ApprovedRevisionRef, ContentQaStatus };
