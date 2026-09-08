@@ -153,22 +153,52 @@ export type SearchAnalyticsResult = {
   truncated: boolean;
 };
 
-/** Every row for the period, following pagination up to MAX_PAGES. */
+/** What a caller does with one page. It is handed the page and nothing else. */
+export type SearchAnalyticsPageHandler = (rows: SearchConsoleRow[]) => Promise<void>;
+
+export type SearchAnalyticsStreamResult = {
+  /** True when the row ceiling was reached and the property has more to give. */
+  truncated: boolean;
+};
+
+/**
+ * Every row for the period, one page at a time.
+ *
+ * The page is handed over and then dropped. Nothing here accumulates the
+ * result, because a large property returns hundreds of thousands of rows and a
+ * worker that holds all of them — plus the copies made while normalising them —
+ * runs out of memory rather than finishing. What the caller keeps is the
+ * caller's business; this function's own footprint is one page.
+ */
+export async function streamSearchAnalytics(
+  params: SearchAnalyticsParams,
+  onPage: SearchAnalyticsPageHandler,
+): Promise<SearchAnalyticsStreamResult> {
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const batch = await fetchSearchAnalyticsPage({ ...params, startRow: page * ROW_LIMIT });
+
+    if (batch.length > 0) await onPage(batch);
+
+    // A short page is the last page: Search Console has no cursor, and asking for
+    // one more row past the end returns an empty list, not an error.
+    if (batch.length < ROW_LIMIT) return { truncated: false };
+  }
+
+  return { truncated: true };
+}
+
+/**
+ * The whole result in one array.
+ *
+ * Kept for callers that genuinely want everything at once — tests, mostly. The
+ * sync path deliberately does not use it: see streamSearchAnalytics.
+ */
 export async function fetchSearchAnalytics(
   params: SearchAnalyticsParams,
 ): Promise<SearchAnalyticsResult> {
   const rows: SearchConsoleRow[] = [];
-
-  for (let page = 0; page < MAX_PAGES; page += 1) {
-    const batch = await fetchSearchAnalyticsPage({ ...params, startRow: page * ROW_LIMIT });
-    rows.push(...batch);
-
-    // A short page is the last page: Search Console has no cursor, and asking for
-    // one more row past the end returns an empty list, not an error.
-    if (batch.length < ROW_LIMIT) {
-      return { rows, truncated: false };
-    }
-  }
-
-  return { rows, truncated: true };
+  const { truncated } = await streamSearchAnalytics(params, async (batch) => {
+    for (const row of batch) rows.push(row);
+  });
+  return { rows, truncated };
 }

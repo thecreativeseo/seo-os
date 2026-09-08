@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, type Hash } from "node:crypto";
 
 import { Prisma } from "@/generated/prisma/client";
 import type { Connection, SyncRun, SyncStatus, SyncType } from "@/generated/prisma/client";
@@ -12,13 +12,14 @@ import { normalizeUrl } from "@/lib/url/normalize-url";
 import { normalizeQuery } from "@/lib/query/normalize-query";
 import { EXPECTED_LAG_DAYS } from "@/lib/metrics/compare";
 import {
-  fetchSearchAnalytics,
   SearchConsoleError,
+  streamSearchAnalytics,
   type SearchAnalyticsResult,
+  type SearchConsoleRow,
 } from "@/server/connectors/google/search-console";
 import {
   AnalyticsError,
-  fetchLandingPageMetrics,
+  streamLandingPageMetrics,
   type Ga4MetricName,
   type Ga4Result,
 } from "@/server/connectors/google/analytics";
@@ -385,6 +386,66 @@ async function failRun(run: SyncRun, error: unknown): Promise<SyncRun> {
   // latestDataDate still describe the last run that genuinely worked.
 }
 
+/**
+ * How many provider rows are normalised, resolved and written at a time.
+ *
+ * Every structure in an ingest step is bounded by this rather than by the size
+ * of the property. It also keeps identity lookups well inside Postgres's limit
+ * on bind parameters: a site with seventy-five thousand distinct queries would
+ * otherwise be asked for in a single IN list, which is both enormous and, past
+ * 65535 values, impossible.
+ */
+const INGEST_CHUNK = 5_000;
+
+/**
+ * What a sync knows so far.
+ *
+ * Counters and a running hash — never the rows. This is the whole of what
+ * survives from one page to the next, which is what makes a sync's memory a
+ * function of the chunk size instead of the property's size.
+ */
+type Tally = {
+  received: number;
+  written: number;
+  skipped: number;
+  /** Rows that were placed. Distinguishes a complete read from a partial one. */
+  seen: number;
+  latestDate: string | null;
+  checksum: Hash;
+};
+
+function newTally(): Tally {
+  return {
+    received: 0,
+    written: 0,
+    skipped: 0,
+    seen: 0,
+    latestDate: null,
+    checksum: createHash("sha256"),
+  };
+}
+
+function noteDate(tally: Tally, date: string): void {
+  if (tally.latestDate === null || date > tally.latestDate) tally.latestDate = date;
+}
+
+/** Splits a provider page into pieces small enough to hold. */
+function chunks<T>(rows: T[], size: number = INGEST_CHUNK): T[][] {
+  if (size <= 0) size = INGEST_CHUNK;
+  if (rows.length <= size) return [rows];
+  const out: T[][] = [];
+  for (let index = 0; index < rows.length; index += size) {
+    out.push(rows.slice(index, index + size));
+  }
+  return out;
+}
+
+/**
+ * A snapshot for a provider whose whole report arrives at once.
+ *
+ * Semrush and Ahrefs return a bounded, already-paid-for number of rows, so
+ * there is nothing to stream and the checksum can be taken in one pass.
+ */
 async function recordSnapshot(
   context: TenantContext,
   connection: Connection,
@@ -399,13 +460,64 @@ async function recordSnapshot(
       periodStart: new Date(`${window.startDate}T00:00:00.000Z`),
       periodEnd: new Date(`${window.endDate}T00:00:00.000Z`),
       checksum: createHash("sha256").update(payload.checksumSource).digest("hex"),
-      // Counts and periods only. The spec is explicit that a snapshot never holds
-      // tokens, and the response body itself is not retained in this phase.
-      metadataJson: { rowsReceived: payload.rowsReceived, ...payload.extra },
+      // Counts and periods only. A snapshot never holds tokens, and the
+      // response body itself is not retained in this phase.
+      metadataJson: { rowsReceived: payload.rowsReceived, complete: true, ...payload.extra },
     },
   });
 
   return snapshot.id;
+}
+
+/**
+ * Opens the snapshot before any row is written.
+ *
+ * It has to exist first because every metric row references it. What it says
+ * about the read is filled in at the end, when the read is over and the counts
+ * are known.
+ */
+async function beginSnapshot(
+  context: TenantContext,
+  connection: Connection,
+  window: SyncWindow,
+): Promise<string> {
+  const snapshot = await prisma.sourceSnapshot.create({
+    data: {
+      websiteId: context.website.id,
+      connectionId: connection.id,
+      provider: connection.provider,
+      periodStart: new Date(`${window.startDate}T00:00:00.000Z`),
+      periodEnd: new Date(`${window.endDate}T00:00:00.000Z`),
+      metadataJson: { rowsReceived: 0, complete: false },
+    },
+  });
+
+  return snapshot.id;
+}
+
+/**
+ * Closes the snapshot with what the read turned out to be.
+ *
+ * The checksum is folded in row by row as the pages arrive, so the evidence of
+ * what was read never requires the rows to be joined into one enormous string —
+ * which, at four hundred thousand rows, was tens of megabytes allocated at the
+ * worst possible moment.
+ *
+ * Counts and periods only. A snapshot never holds tokens, and the response
+ * body is not retained in this phase.
+ */
+async function finishSnapshot(
+  snapshotId: string,
+  tally: Tally,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  await prisma.sourceSnapshot.update({
+    where: { id: snapshotId },
+    data: {
+      checksum: tally.checksum.digest("hex"),
+      metadataJson: { rowsReceived: tally.received, complete: true, ...extra },
+    },
+  });
 }
 
 /** Ensures Pages exist for every URL in the batch and returns normalizedUrl → id. */
@@ -536,15 +648,145 @@ async function upsertGscRows(rows: GscInsertRow[]): Promise<number> {
 export type GscSyncOptions = {
   days?: number;
   now?: Date;
-  /** Injected in tests so the whole lifecycle runs without a network. */
+  /**
+   * Injected in tests so the whole lifecycle runs without a network. Delivered
+   * to the ingest path as a single page.
+   */
   source?: (params: {
     accessToken: string;
     propertyId: string;
     startDate: string;
     endDate: string;
   }) => Promise<SearchAnalyticsResult>;
+  /**
+   * Injected where a test needs several pages — to show that they are written
+   * and released one at a time rather than gathered up first.
+   */
+  pages?: typeof streamSearchAnalytics;
+  /**
+   * How many rows are held at once. Production uses INGEST_CHUNK; a test
+   * lowers it so that a page splitting into pieces can be shown with a handful
+   * of rows instead of tens of thousands.
+   */
+  ingestChunk?: number;
   accessTokenFor?: (connectionId: string) => Promise<string>;
 };
+
+/**
+ * Chooses where a Search Console sync's rows come from.
+ *
+ * Production streams from the connector. A test may hand over pages directly,
+ * to prove that pages are written and released one at a time, or a whole
+ * result, which is delivered as a single page.
+ */
+function gscStream(options: GscSyncOptions): typeof streamSearchAnalytics {
+  if (options.pages) return options.pages;
+
+  const source = options.source;
+  if (!source) return streamSearchAnalytics;
+
+  return async (params, onPage) => {
+    const result = await source(params);
+    if (result.rows.length > 0) await onPage(result.rows);
+    return { truncated: result.truncated };
+  };
+}
+
+/**
+ * Normalises, places and writes one bounded piece of a page.
+ *
+ * Everything it allocates — the url and query maps, the staged rows, the
+ * identity lookups, the insert rows — belongs to this chunk and is gone when
+ * it returns. Only the counters in the tally outlive it.
+ */
+async function writeGscChunk(
+  context: TenantContext,
+  connection: Connection,
+  snapshotId: string,
+  rows: SearchConsoleRow[],
+  tally: Tally,
+): Promise<void> {
+  // Normalize first, so a row that cannot be placed is counted as skipped
+  // rather than stored against a guessed identity.
+  const urls = new Map<
+    string,
+    { normalized: string; hostname: string; protocol: string; path: string }
+  >();
+  const queries = new Map<string, { raw: string; normalized: string }>();
+  const staged: {
+    date: string;
+    url: string;
+    query: string;
+    clicks: number;
+    impressions: number;
+    ctr: number;
+    position: number;
+  }[] = [];
+
+  for (const row of rows) {
+    const url = normalizeUrl(row.page, context.website.normalizedDomain);
+    const query = normalizeQuery(row.query);
+
+    if (!url.ok || !query.ok) {
+      tally.skipped += 1;
+      continue;
+    }
+
+    urls.set(url.value.normalized, url.value);
+    if (!queries.has(query.normalized)) {
+      queries.set(query.normalized, { raw: row.query, normalized: query.normalized });
+    }
+
+    staged.push({
+      date: row.date,
+      url: url.value.normalized,
+      query: query.normalized,
+      clicks: row.clicks,
+      impressions: row.impressions,
+      ctr: row.ctr,
+      position: row.position,
+    });
+  }
+
+  if (staged.length === 0) return;
+
+  const pageIds = await resolvePages(
+    context.website.id,
+    [...urls.values()],
+    "GOOGLE_SEARCH_CONSOLE",
+  );
+  const queryIds = await resolveQueries(context.website.id, [...queries.values()]);
+
+  const insertRows: GscInsertRow[] = [];
+
+  for (const row of staged) {
+    const pageId = pageIds.get(row.url);
+    const queryId = queryIds.get(row.query);
+
+    if (!pageId || !queryId) {
+      tally.skipped += 1;
+      continue;
+    }
+
+    tally.seen += 1;
+    noteDate(tally, row.date);
+
+    insertRows.push({
+      websiteId: context.website.id,
+      pageId,
+      queryId,
+      date: row.date,
+      clicks: row.clicks,
+      impressions: row.impressions,
+      ctr: row.ctr,
+      position: row.position,
+      connectionId: connection.id,
+      snapshotId,
+    });
+  }
+
+  tally.written += await upsertGscRows(insertRows);
+}
 
 /** Search Console → Page, Query, GscMetricDaily. */
 export async function runGscSync(
@@ -571,112 +813,46 @@ export async function runGscSync(
 
   try {
     const accessToken = await (options.accessTokenFor ?? getAccessToken)(connection.id);
-    const fetchRows = options.source ?? fetchSearchAnalytics;
+    const stream = gscStream(options);
 
-    const result = await fetchRows({
-      accessToken,
-      propertyId,
-      startDate: window.startDate,
-      endDate: window.endDate,
-    });
+    // The snapshot exists before any row is written, because every row points
+    // at it. What it says about the read is filled in when the read is done.
+    const snapshotId = await beginSnapshot(context, connection, window);
+    const tally = newTally();
 
-    const snapshotId = await recordSnapshot(context, connection, window, {
-      rowsReceived: result.rows.length,
-      checksumSource: result.rows
-        .map((row) => `${row.date}|${row.page}|${row.query}|${row.clicks}|${row.impressions}`)
-        .join("\n"),
-      extra: { truncated: result.truncated },
-    });
+    const { truncated } = await stream(
+      {
+        accessToken,
+        propertyId,
+        startDate: window.startDate,
+        endDate: window.endDate,
+      },
+      async (batch) => {
+        tally.received += batch.length;
+        for (const row of batch) {
+          tally.checksum.update(
+            `${row.date}|${row.page}|${row.query}|${row.clicks}|${row.impressions}\n`,
+          );
+        }
 
-    // Normalize first, so a row that cannot be placed is counted as skipped rather
-    // than stored against a guessed identity.
-    const urls = new Map<
-      string,
-      { normalized: string; hostname: string; protocol: string; path: string }
-    >();
-    const queries = new Map<string, { raw: string; normalized: string }>();
-    const staged: {
-      date: string;
-      url: string;
-      query: string;
-      clicks: number;
-      impressions: number;
-      ctr: number;
-      position: number;
-    }[] = [];
-    let skipped = 0;
-
-    for (const row of result.rows) {
-      const url = normalizeUrl(row.page, context.website.normalizedDomain);
-      const query = normalizeQuery(row.query);
-
-      if (!url.ok || !query.ok) {
-        skipped += 1;
-        continue;
-      }
-
-      urls.set(url.value.normalized, url.value);
-      if (!queries.has(query.normalized)) {
-        queries.set(query.normalized, { raw: row.query, normalized: query.normalized });
-      }
-
-      staged.push({
-        date: row.date,
-        url: url.value.normalized,
-        query: query.normalized,
-        clicks: row.clicks,
-        impressions: row.impressions,
-        ctr: row.ctr,
-        position: row.position,
-      });
-    }
-
-    const pageIds = await resolvePages(
-      context.website.id,
-      [...urls.values()],
-      "GOOGLE_SEARCH_CONSOLE",
+        // Written in pieces, and each piece released before the next. Nothing
+        // from an earlier page is still referenced here.
+        for (const chunk of chunks(batch, options.ingestChunk)) {
+          await writeGscChunk(context, connection, snapshotId, chunk, tally);
+        }
+      },
     );
-    const queryIds = await resolveQueries(context.website.id, [...queries.values()]);
 
-    const insertRows: GscInsertRow[] = [];
-
-    for (const row of staged) {
-      const pageId = pageIds.get(row.url);
-      const queryId = queryIds.get(row.query);
-
-      if (!pageId || !queryId) {
-        skipped += 1;
-        continue;
-      }
-
-      insertRows.push({
-        websiteId: context.website.id,
-        pageId,
-        queryId,
-        date: row.date,
-        clicks: row.clicks,
-        impressions: row.impressions,
-        ctr: row.ctr,
-        position: row.position,
-        connectionId: connection.id,
-        snapshotId,
-      });
-    }
-
-    const written = await upsertGscRows(insertRows);
-    const latestDate = staged.reduce<string | null>(
-      (latest, row) => (latest === null || row.date > latest ? row.date : latest),
-      null,
-    );
+    await finishSnapshot(snapshotId, tally, { truncated });
 
     return await completeRun(context, connection, run, {
       window,
-      received: result.rows.length,
-      written,
-      skipped,
-      latestDate,
-      partial: result.truncated,
-      seen: staged.length,
+      received: tally.received,
+      written: tally.written,
+      skipped: tally.skipped,
+      latestDate: tally.latestDate,
+      partial: truncated,
+      seen: tally.seen,
     });
   } catch (error) {
     const failed = await failRun(run, error);
@@ -774,6 +950,10 @@ export function landingPageToUrl(landingPage: string, hostname: string): string 
 }
 
 export type Ga4SyncOptions = {
+  /** Several pages, for the tests that prove memory stays bounded. */
+  pages?: typeof streamLandingPageMetrics;
+  /** How many rows are held at once. See GscSyncOptions.ingestChunk. */
+  ingestChunk?: number;
   days?: number;
   now?: Date;
   source?: (params: {
@@ -786,6 +966,98 @@ export type Ga4SyncOptions = {
 };
 
 /** GA4 → Ga4LandingPageMetricDaily, mapped onto existing Pages where possible. */
+/** Chooses where a GA4 sync's rows come from. Same reasoning as gscStream. */
+function ga4Stream(options: Ga4SyncOptions): typeof streamLandingPageMetrics {
+  if (options.pages) return options.pages;
+
+  const source = options.source;
+  if (!source) return streamLandingPageMetrics;
+
+  return async (params, onPage) => {
+    const result = await source(params);
+    if (result.rows.length > 0) await onPage(result.rows, result.availableMetrics);
+    return { availableMetrics: result.availableMetrics, truncated: result.truncated };
+  };
+}
+
+/** One bounded piece of a GA4 page: normalised, placed, written, released. */
+async function writeGa4Chunk(
+  context: TenantContext,
+  connection: Connection,
+  snapshotId: string,
+  rows: Ga4Result["rows"],
+  availableMetrics: Ga4MetricName[],
+  tally: Tally,
+): Promise<void> {
+  const urls = new Map<
+    string,
+    { normalized: string; hostname: string; protocol: string; path: string }
+  >();
+  const staged: { date: string; url: string; metrics: Ga4Result["rows"][number]["metrics"] }[] = [];
+
+  for (const row of rows) {
+    const candidate = landingPageToUrl(row.landingPage, context.website.normalizedDomain);
+
+    if (!candidate) {
+      tally.skipped += 1;
+      continue;
+    }
+
+    const url = normalizeUrl(candidate, context.website.normalizedDomain);
+
+    if (!url.ok) {
+      tally.skipped += 1;
+      continue;
+    }
+
+    urls.set(url.value.normalized, url.value);
+    staged.push({ date: row.date, url: url.value.normalized, metrics: row.metrics });
+  }
+
+  if (staged.length === 0) return;
+
+  const pageIds = await resolvePages(context.website.id, [...urls.values()], "GOOGLE_ANALYTICS");
+
+  // A metric this property cannot report stays null for every row. Reading it
+  // off the row alone would store null for a page that simply had none that
+  // day, which is a different fact.
+  const measured = new Set(availableMetrics);
+  const valueOf = (
+    metrics: Ga4Result["rows"][number]["metrics"],
+    name: Ga4MetricName,
+  ): number | null => (measured.has(name) ? (metrics[name] ?? 0) : null);
+
+  const insertRows: Ga4InsertRow[] = [];
+
+  for (const row of staged) {
+    const pageId = pageIds.get(row.url);
+
+    if (!pageId) {
+      tally.skipped += 1;
+      continue;
+    }
+
+    tally.seen += 1;
+    noteDate(tally, row.date);
+
+    insertRows.push({
+      websiteId: context.website.id,
+      pageId,
+      date: row.date,
+      sessions: valueOf(row.metrics, "sessions"),
+      engagedSessions: valueOf(row.metrics, "engagedSessions"),
+      users: valueOf(row.metrics, "totalUsers"),
+      newUsers: valueOf(row.metrics, "newUsers"),
+      keyEvents: valueOf(row.metrics, "keyEvents"),
+      revenue: valueOf(row.metrics, "totalRevenue"),
+      connectionId: connection.id,
+      snapshotId,
+    });
+  }
+
+  tally.written += await upsertGa4Rows(insertRows);
+}
+
 export async function runGa4Sync(
   context: TenantContext,
   options: Ga4SyncOptions = {},
@@ -810,103 +1082,42 @@ export async function runGa4Sync(
 
   try {
     const accessToken = await (options.accessTokenFor ?? getAccessToken)(connection.id);
-    const fetchRows = options.source ?? fetchLandingPageMetrics;
+    const stream = ga4Stream(options);
 
-    const result = await fetchRows({
-      accessToken,
-      propertyId,
-      startDate: window.startDate,
-      endDate: window.endDate,
-    });
+    const snapshotId = await beginSnapshot(context, connection, window);
+    const tally = newTally();
 
-    const snapshotId = await recordSnapshot(context, connection, window, {
-      rowsReceived: result.rows.length,
-      checksumSource: result.rows
-        .map((row) => `${row.date}|${row.landingPage}|${row.metrics.sessions ?? ""}`)
-        .join("\n"),
-      extra: {
-        availableMetrics: result.availableMetrics,
-        truncated: result.truncated,
+    const { availableMetrics, truncated } = await stream(
+      {
+        accessToken,
+        propertyId,
+        startDate: window.startDate,
+        endDate: window.endDate,
       },
-    });
+      // The metrics arrive with the page, because rows are written before the
+      // read is over and each one has to know what this property reports.
+      async (batch, metrics) => {
+        tally.received += batch.length;
+        for (const row of batch) {
+          tally.checksum.update(`${row.date}|${row.landingPage}|${row.metrics.sessions ?? ""}\n`);
+        }
 
-    const urls = new Map<
-      string,
-      { normalized: string; hostname: string; protocol: string; path: string }
-    >();
-    const staged: { date: string; url: string; metrics: Ga4Result["rows"][number]["metrics"] }[] =
-      [];
-    let skipped = 0;
-
-    for (const row of result.rows) {
-      const candidate = landingPageToUrl(row.landingPage, context.website.normalizedDomain);
-
-      if (!candidate) {
-        skipped += 1;
-        continue;
-      }
-
-      const url = normalizeUrl(candidate, context.website.normalizedDomain);
-
-      if (!url.ok) {
-        skipped += 1;
-        continue;
-      }
-
-      urls.set(url.value.normalized, url.value);
-      staged.push({ date: row.date, url: url.value.normalized, metrics: row.metrics });
-    }
-
-    const pageIds = await resolvePages(context.website.id, [...urls.values()], "GOOGLE_ANALYTICS");
-
-    // A metric this property cannot report stays null for every row. Reading it off
-    // the row alone would store null for a page that simply had none that day,
-    // which is a different fact.
-    const measured = new Set(result.availableMetrics);
-    const valueOf = (
-      metrics: Ga4Result["rows"][number]["metrics"],
-      name: Ga4MetricName,
-    ): number | null => (measured.has(name) ? (metrics[name] ?? 0) : null);
-
-    const insertRows: Ga4InsertRow[] = [];
-
-    for (const row of staged) {
-      const pageId = pageIds.get(row.url);
-
-      if (!pageId) {
-        skipped += 1;
-        continue;
-      }
-
-      insertRows.push({
-        websiteId: context.website.id,
-        pageId,
-        date: row.date,
-        sessions: valueOf(row.metrics, "sessions"),
-        engagedSessions: valueOf(row.metrics, "engagedSessions"),
-        users: valueOf(row.metrics, "totalUsers"),
-        newUsers: valueOf(row.metrics, "newUsers"),
-        keyEvents: valueOf(row.metrics, "keyEvents"),
-        revenue: valueOf(row.metrics, "totalRevenue"),
-        connectionId: connection.id,
-        snapshotId,
-      });
-    }
-
-    const written = await upsertGa4Rows(insertRows);
-    const latestDate = staged.reduce<string | null>(
-      (latest, row) => (latest === null || row.date > latest ? row.date : latest),
-      null,
+        for (const chunk of chunks(batch, options.ingestChunk)) {
+          await writeGa4Chunk(context, connection, snapshotId, chunk, metrics, tally);
+        }
+      },
     );
+
+    await finishSnapshot(snapshotId, tally, { availableMetrics, truncated });
 
     return await completeRun(context, connection, run, {
       window,
-      received: result.rows.length,
-      written,
-      skipped,
-      latestDate,
-      partial: result.truncated,
-      seen: staged.length,
+      received: tally.received,
+      written: tally.written,
+      skipped: tally.skipped,
+      latestDate: tally.latestDate,
+      partial: truncated,
+      seen: tally.seen,
     });
   } catch (error) {
     const failed = await failRun(run, error);
