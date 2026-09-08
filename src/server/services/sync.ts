@@ -6,6 +6,7 @@ import type { Connection, SyncRun, SyncStatus, SyncType } from "@/generated/pris
 import { prisma } from "@/server/db/prisma";
 import { recordAudit } from "@/server/audit/record";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
+import { hasLiveSyncJob } from "@/server/jobs/status";
 import { getAccessToken } from "@/server/services/connection-auth";
 import { normalizeUrl } from "@/lib/url/normalize-url";
 import { normalizeQuery } from "@/lib/query/normalize-query";
@@ -83,7 +84,9 @@ export type SyncErrorCode =
   // A run left at RUNNING by a process that died between committing rows and
   // finalising — Railway recycling the container, an OOM, a dropped request.
   // It is a recovered orphan, not a fresh failure, and says so.
-  | "stale_run_recovered";
+  | "stale_run_recovered"
+  // A person whose role does not permit starting a sync asked for one.
+  | "forbidden";
 
 export class SyncError extends Error {
   constructor(
@@ -216,6 +219,7 @@ const ERROR_SUMMARIES: Record<SyncErrorCode, string> = {
   no_market: "Set the website's primary market before syncing this provider.",
   stale_run_recovered:
     "A previous run was interrupted before it finished and has been marked failed. The figures above are unchanged.",
+  forbidden: "This role cannot start a sync.",
 };
 
 export type SyncOutcome = {
@@ -229,7 +233,7 @@ export type SyncOutcome = {
   reused: boolean;
 };
 
-async function connectionFor(
+export async function connectionFor(
   context: TenantContext,
   provider: "GOOGLE_SEARCH_CONSOLE" | "GOOGLE_ANALYTICS",
 ): Promise<{ connection: Connection; propertyId: string }> {
@@ -266,11 +270,14 @@ async function connectionFor(
  * was working on can never be synced again.
  *
  * Before a new run for a connection, any RUNNING run for that same connection
- * older than the staleness threshold is therefore provably not executing (P1
- * runs one manual sync at a time per connection) and is marked FAILED. Its
- * idempotency key is archived so the orphan is preserved as history rather than
- * overwritten by the fresh attempt. A run still inside the threshold is left
- * alone: it might genuinely be in flight.
+ * older than the staleness threshold is marked FAILED — unless a live job still
+ * owns it. The worker heartbeats its job while a handler runs, so a run whose
+ * job is still being stamped is executing however long it has been going,
+ * and a run whose job has gone quiet is not. Without a queue to ask, age
+ * alone decides, as it did before. A recovered run's idempotency key is
+ * archived so the orphan is preserved as history rather than overwritten by
+ * the fresh attempt. A run still inside the threshold is left alone either
+ * way: it might genuinely be in flight.
  */
 async function recoverStaleRuns(connectionId: string, now: Date): Promise<number> {
   const cutoff = new Date(now.getTime() - STALE_RUN_MINUTES * 60_000);
@@ -283,6 +290,10 @@ async function recoverStaleRuns(connectionId: string, now: Date): Promise<number
   for (const run of running) {
     const startedAt = run.startedAt ?? run.createdAt;
     if (startedAt >= cutoff) continue;
+
+    // Old, but owned by a job that is still heartbeating: a long sync, not an
+    // orphan.
+    if (await hasLiveSyncJob(run.websiteId, run.provider, startedAt)) continue;
 
     await prisma.syncRun.update({
       where: { id: run.id },

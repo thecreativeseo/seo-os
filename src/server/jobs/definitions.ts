@@ -19,17 +19,26 @@ import {
   runGscSync,
   runSemrushSync,
   SyncError,
+  type Ga4SyncOptions,
+  type GscSyncOptions,
+  type SyncErrorCode,
   type SyncOutcome,
 } from "@/server/services/sync";
 import type { ConnectionProvider, DiagnosisRequest } from "@/generated/prisma/client";
 
+import { MANUAL_SYNC_PROVIDERS, type ManualSyncProvider } from "./names";
 import { JOB_NAMES, type Queue } from "./queue";
 import { listSyncableWebsiteIds, SystemContextError, systemContextFor } from "./system-context";
 
 /**
  * What the worker does (docs/P1_SPEC.md section 23).
  *
- * Two jobs. `sync.daily` runs on a cron and enqueues one `website.sync` per
+ * Three sync jobs and one for diagnoses. `connection.sync` is what a person
+ * pressing "Sync now" gets: one provider for one website, run here rather than
+ * in the web request that asked, so a deploy or a dropped connection cannot
+ * cut it off halfway. The other two are the daily pull.
+ *
+ * `sync.daily` runs on a cron and enqueues one `website.sync` per
  * active website; `website.sync` pulls everything that website has connected,
  * then re-runs detection so the signals describe the data that was just
  * written. The fan-out exists so that one slow or failing website is one
@@ -51,6 +60,28 @@ export const websiteSyncPayload = z.object({
 });
 
 export type WebsiteSyncPayload = z.infer<typeof websiteSyncPayload>;
+
+export const connectionSyncPayload = z.object({
+  websiteId: z.uuid(),
+  provider: z.enum(MANUAL_SYNC_PROVIDERS),
+  /** Who pressed the button. Checked again at run time; absent means the system. */
+  requestedByUserId: z.uuid().optional(),
+  requestedAt: z.iso.datetime().optional(),
+});
+
+export type ConnectionSyncPayload = z.infer<typeof connectionSyncPayload>;
+
+export type ConnectionSyncSummary = {
+  websiteId: string;
+  provider: ManualSyncProvider;
+  status: "done" | "reused" | "skipped" | "failed";
+  /** Our own words: a code, a window, a count. Never provider output. */
+  detail?: string;
+  runId?: string;
+  written?: number;
+  /** Whose name the audit trail carries for this run. */
+  actor: "requester" | "system";
+};
 
 /** A cron job carries no data; a manual trigger may say who asked. */
 export const dailySyncPayload = z
@@ -352,6 +383,171 @@ export async function runDailySync(
 }
 
 // ---------------------------------------------------------------------------
+// connection.sync
+// ---------------------------------------------------------------------------
+
+/**
+ * Failures worth another attempt: the provider was busy or unreachable, or
+ * something unclassified happened, including a run that could not finalise. A
+ * bad credential, a missing property, a revoked permission or an exhausted
+ * quota are not on this list — retrying those is a loop, not a recovery.
+ * "already running" is here because it is transient by nature: the other run
+ * finishes, and the retry finds the period done or free.
+ */
+const RETRYABLE_SYNC_FAILURES: ReadonlySet<string> = new Set<SyncErrorCode>([
+  "rate_limited",
+  "upstream_error",
+  "request_failed",
+  "unknown",
+  "already_running",
+]);
+
+export function isRetryableSyncFailure(code: string | null | undefined): boolean {
+  return code !== null && code !== undefined && RETRYABLE_SYNC_FAILURES.has(code);
+}
+
+/** Thrown to hand a job back to pg-boss for a bounded retry. The message is ours. */
+export class RetryableJobError extends Error {
+  constructor(readonly code: string) {
+    super(`connection.sync will be retried: ${code}`);
+    this.name = "RetryableJobError";
+  }
+}
+
+type ResolvedContext = { context: TenantContext; actor: "requester" | "system" };
+
+/**
+ * The context a manual sync runs under: the person who pressed the button, if
+ * they still may. Their membership is read again now, so a click by someone
+ * whose access was since revoked does not run in their name. The data is the
+ * website's rather than theirs, so the sync still runs — as the system actor,
+ * the way the daily job does.
+ */
+async function contextForConnectionSync(payload: ConnectionSyncPayload): Promise<ResolvedContext> {
+  const base = await systemContextFor(payload.websiteId);
+
+  if (!payload.requestedByUserId) return { context: base, actor: "system" };
+
+  const user = await prisma.user.findUnique({ where: { id: payload.requestedByUserId } });
+  const membership = user
+    ? await prisma.organizationMembership.findFirst({
+        where: { userId: user.id, organizationId: base.organization.id, status: "ACTIVE" },
+      })
+    : null;
+
+  if (!user || !membership || !hasRole(membership.role, REQUIRED.WRITE)) {
+    return { context: base, actor: "system" };
+  }
+
+  return { context: { ...base, user, membership }, actor: "requester" };
+}
+
+export type ConnectionSyncOptions = {
+  now?: Date;
+  signal?: AbortSignal;
+  /** Test seams: the context resolver, the provider fakes, and detection. */
+  contextFor?: (payload: ConnectionSyncPayload) => Promise<ResolvedContext>;
+  gsc?: GscSyncOptions;
+  ga4?: Ga4SyncOptions;
+  detect?: (context: TenantContext, now: Date) => Promise<unknown>;
+};
+
+/**
+ * One provider for one website, run by the worker on a person's request.
+ *
+ * The pull is exactly what the "Sync now" button used to do inside the web
+ * request; only where it runs has changed. The SyncRun is claimed and
+ * finalised by the sync service as before — orphans recovered first, freshness
+ * advanced only on completion — and this handler decides the one thing the
+ * service does not: whether a failure is worth pg-boss trying again.
+ */
+export async function runConnectionSync(
+  payload: ConnectionSyncPayload,
+  options: ConnectionSyncOptions = {},
+): Promise<ConnectionSyncSummary> {
+  const now = options.now ?? new Date();
+  const summary = { websiteId: payload.websiteId, provider: payload.provider };
+
+  let resolved: ResolvedContext;
+
+  try {
+    resolved = await (options.contextFor ?? contextForConnectionSync)(payload);
+  } catch (error) {
+    if (error instanceof SystemContextError) {
+      // Archived since the click. Nothing to retry: the job completes with the reason.
+      return { ...summary, status: "skipped", detail: describeError(error), actor: "system" };
+    }
+    throw error;
+  }
+
+  const { context, actor } = resolved;
+  let outcome: SyncOutcome;
+
+  try {
+    outcome =
+      payload.provider === "GOOGLE_SEARCH_CONSOLE"
+        ? await runGscSync(context, { now, ...options.gsc })
+        : await runGa4Sync(context, { now, ...options.ga4 });
+  } catch (error) {
+    // A refusal before any run was claimed — not connected, no property, one
+    // already running — or a finalisation that could not even record itself.
+    if (error instanceof SyncError) {
+      if (isRetryableSyncFailure(error.code)) {
+        log({ at: JOB_NAMES.CONNECTION_SYNC, event: "retry", ...summary, code: error.code });
+        throw new RetryableJobError(error.code);
+      }
+      return { ...summary, status: "failed", detail: `sync:${error.code}`, actor };
+    }
+    throw error;
+  }
+
+  if (outcome.reused) {
+    return {
+      ...summary,
+      status: "reused",
+      detail: `through ${outcome.window.endDate}`,
+      runId: outcome.run.id,
+      actor,
+    };
+  }
+
+  if (outcome.status === "FAILED") {
+    const code = outcome.run.errorCode ?? "unknown";
+
+    if (isRetryableSyncFailure(code)) {
+      log({
+        at: JOB_NAMES.CONNECTION_SYNC,
+        event: "retry",
+        ...summary,
+        runId: outcome.run.id,
+        code,
+      });
+      throw new RetryableJobError(code);
+    }
+
+    return { ...summary, status: "failed", detail: `sync:${code}`, runId: outcome.run.id, actor };
+  }
+
+  // New metrics mean the previous detection is out of date — the step the
+  // button used to take after a successful pull, taken here instead.
+  if (outcome.written > 0 && !options.signal?.aborted) {
+    const detect =
+      options.detect ??
+      ((target: TenantContext, at: Date) => detectAndStoreSignals(target, { now: at }));
+    await detect(context, now);
+  }
+
+  return {
+    ...summary,
+    status: "done",
+    detail: `${outcome.window.startDate} to ${outcome.window.endDate}`,
+    runId: outcome.run.id,
+    written: outcome.written,
+    actor,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // diagnosis.run
 // ---------------------------------------------------------------------------
 
@@ -511,6 +707,13 @@ export async function registerJobs(queue: Queue): Promise<void> {
     const payload = websiteSyncPayload.parse(job.data);
     const summary = await runWebsiteSync(payload.websiteId, { signal: job.signal });
     log({ at: JOB_NAMES.WEBSITE_SYNC, event: "completed", jobId: job.id, ...summary });
+    return summary;
+  });
+
+  await queue.work<ConnectionSyncPayload>(JOB_NAMES.CONNECTION_SYNC, async (job) => {
+    const payload = connectionSyncPayload.parse(job.data);
+    const summary = await runConnectionSync(payload, { signal: job.signal });
+    log({ at: JOB_NAMES.CONNECTION_SYNC, event: "completed", jobId: job.id, ...summary });
     return summary;
   });
 

@@ -31,7 +31,13 @@ async function main(): Promise<void> {
   await registerJobs(queue);
   await queue.schedule(JOB_NAMES.SYNC_DAILY, cron, {});
 
-  log({ event: "started", cron, schema: schema ?? "pgboss", pid: process.pid });
+  log({
+    event: "started",
+    cron,
+    schema: schema ?? "pgboss",
+    pid: process.pid,
+    queues: Object.values(JOB_NAMES),
+  });
 
   // A first deploy should not have to wait until 03:00 to prove itself.
   if (process.env.SYNC_ON_START === "1") {

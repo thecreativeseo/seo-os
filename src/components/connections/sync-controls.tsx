@@ -11,9 +11,10 @@ import {
 const initial: SyncActionState = {};
 
 /**
- * A sync can take a while against a large property, and there is no job queue in
- * P1 to hand it to. The button says what is happening rather than appearing to
- * hang, and never claims a result the run did not report.
+ * The button asks; the worker syncs. The request only queues the job, so this
+ * comes back in a moment with "queued" (or why not), and the Data Health table
+ * shows the attempt's state on the next load. Nothing here claims a result the
+ * run has not reported.
  */
 export function SyncButton({
   websiteId,
@@ -35,7 +36,7 @@ export function SyncButton({
           disabled={pending}
           className="border-border hover:bg-accent inline-flex h-8 items-center rounded-md border px-3 text-xs disabled:opacity-60"
         >
-          {pending ? "Syncing…" : "Sync now"}
+          {pending ? "Queuing…" : "Sync now"}
         </button>
       </form>
 

@@ -22,22 +22,36 @@ function sitemapErrorMessage(code: string): string {
   return SITEMAP_ERROR_MESSAGES[code as SitemapFetchError] ?? "That sitemap could not be fetched.";
 }
 
+function clock(value: Date | null): string {
+  return value ? value.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "";
+}
+
 /**
- * The newest attempt, said plainly and never as successful freshness. A live
- * run says when it began; an interrupted one says it will retry rather than
- * masquerading as still running.
+ * The newest attempt, said plainly and never as successful freshness. A queued
+ * sync says so, and says when — the worker picks it up within seconds, so one
+ * still waiting after minutes is a worker that is not running. A live run says
+ * when it began; an interrupted one says it will retry rather than masquerading
+ * as still running.
  */
 function AttemptCell({ attempt }: { attempt: LatestAttempt }) {
-  if (attempt.state === "running") {
+  if (attempt.state === "queued") {
     return (
       <span className="text-foreground">
-        Syncing since{" "}
-        {attempt.startedAt?.toLocaleTimeString("en-GB", {
-          hour: "2-digit",
-          minute: "2-digit",
-        })}
+        Queued since {clock(attempt.queuedAt)}
+        {attempt.unattended ? (
+          <span className="text-amber-700 dark:text-amber-400">
+            {" "}
+            · not picked up yet — is the worker running?
+          </span>
+        ) : null}
       </span>
     );
+  }
+  if (attempt.state === "starting") {
+    return <span className="text-foreground">Sync starting</span>;
+  }
+  if (attempt.state === "running") {
+    return <span className="text-foreground">Syncing since {clock(attempt.startedAt)}</span>;
   }
   if (attempt.state === "stale") {
     return (

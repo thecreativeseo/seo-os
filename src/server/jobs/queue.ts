@@ -1,5 +1,7 @@
 import { PgBoss } from "pg-boss";
 
+import { JOB_NAMES, type JobName } from "./names";
+
 /**
  * The job queue (docs/P1_SPEC.md section 23, "Background jobs").
  *
@@ -21,16 +23,9 @@ import { PgBoss } from "pg-boss";
  * not carry notifications, and pg-boss polls perfectly well without them.
  */
 
-export const JOB_NAMES = {
-  /** Once a day: enqueue one website.sync per active website. */
-  SYNC_DAILY: "sync.daily",
-  /** Everything one website needs pulled, then re-detected. */
-  WEBSITE_SYNC: "website.sync",
-  /** One diagnosis request, run to completion by the worker. */
-  DIAGNOSIS_RUN: "diagnosis.run",
-} as const;
-
-export type JobName = (typeof JOB_NAMES)[keyof typeof JOB_NAMES];
+// The names live in names.ts so that readers of the job table need no pg-boss
+// import; they are re-exported here for everything that already imports them.
+export { JOB_NAMES, resolveQueueSchema, type JobName } from "./names";
 
 /**
  * Per-queue retry policy. A provider that is down at 03:00 is usually back by
@@ -46,12 +41,20 @@ export type JobName = (typeof JOB_NAMES)[keyof typeof JOB_NAMES];
 const QUEUE_OPTIONS: Record<
   JobName,
   {
-    policy: "short";
+    policy: "short" | "stately";
     retryLimit: number;
     retryDelay: number;
     retryBackoff: boolean;
     expireInSeconds: number;
     retentionSeconds: number;
+    /**
+     * While a handler runs, pg-boss stamps the job every half of this. A job
+     * whose stamp goes stale is released for retry — which is how a worker
+     * that died mid-sync gives its job back in a couple of minutes rather
+     * than at the expiry ceiling, and how a live long-running job proves it
+     * is still there.
+     */
+    heartbeatSeconds?: number;
   }
 > = {
   [JOB_NAMES.SYNC_DAILY]: {
@@ -69,6 +72,21 @@ const QUEUE_OPTIONS: Record<
     retryBackoff: true,
     expireInSeconds: 60 * 60,
     retentionSeconds: 14 * 24 * 60 * 60,
+    heartbeatSeconds: 60,
+  },
+  // "stately" rather than "short": one job per key in each of created, retry
+  // and active, so two clicks never run two pulls at once. A second click
+  // while one is active is caught before it is sent (see sync-request.ts).
+  // The expiry is a ceiling for a handler that is alive but stuck; a dead one
+  // is caught by the heartbeat long before that.
+  [JOB_NAMES.CONNECTION_SYNC]: {
+    policy: "stately",
+    retryLimit: 2,
+    retryDelay: 600,
+    retryBackoff: true,
+    expireInSeconds: 2 * 60 * 60,
+    retentionSeconds: 14 * 24 * 60 * 60,
+    heartbeatSeconds: 60,
   },
   // A model call is a minute; fifteen is a stuck one. Retries cover a provider
   // outage - a guardrail failure closes the request and completes the job.
@@ -103,6 +121,12 @@ export type QueueConfig = {
    * so two schedulers never fire the same cron.
    */
   role: "worker" | "client";
+  /**
+   * Connections pg-boss may open. Defaults to four for a worker and two for a
+   * client. Tests that start a real queue beside a hundred other suites pass
+   * a smaller number: DIRECT_URL is a session pooler with a small ceiling.
+   */
+  max?: number;
 };
 
 export type Queue = {
@@ -147,7 +171,7 @@ export function createQueue(config: QueueConfig): Queue {
     application_name: `seo-os-${config.role}`,
     // Two connections are plenty: one polling, one for whatever the handler is
     // doing through pg-boss itself. Application queries go through Prisma.
-    max: worker ? 4 : 2,
+    max: config.max ?? (worker ? 4 : 2),
     schedule: worker,
     supervise: worker,
     migrate: worker,
@@ -173,12 +197,53 @@ export function createQueue(config: QueueConfig): Queue {
 
   let started: Promise<void> | null = null;
 
-  async function ensureQueues(): Promise<void> {
-    for (const [name, options] of Object.entries(QUEUE_OPTIONS)) {
-      const existing = await boss.getQueue(name);
-      if (!existing) {
-        await boss.createQueue(name, options);
+  const ensured = new Set<JobName>();
+
+  /**
+   * Creates a queue that does not exist yet and, on the worker, brings an
+   * existing one's tunables up to date. The policy is fixed at creation and
+   * is the one thing this cannot change. A client ensures only the queue it
+   * is about to send to, so the web app can enqueue before the worker has
+   * been redeployed with a new queue name.
+   */
+  async function ensureQueue(name: JobName): Promise<void> {
+    if (ensured.has(name)) return;
+
+    const options = QUEUE_OPTIONS[name];
+    const existing = await boss.getQueue(name);
+
+    if (!existing) {
+      await boss.createQueue(name, options);
+    } else if (worker) {
+      const { retryLimit, retryDelay, retryBackoff, expireInSeconds, heartbeatSeconds } = options;
+      try {
+        await boss.updateQueue(name, {
+          retryLimit,
+          retryDelay,
+          retryBackoff,
+          expireInSeconds,
+          heartbeatSeconds,
+        });
+      } catch (error) {
+        // A tunable pg-boss would not take is a warning, not a reason the
+        // worker cannot start.
+        console.warn(
+          JSON.stringify({
+            at: "queue",
+            event: "update-queue-failed",
+            queue: name,
+            error: error instanceof Error ? error.name : "unknown",
+          }),
+        );
       }
+    }
+
+    ensured.add(name);
+  }
+
+  async function ensureQueues(): Promise<void> {
+    for (const name of Object.keys(QUEUE_OPTIONS) as JobName[]) {
+      await ensureQueue(name);
     }
   }
 
@@ -204,6 +269,7 @@ export function createQueue(config: QueueConfig): Queue {
 
     async enqueue(name, data, options = {}) {
       await start();
+      await ensureQueue(name);
       return boss.send(name, data, {
         singletonKey: options.singletonKey,
         startAfter: options.startAfterSeconds,

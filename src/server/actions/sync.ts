@@ -4,50 +4,54 @@ import { revalidatePath } from "next/cache";
 
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { REQUIRED } from "@/server/auth/roles";
-import { runGa4Sync, runGscSync, SyncError, type SyncOutcome } from "@/server/services/sync";
-import { detectAndStoreSignals } from "@/server/services/signals";
+import type { ManualSyncProvider } from "@/server/jobs/names";
+import { SyncError } from "@/server/services/sync";
+import { requestManualSync, type ManualSyncRequest } from "@/server/services/sync-request";
 
 export type SyncActionState = { error?: string; message?: string };
 
 /**
  * "Sync now".
  *
- * P1 has no durable job runner — the spec's own instruction is not to make the
- * browser one either, so this is an explicit, person-initiated run rather than a
- * loop pretending to be a scheduler. The work happens on the server inside one
- * request; a background queue is P2's problem.
+ * The request validates and enqueues; the worker pulls. Nothing here waits on
+ * a provider, so the page comes back at once and says what it knows: queued,
+ * already queued, already running, or that the queue could not take it. The
+ * page reads the run's state afresh on each load — a sync that finishes in
+ * minutes does not need a live channel.
  */
-function describe(outcome: SyncOutcome): string {
-  if (outcome.reused) {
-    return `Already up to date through ${outcome.window.endDate}.`;
+function describe(request: ManualSyncRequest): SyncActionState {
+  switch (request.status) {
+    case "queued":
+      return {
+        message: "Sync queued. It runs in the background; refresh this page to follow it.",
+      };
+    case "already_queued":
+      return { message: "A sync for this source is already queued." };
+    case "already_running":
+      return {
+        message: `A sync for this source has been running since ${request.since.toLocaleTimeString(
+          "en-GB",
+          { hour: "2-digit", minute: "2-digit" },
+        )}.`,
+      };
+    case "queue_unavailable":
+      return {
+        error: "The sync could not be queued. The worker service may not be running.",
+      };
   }
-
-  if (outcome.status === "FAILED") {
-    return "";
-  }
-
-  const skipped =
-    outcome.skipped > 0 ? `, ${outcome.skipped} rows could not be matched to a page` : "";
-
-  return `${outcome.received.toLocaleString("en-GB")} rows read for ${
-    outcome.window.startDate
-  } to ${outcome.window.endDate}${skipped}.`;
 }
 
-async function run(
-  formData: FormData,
-  sync: (context: Awaited<ReturnType<typeof requireWebsiteAccess>>) => Promise<SyncOutcome>,
-): Promise<SyncActionState> {
+async function run(formData: FormData, provider: ManualSyncProvider): Promise<SyncActionState> {
   const websiteId = String(formData.get("__websiteId") ?? "");
 
   const context = await requireWebsiteAccess(websiteId, REQUIRED.WRITE, {
     throwOnDenied: true,
   });
 
-  let outcome: SyncOutcome;
+  let request: ManualSyncRequest;
 
   try {
-    outcome = await sync(context);
+    request = await requestManualSync(context, provider);
   } catch (error) {
     if (error instanceof SyncError) {
       return { error: error.message };
@@ -55,34 +59,20 @@ async function run(
     throw error;
   }
 
-  if (outcome.status === "FAILED") {
-    // The run row already holds our own code and summary; the person gets the same
-    // sentence rather than anything the provider said.
-    return {
-      error: outcome.run.errorSummary ?? "The sync did not complete.",
-    };
-  }
-
-  // New metrics mean the previous detection is out of date. Re-running it here
-  // keeps signals and numbers describing the same day.
-  if (!outcome.reused && outcome.written > 0) {
-    await detectAndStoreSignals(context);
-  }
-
   revalidatePath(`/websites/${websiteId}`, "layout");
-  return { message: describe(outcome) };
+  return describe(request);
 }
 
 export async function syncSearchConsoleAction(
   _previous: SyncActionState,
   formData: FormData,
 ): Promise<SyncActionState> {
-  return run(formData, (context) => runGscSync(context));
+  return run(formData, "GOOGLE_SEARCH_CONSOLE");
 }
 
 export async function syncAnalyticsAction(
   _previous: SyncActionState,
   formData: FormData,
 ): Promise<SyncActionState> {
-  return run(formData, (context) => runGa4Sync(context));
+  return run(formData, "GOOGLE_ANALYTICS");
 }

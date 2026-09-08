@@ -230,7 +230,7 @@ describe("the queue itself", () => {
 
   beforeAll(async () => {
     await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
-    queue = createQueue({ role: "worker", schema });
+    queue = createQueue({ role: "worker", schema, max: 2 });
     await queue.start();
   }, 90_000);
 

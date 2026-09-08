@@ -5,6 +5,7 @@ import { websiteScope, type TenantContext } from "@/server/auth/guards";
 import { getDataHealth } from "@/server/services/data-health";
 import { listSitemaps, syncSitemap, removeSitemap } from "@/server/services/sitemap";
 import { listSyncRuns } from "@/server/services/sync";
+import { requestManualSync } from "@/server/services/sync-request";
 import {
   getPageDetail,
   getPageMetrics,
@@ -319,14 +320,44 @@ describe("tenant A cannot reach tenant B", () => {
     expect(runs.map((run) => run.id)).not.toContain(b.syncRunId);
   });
 
+  it("manual sync request", async () => {
+    // "Sync now" enqueues for the website in the caller's context and nothing
+    // else: the job payload and the queue lookup both carry A's ids, so B's
+    // connection can be neither queued nor inspected through A.
+    const asked: string[] = [];
+    const sent: { websiteId?: string }[] = [];
+
+    // The fixture's connection has no property chosen; a request needs one.
+    await prisma.connection.updateMany({
+      where: { websiteId: a.website.id, provider: "GOOGLE_SEARCH_CONSOLE" },
+      data: { externalPropertyId: `sc-domain:${a.website.normalizedDomain}` },
+    });
+
+    const result = await requestManualSync(a, "GOOGLE_SEARCH_CONSOLE", {
+      queue: {
+        enqueue: async (_name, data) => {
+          sent.push(data as { websiteId?: string });
+          return crypto.randomUUID();
+        },
+      },
+      pendingJob: async (websiteId) => {
+        asked.push(websiteId);
+        return null;
+      },
+    });
+
+    expect(result.status).toBe("queued");
+    expect(asked).toEqual([a.website.id]);
+    expect(sent).toEqual([expect.objectContaining({ websiteId: a.website.id })]);
+    expect(sent[0]?.websiteId).not.toBe(b.website.id);
+  });
+
   it("Signal", async () => {
     const signals = await listSignals(a);
     expect(signals.map((signal) => signal.id)).not.toContain(b.signalId);
     expect(signals.some((signal) => signal.headline.includes("b confidential"))).toBe(false);
 
-    await expect(setSignalStatus(a, b.signalId, "DISMISSED")).rejects.toBeInstanceOf(
-      SignalError,
-    );
+    await expect(setSignalStatus(a, b.signalId, "DISMISSED")).rejects.toBeInstanceOf(SignalError);
 
     const unchanged = await prisma.signal.findUnique({ where: { id: b.signalId } });
     expect(unchanged?.status).toBe("DETECTED");
@@ -334,9 +365,7 @@ describe("tenant A cannot reach tenant B", () => {
 
   it("SignalEvidence", async () => {
     const signals = await listSignals(a);
-    const evidenceIds = signals.flatMap((signal) =>
-      signal.evidence.map((entry) => entry.id),
-    );
+    const evidenceIds = signals.flatMap((signal) => signal.evidence.map((entry) => entry.id));
     expect(evidenceIds).not.toContain(b.evidenceId);
 
     // Evidence is only reachable through its signal, which is scoped.
@@ -357,9 +386,7 @@ describe("a tenant sees its own data", () => {
       true,
     );
     expect(
-      (await getQueryMetrics(a, windows)).some((query) =>
-        query.query.includes("a confidential"),
-      ),
+      (await getQueryMetrics(a, windows)).some((query) => query.query.includes("a confidential")),
     ).toBe(true);
     expect((await listSignals(a)).some((signal) => signal.id === a.signalId)).toBe(true);
     expect((await listSitemaps(a)).some((sitemap) => sitemap.id === a.sitemapId)).toBe(true);
