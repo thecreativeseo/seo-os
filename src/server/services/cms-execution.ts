@@ -1,0 +1,677 @@
+import { prisma } from "@/server/db/prisma";
+import { recordAudit } from "@/server/audit/record";
+import { websiteScope, type TenantContext } from "@/server/auth/guards";
+import { decryptCredential } from "@/server/crypto/credentials";
+import { revisionHash } from "@/lib/execution/hash";
+import { renderMarkdown } from "@/lib/content/markdown";
+import { parseCmsBaseUrl } from "@/lib/cms/url";
+import { compareContent, compareText } from "@/lib/cms/content";
+import {
+  EXECUTION_ERROR_MESSAGES,
+  isRetrySafeFailure,
+  type ExecutionErrorCode,
+} from "@/lib/execution/errors";
+import { selectProvider } from "@/server/connectors/wordpress/registry";
+import { createTransport } from "@/server/connectors/wordpress/transport";
+import {
+  CmsProviderError,
+  type CmsEntity,
+  type CmsProvider,
+  type CmsTransport,
+  type CreateDraftInput,
+  type ProviderContext,
+} from "@/server/connectors/wordpress/types";
+import { Prisma } from "@/generated/prisma/client";
+import type {
+  Execution,
+  ExecutionVerificationStatus,
+  VerificationType,
+} from "@/generated/prisma/client";
+
+/**
+ * Carrying out a CREATE_CMS_DRAFT execution that M6.1 already authorized.
+ *
+ * M6.1 decided whether this may happen and wrote the record. This does it, and
+ * its whole design is about the gap between "we asked" and "we know what
+ * happened", because that gap is where a duplicate draft comes from.
+ *
+ * Three transactions with the provider calls between them, never inside:
+ *
+ *   1. re-check eligibility, move READY to EXECUTING, commit
+ *   2. create the draft
+ *   3. persist what was created, commit
+ *   4. read it back
+ *   5. write the verification rows and the final status, commit
+ *
+ * A crash anywhere after (1) leaves an execution sitting in EXECUTING, which
+ * M6.1 already treats as unresolved and refuses to create a second draft for.
+ * That is the intended resting place for an interrupted attempt: visible,
+ * blocking, and waiting for a person.
+ *
+ * The create call is never retried. Not here, not in the transport, not by any
+ * wrapper. Where the outcome is unknown the execution says so and stops.
+ */
+
+export class CmsExecutionError extends Error {
+  constructor(
+    readonly code: ExecutionErrorCode,
+    message: string = EXECUTION_ERROR_MESSAGES[code],
+  ) {
+    super(message);
+    this.name = "CmsExecutionError";
+  }
+}
+
+export type ExecuteResult = {
+  execution: Execution;
+  /** VERIFIED when every required check passed. */
+  verified: boolean;
+  verifications: { type: VerificationType; status: ExecutionVerificationStatus }[];
+};
+
+export type ExecuteOptions = {
+  /** Injected in tests. Production builds one from the validated base URL. */
+  transport?: CmsTransport;
+  resolve?: (hostname: string) => Promise<string[]>;
+  now?: () => Date;
+};
+
+/** What is sent, derived only from the revision the approval pinned. */
+async function buildPayload(
+  context: TenantContext,
+  execution: Execution,
+): Promise<CreateDraftInput> {
+  const revision = await prisma.contentRevision.findFirst({
+    where: { id: execution.contentRevisionId, ...websiteScope(context) },
+  });
+  if (!revision) throw new CmsExecutionError("content_mismatch");
+
+  // Recomputed, not trusted. The hash on the execution is what a person
+  // approved; if the words no longer produce it, nothing is sent.
+  const recomputed = revisionHash({
+    title: revision.title,
+    slug: revision.slug,
+    excerpt: revision.excerpt,
+    bodyMarkdown: revision.bodyMarkdown,
+    metaTitle: revision.metaTitle,
+    metaDescription: revision.metaDescription,
+    schemaJson: revision.schemaJson,
+  });
+  if (recomputed !== execution.revisionHash) throw new CmsExecutionError("content_mismatch");
+
+  if (execution.targetEntityType === null) throw new CmsExecutionError("target_invalid");
+
+  return {
+    entityType: execution.targetEntityType,
+    title: revision.title,
+    slug: revision.slug,
+    // The one deterministic conversion, already used for previews. No model is
+    // asked anything: the CMS receives the approved words, rendered.
+    contentHtml: renderMarkdown(revision.bodyMarkdown),
+    excerpt: revision.excerpt,
+  };
+}
+
+/** The connection, checked again, and the provider it selects. */
+async function resolveProvider(
+  context: TenantContext,
+  execution: Execution,
+  options: ExecuteOptions,
+): Promise<{ provider: CmsProvider; providerContext: ProviderContext; simulated: boolean }> {
+  const connection = await prisma.connection.findFirst({
+    where: { id: execution.connectionId, provider: "WORDPRESS", websiteId: context.website.id },
+  });
+  if (!connection) throw new CmsExecutionError("not_configured");
+  if (connection.status !== "CONNECTED") throw new CmsExecutionError("connection_disabled");
+
+  const parsed = connection.baseUrl ? parseCmsBaseUrl(connection.baseUrl) : null;
+  if (!parsed || !parsed.ok) throw new CmsExecutionError("invalid_site_url");
+
+  const policy = await prisma.publishingPolicy.findFirst({
+    where: { websiteId: context.website.id, connectionId: connection.id },
+  });
+  if (!policy) throw new CmsExecutionError("not_configured");
+  if (policy.mode === "READ_ONLY" || policy.mode === "FULL_PUBLISH") {
+    throw new CmsExecutionError("policy_denied");
+  }
+
+  if (execution.targetEntityType === null) throw new CmsExecutionError("target_invalid");
+  const capability = await prisma.connectionCapability.findFirst({
+    where: {
+      connectionId: connection.id,
+      websiteId: context.website.id,
+      capability: "CREATE_DRAFT",
+      entityType: execution.targetEntityType,
+    },
+  });
+  if (!capability?.granted) throw new CmsExecutionError("capability_missing");
+
+  const { provider } = selectProvider(connection, context.website);
+
+  // Decrypted here, at the last moment, and held only for this call.
+  const credential = await prisma.credential.findUnique({ where: { connectionId: connection.id } });
+  let username = "";
+  let applicationPassword = "";
+
+  if (provider.simulated) {
+    // The sandbox has no credential to present, and requiring one would mean
+    // storing a fake secret to satisfy a check that proves nothing.
+    username = "simulated";
+    applicationPassword = "simulated";
+  } else {
+    if (!credential) throw new CmsExecutionError("auth_required");
+    if (credential.provider !== "WORDPRESS") throw new CmsExecutionError("auth_required");
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(decryptCredential(credential.encryptedPayload));
+    } catch {
+      // A credential we cannot read is a credential we do not have. The reason
+      // is never surfaced: it would describe the shape of the plaintext.
+      throw new CmsExecutionError("auth_required");
+    }
+
+    const shape = (payload ?? {}) as { username?: unknown; applicationPassword?: unknown };
+    if (typeof shape.username !== "string" || shape.username.length === 0) {
+      throw new CmsExecutionError("auth_required");
+    }
+    if (typeof shape.applicationPassword !== "string" || shape.applicationPassword.length === 0) {
+      throw new CmsExecutionError("auth_required");
+    }
+    username = shape.username;
+    applicationPassword = shape.applicationPassword;
+  }
+
+  return {
+    provider,
+    simulated: provider.simulated,
+    providerContext: {
+      site: parsed.value,
+      credential: { username, applicationPassword },
+      transport:
+        options.transport ?? createTransport({ site: parsed.value, resolve: options.resolve }),
+    },
+  };
+}
+
+async function appendStep(
+  execution: Execution,
+  stepType: "CREATE_DRAFT" | "VERIFY_STATE" | "RECONCILE",
+  status: "SUCCEEDED" | "FAILED" | "SKIPPED",
+  startedAt: Date,
+  summary: Prisma.InputJsonObject,
+  errorCode?: ExecutionErrorCode,
+): Promise<void> {
+  await prisma.executionStep.create({
+    data: {
+      websiteId: execution.websiteId,
+      executionId: execution.id,
+      attempt: execution.attempt,
+      stepType,
+      status,
+      // Codes, ids, statuses and counts. Never a body, a credential, a header
+      // or a provider payload.
+      requestSummaryJson: summary,
+      startedAt,
+      finishedAt: new Date(),
+      errorCode: errorCode ?? null,
+      errorSummary: errorCode ? EXECUTION_ERROR_MESSAGES[errorCode] : null,
+    },
+  });
+}
+
+/**
+ * Runs one authorized execution.
+ *
+ * The execution must already be READY and must already carry everything M6.1
+ * pinned. Nothing here re-runs QA, mints an approval, or creates a second
+ * execution: those decisions were made, and this either carries them out or
+ * records why it could not.
+ */
+export async function executeCmsDraft(
+  context: TenantContext,
+  executionId: string,
+  options: ExecuteOptions = {},
+): Promise<ExecuteResult> {
+  const now = options.now ?? (() => new Date());
+
+  // --- 1. Claim it, in a transaction that ends before any provider call -----
+  const claimed = await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM execution WHERE id = ${executionId}::uuid FOR UPDATE`;
+
+    const execution = await tx.execution.findFirst({
+      where: { id: executionId, ...websiteScope(context) },
+    });
+    if (!execution) throw new CmsExecutionError("not_found");
+    if (execution.executionType !== "CREATE_CMS_DRAFT")
+      throw new CmsExecutionError("target_invalid");
+    if (execution.externalEntityId !== null) throw new CmsExecutionError("already_executed");
+    if (execution.status !== "READY") {
+      throw new CmsExecutionError(
+        execution.status === "EXECUTING" ? "execution_in_progress" : "already_executed",
+      );
+    }
+
+    return tx.execution.update({
+      where: { id: execution.id },
+      data: { status: "EXECUTING", startedAt: now(), attempt: { increment: 1 } },
+    });
+  });
+
+  const startedAt = now();
+
+  // --- everything below runs with no transaction open -----------------------
+  let payload: CreateDraftInput;
+  let provider: CmsProvider;
+  let providerContext: ProviderContext;
+  let simulated: boolean;
+
+  try {
+    payload = await buildPayload(context, claimed);
+    ({ provider, providerContext, simulated } = await resolveProvider(context, claimed, options));
+  } catch (error) {
+    // Nothing was sent: these all fail before a provider exists.
+    const code = error instanceof CmsExecutionError ? error.code : "cms_invalid_response";
+    return failBeforeSend(claimed, code, startedAt);
+  }
+
+  // --- 2. Create. One attempt, never repeated. ------------------------------
+  let created: CmsEntity;
+  try {
+    created = await provider.createDraft(providerContext, payload);
+  } catch (error) {
+    const providerError =
+      error instanceof CmsProviderError
+        ? error
+        : new CmsProviderError("cms_invalid_response", true);
+
+    await appendStep(
+      claimed,
+      "CREATE_DRAFT",
+      "FAILED",
+      startedAt,
+      {
+        provider: provider.name,
+        simulated,
+        targetEntityType: payload.entityType,
+        httpStatus: providerError.httpStatus,
+        ambiguous: providerError.ambiguous,
+      },
+      providerError.code,
+    );
+
+    // Ambiguous means WordPress may hold a draft nobody can see. The execution
+    // stays FAILED with a code M6.1 refuses to call retry-safe, so no second
+    // create can be requested until a person or a reconciliation settles it.
+    const code = providerError.ambiguous ? "create_ambiguous" : providerError.code;
+    return finishFailed(context, claimed, code);
+  }
+
+  // --- 3. Persist what exists now, before anything else can go wrong --------
+  let recorded: Execution;
+  try {
+    recorded = await prisma.$transaction(async (tx) => {
+      const updated = await tx.execution.update({
+        where: { id: claimed.id },
+        data: {
+          externalEntityId: created.externalId,
+          externalStatus: created.status,
+          externalUrl: created.url,
+          status: "SUCCEEDED",
+          completedAt: now(),
+        },
+      });
+      await recordAudit(tx, context, {
+        entityType: "Execution",
+        entityId: claimed.id,
+        action: "COMPLETE",
+        after: {
+          provider: provider.name,
+          simulated,
+          targetEntityType: payload.entityType,
+          externalEntityId: created.externalId,
+          externalStatus: created.status,
+          seoMetadata: "not_written",
+        },
+      });
+      return updated;
+    });
+  } catch {
+    // The draft exists and we could not write that down. Retrying the create
+    // would make a second one, so this is reconciliation's problem now.
+    await appendStep(
+      claimed,
+      "CREATE_DRAFT",
+      "FAILED",
+      startedAt,
+      {
+        provider: provider.name,
+        simulated,
+        persisted: false,
+      },
+      "create_ambiguous",
+    );
+    return finishFailed(context, claimed, "create_ambiguous");
+  }
+
+  await appendStep(recorded, "CREATE_DRAFT", "SUCCEEDED", startedAt, {
+    provider: provider.name,
+    simulated,
+    targetEntityType: payload.entityType,
+    externalEntityId: created.externalId,
+    externalStatus: created.status,
+    // Said plainly on the record: WordPress core has no field for these, and
+    // nothing was written to a plugin's.
+    seoMetadata: "not_written",
+  });
+
+  // --- 4. Read it back, independently of what the create call claimed -------
+  const verifyStarted = now();
+  let observed: CmsEntity;
+  try {
+    observed = await provider.getEntity(providerContext, payload.entityType, created.externalId);
+  } catch (error) {
+    const code = error instanceof CmsProviderError ? error.code : "cms_invalid_response";
+    await appendStep(
+      recorded,
+      "VERIFY_STATE",
+      "FAILED",
+      verifyStarted,
+      {
+        provider: provider.name,
+        externalEntityId: created.externalId,
+      },
+      code,
+    );
+    // The id is kept. The draft exists; we simply cannot say what it holds.
+    return finishUnverified(context, recorded, code);
+  }
+
+  // --- 5. Verify, and record every check ------------------------------------
+  return finishVerification(context, recorded, payload, observed, verifyStarted, provider.name);
+}
+
+/** A failure with no provider call made at all. */
+async function failBeforeSend(
+  execution: Execution,
+  code: ExecutionErrorCode,
+  startedAt: Date,
+): Promise<ExecuteResult> {
+  await appendStep(execution, "CREATE_DRAFT", "SKIPPED", startedAt, { sent: false }, code);
+  const updated = await prisma.execution.update({
+    where: { id: execution.id },
+    data: { status: "FAILED", errorCode: code, errorSummary: EXECUTION_ERROR_MESSAGES[code] },
+  });
+  return { execution: updated, verified: false, verifications: [] };
+}
+
+async function finishFailed(
+  context: TenantContext,
+  execution: Execution,
+  code: ExecutionErrorCode,
+): Promise<ExecuteResult> {
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.execution.update({
+      where: { id: execution.id },
+      data: { status: "FAILED", errorCode: code, errorSummary: EXECUTION_ERROR_MESSAGES[code] },
+    });
+    await recordAudit(tx, context, {
+      entityType: "Execution",
+      entityId: execution.id,
+      action: "UPDATE",
+      after: { outcome: "FAILED", code, retrySafe: isRetrySafeFailure(code) },
+    });
+    return row;
+  });
+  return { execution: updated, verified: false, verifications: [] };
+}
+
+/** Created, but nothing could be checked. The id stays; the status does not become VERIFIED. */
+async function finishUnverified(
+  context: TenantContext,
+  execution: Execution,
+  code: ExecutionErrorCode,
+): Promise<ExecuteResult> {
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.execution.update({
+      where: { id: execution.id },
+      data: { status: "VERIFYING", errorCode: code, errorSummary: EXECUTION_ERROR_MESSAGES[code] },
+    });
+    await recordAudit(tx, context, {
+      entityType: "Execution",
+      entityId: execution.id,
+      action: "VERIFY",
+      after: { outcome: "UNVERIFIED", code },
+    });
+    return row;
+  });
+  return { execution: updated, verified: false, verifications: [] };
+}
+
+/** Required checks decide VERIFIED. The slug is recorded and never decides it. */
+async function finishVerification(
+  context: TenantContext,
+  execution: Execution,
+  payload: CreateDraftInput,
+  observed: CmsEntity,
+  startedAt: Date,
+  providerName: string,
+): Promise<ExecuteResult> {
+  const content = compareContent(payload.contentHtml, observed.content);
+  const excerptSent = payload.excerpt !== null && payload.excerpt.length > 0;
+
+  const checks: {
+    type: VerificationType;
+    required: boolean;
+    passed: boolean;
+    expected: unknown;
+    observedValue: unknown;
+  }[] = [
+    {
+      type: "CMS_STATUS_DRAFT",
+      required: true,
+      passed: observed.status === "draft",
+      expected: "draft",
+      observedValue: observed.status,
+    },
+    {
+      type: "TITLE_MATCH",
+      required: true,
+      passed: compareText(payload.title, observed.title),
+      expected: { normalized: true },
+      observedValue: { matched: compareText(payload.title, observed.title) },
+    },
+    {
+      type: "CONTENT_PRESENT",
+      required: true,
+      passed: content.matches,
+      // Fingerprints and a difference kind, never the content itself.
+      expected: { fingerprint: content.expectedFingerprint },
+      observedValue: {
+        fingerprint: content.observedFingerprint,
+        difference: content.difference,
+      },
+    },
+    {
+      type: "SLUG_MATCH",
+      // WordPress legitimately rewrites a slug for uniqueness, so a difference
+      // is worth recording and is not a reason to refuse the draft.
+      required: false,
+      passed: payload.slug === null || payload.slug === observed.slug,
+      expected: payload.slug,
+      observedValue: observed.slug,
+    },
+  ];
+
+  if (excerptSent) {
+    checks.push({
+      type: "EXCERPT_MATCH",
+      required: true,
+      passed: compareText(payload.excerpt, observed.excerpt),
+      expected: { sent: true },
+      observedValue: { matched: compareText(payload.excerpt, observed.excerpt) },
+    });
+  }
+
+  const verified = checks.every((check) => !check.required || check.passed);
+
+  const updated = await prisma.$transaction(async (tx) => {
+    for (const check of checks) {
+      await tx.executionVerification.create({
+        data: {
+          websiteId: execution.websiteId,
+          executionId: execution.id,
+          attempt: execution.attempt,
+          verificationType: check.type,
+          status: check.passed ? "PASS" : "FAIL",
+          expectedValueJson: check.expected as never,
+          observedValueJson: check.observedValue as never,
+          verifiedAt: new Date(),
+          errorSummary: check.passed
+            ? null
+            : check.required
+              ? "The CMS draft does not match the approved revision."
+              : "WordPress used a different slug from the one requested.",
+        },
+      });
+    }
+
+    const row = await tx.execution.update({
+      where: { id: execution.id },
+      data: verified
+        ? { status: "VERIFIED", verifiedAt: new Date(), errorCode: null, errorSummary: null }
+        : {
+            // Stays VERIFYING with the failure on the record. The draft exists,
+            // its id is kept, and nothing creates another.
+            status: "VERIFYING",
+            errorCode: "verification_failed",
+            errorSummary: EXECUTION_ERROR_MESSAGES.verification_failed,
+          },
+    });
+
+    await recordAudit(tx, context, {
+      entityType: "Execution",
+      entityId: execution.id,
+      action: "VERIFY",
+      after: {
+        provider: providerName,
+        outcome: verified ? "VERIFIED" : "MISMATCH",
+        checks: checks.map((check) => ({
+          type: check.type,
+          required: check.required,
+          passed: check.passed,
+        })),
+      },
+    });
+
+    return row;
+  });
+
+  await appendStep(
+    execution,
+    "VERIFY_STATE",
+    verified ? "SUCCEEDED" : "FAILED",
+    startedAt,
+    {
+      provider: providerName,
+      externalEntityId: observed.externalId,
+      passed: checks.filter((check) => check.passed).length,
+      failed: checks.filter((check) => !check.passed).map((check) => check.type),
+    },
+    verified ? undefined : "verification_failed",
+  );
+
+  return {
+    execution: updated,
+    verified,
+    verifications: checks.map((check) => ({
+      type: check.type,
+      status: (check.passed ? "PASS" : "FAIL") as ExecutionVerificationStatus,
+    })),
+  };
+}
+
+export type ReconcileResult =
+  | { outcome: "ATTACHED"; execution: Execution }
+  | { outcome: "AMBIGUOUS"; candidates: number }
+  | { outcome: "ABSENT" };
+
+/**
+ * Looks for a draft an ambiguous attempt may have created.
+ *
+ * The foundation only: it searches, it compares, and it attaches when exactly
+ * one candidate matches the approved content completely. Everything else stays
+ * ambiguous, because a best guess here attaches this website's execution to
+ * whatever draft happened to look closest.
+ *
+ * A search that finds nothing may only be called absent when the search itself
+ * succeeded; a failed query proves nothing and leaves the execution as it was.
+ */
+export async function reconcileCmsDraft(
+  context: TenantContext,
+  executionId: string,
+  options: ExecuteOptions = {},
+): Promise<ReconcileResult> {
+  const execution = await prisma.execution.findFirst({
+    where: { id: executionId, ...websiteScope(context) },
+  });
+  if (!execution) throw new CmsExecutionError("not_found");
+  if (execution.externalEntityId !== null) throw new CmsExecutionError("already_executed");
+
+  const payload = await buildPayload(context, execution);
+  const { provider, providerContext } = await resolveProvider(context, execution, options);
+
+  const startedAt = execution.startedAt ?? execution.createdAt;
+  const candidates = await provider.reconcileCreate(providerContext, payload, {
+    after: new Date(startedAt.getTime() - 60_000),
+    before: new Date(startedAt.getTime() + 15 * 60_000),
+  });
+
+  const strong = candidates.filter(
+    (candidate) =>
+      candidate.entity.status === "draft" &&
+      compareText(payload.title, candidate.entity.title) &&
+      compareContent(payload.contentHtml, candidate.entity.content).matches &&
+      (payload.excerpt === null || compareText(payload.excerpt, candidate.entity.excerpt)),
+  );
+
+  await appendStep(execution, "RECONCILE", "SUCCEEDED", new Date(), {
+    provider: provider.name,
+    candidates: candidates.length,
+    strongMatches: strong.length,
+  });
+
+  if (strong.length === 1) {
+    const entity = strong[0]!.entity;
+    const updated = await prisma.execution.update({
+      where: { id: execution.id },
+      data: {
+        externalEntityId: entity.externalId,
+        externalStatus: entity.status,
+        externalUrl: entity.url,
+        status: "SUCCEEDED",
+        errorCode: null,
+        errorSummary: null,
+      },
+    });
+    return { outcome: "ATTACHED", execution: updated };
+  }
+
+  if (strong.length > 1) return { outcome: "AMBIGUOUS", candidates: strong.length };
+
+  if (candidates.length === 0) {
+    // The search ran and found nothing, so nothing was created and another
+    // attempt is safe. That is recorded as a code M6.1 recognises.
+    await prisma.execution.update({
+      where: { id: execution.id },
+      data: {
+        status: "FAILED",
+        errorCode: "reconciled_absent",
+        errorSummary: EXECUTION_ERROR_MESSAGES.reconciled_absent,
+      },
+    });
+    return { outcome: "ABSENT" };
+  }
+
+  return { outcome: "AMBIGUOUS", candidates: candidates.length };
+}

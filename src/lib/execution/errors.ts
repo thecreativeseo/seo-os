@@ -31,6 +31,18 @@ export const EXECUTION_ERROR_CODES = [
   "execution_cancelled",
   "ambiguous_timeout",
   "reconciled_absent",
+  // M6.2. What a provider call can come back as. Named for the condition
+  // rather than the remedy, because the remedy differs by whether the CMS
+  // was reached and whether it did anything.
+  "auth_required",
+  "target_invalid",
+  "cms_unreachable",
+  "cms_permission_denied",
+  "cms_client_error",
+  "cms_server_error",
+  "cms_invalid_response",
+  "create_ambiguous",
+  "entity_not_found",
 ] as const;
 
 export type ExecutionErrorCode = (typeof EXECUTION_ERROR_CODES)[number];
@@ -58,6 +70,15 @@ export const EXECUTION_ERROR_MESSAGES: Record<ExecutionErrorCode, string> = {
   execution_cancelled: "This CMS action was cancelled and cannot be run again.",
   ambiguous_timeout: "We could not tell whether the CMS created this. It needs reconciling.",
   reconciled_absent: "We checked the CMS and it created nothing, so this is safe to try again.",
+  auth_required: "The CMS connection has no usable credentials.",
+  target_invalid: "The CMS does not offer that kind of content here.",
+  cms_unreachable: "The CMS could not be reached, and nothing was sent.",
+  cms_permission_denied: "The connected CMS user is not allowed to create this.",
+  cms_client_error: "The CMS refused the request.",
+  cms_server_error: "The CMS failed while handling the request.",
+  cms_invalid_response: "The CMS answered in a form we did not recognise.",
+  create_ambiguous: "We could not tell whether the CMS created this. It needs reconciling.",
+  entity_not_found: "The CMS no longer holds the item this execution created.",
 };
 
 /**
@@ -82,6 +103,14 @@ export const RETRY_SAFE_FAILURE_CODES: readonly ExecutionErrorCode[] = [
   "connection_disabled",
   "invalid_site_url",
   "reconciled_absent",
+  // M6.2. Each of these is a refusal, not an attempt: either nothing was
+  // sent, or the CMS declined before it could create anything. A 5xx, a
+  // client error we could not classify, an unreadable answer and a timeout
+  // are all absent from this list on purpose.
+  "auth_required",
+  "target_invalid",
+  "cms_unreachable",
+  "cms_permission_denied",
 ];
 
 /**
