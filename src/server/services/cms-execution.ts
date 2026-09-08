@@ -1,18 +1,16 @@
 import { prisma } from "@/server/db/prisma";
 import { recordAudit } from "@/server/audit/record";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
-import { decryptCredential } from "@/server/crypto/credentials";
 import { revisionHash } from "@/lib/execution/hash";
 import { renderMarkdown } from "@/lib/content/markdown";
-import { parseCmsBaseUrl } from "@/lib/cms/url";
 import { compareContent, compareText } from "@/lib/cms/content";
 import {
   EXECUTION_ERROR_MESSAGES,
   isRetrySafeFailure,
   type ExecutionErrorCode,
 } from "@/lib/execution/errors";
-import { selectProvider } from "@/server/connectors/wordpress/registry";
-import { createTransport } from "@/server/connectors/wordpress/transport";
+import { EXECUTION_TRANSITIONS, canTransition } from "@/lib/execution/statuses";
+import { buildProviderContext, loadWordPressConnection } from "@/server/services/cms-connection";
 import {
   CmsProviderError,
   type CmsEntity,
@@ -24,6 +22,7 @@ import {
 import { Prisma } from "@/generated/prisma/client";
 import type {
   Execution,
+  ExecutionStatus,
   ExecutionVerificationStatus,
   VerificationType,
 } from "@/generated/prisma/client";
@@ -51,6 +50,20 @@ import type {
  * The create call is never retried. Not here, not in the transport, not by any
  * wrapper. Where the outcome is unknown the execution says so and stops.
  */
+
+/**
+ * The code behind a refusal, whichever layer refused.
+ *
+ * The connection layer answers with a CmsProviderError and this one with a
+ * CmsExecutionError; both carry a code from the same table, and it is the code
+ * a person reads. Anything else is genuinely unexpected and is recorded as an
+ * answer we could not make sense of.
+ */
+function refusalCode(error: unknown): ExecutionErrorCode {
+  if (error instanceof CmsExecutionError) return error.code;
+  if (error instanceof CmsProviderError) return error.code;
+  return "cms_invalid_response";
+}
 
 export class CmsExecutionError extends Error {
   constructor(
@@ -118,14 +131,11 @@ async function resolveProvider(
   execution: Execution,
   options: ExecuteOptions,
 ): Promise<{ provider: CmsProvider; providerContext: ProviderContext; simulated: boolean }> {
-  const connection = await prisma.connection.findFirst({
-    where: { id: execution.connectionId, provider: "WORDPRESS", websiteId: context.website.id },
-  });
-  if (!connection) throw new CmsExecutionError("not_configured");
-  if (connection.status !== "CONNECTED") throw new CmsExecutionError("connection_disabled");
-
-  const parsed = connection.baseUrl ? parseCmsBaseUrl(connection.baseUrl) : null;
-  if (!parsed || !parsed.ok) throw new CmsExecutionError("invalid_site_url");
+  // Provider, status, base URL and credential shape are the connection's own
+  // business and are checked there. What is left here is what this execution
+  // needs to be true: the policy it will run under, and the exact capability
+  // for the exact kind of thing it is about to create.
+  const { connection, site } = await loadWordPressConnection(context, execution.connectionId);
 
   const policy = await prisma.publishingPolicy.findFirst({
     where: { websiteId: context.website.id, connectionId: connection.id },
@@ -146,52 +156,28 @@ async function resolveProvider(
   });
   if (!capability?.granted) throw new CmsExecutionError("capability_missing");
 
-  const { provider } = selectProvider(connection, context.website);
+  return buildProviderContext(context, connection, site, options);
+}
 
-  // Decrypted here, at the last moment, and held only for this call.
-  const credential = await prisma.credential.findUnique({ where: { connectionId: connection.id } });
-  let username = "";
-  let applicationPassword = "";
-
-  if (provider.simulated) {
-    // The sandbox has no credential to present, and requiring one would mean
-    // storing a fake secret to satisfy a check that proves nothing.
-    username = "simulated";
-    applicationPassword = "simulated";
-  } else {
-    if (!credential) throw new CmsExecutionError("auth_required");
-    if (credential.provider !== "WORDPRESS") throw new CmsExecutionError("auth_required");
-
-    let payload: unknown;
-    try {
-      payload = JSON.parse(decryptCredential(credential.encryptedPayload));
-    } catch {
-      // A credential we cannot read is a credential we do not have. The reason
-      // is never surfaced: it would describe the shape of the plaintext.
-      throw new CmsExecutionError("auth_required");
-    }
-
-    const shape = (payload ?? {}) as { username?: unknown; applicationPassword?: unknown };
-    if (typeof shape.username !== "string" || shape.username.length === 0) {
-      throw new CmsExecutionError("auth_required");
-    }
-    if (typeof shape.applicationPassword !== "string" || shape.applicationPassword.length === 0) {
-      throw new CmsExecutionError("auth_required");
-    }
-    username = shape.username;
-    applicationPassword = shape.applicationPassword;
+/**
+ * Moves an execution, refusing a move the state machine does not have.
+ *
+ * The table in lib/execution/statuses is the machine; this is the only place
+ * in M6.2 that writes an execution's status, so a transition nobody wrote
+ * down cannot be introduced by a later edit here. Verification therefore goes
+ * SUCCEEDED to VERIFYING to VERIFIED rather than jumping, which is also the
+ * honest sequence: the checks ran, and then they passed.
+ */
+async function moveExecution(
+  tx: Prisma.TransactionClient,
+  execution: Execution,
+  to: ExecutionStatus,
+  data: Prisma.ExecutionUpdateInput = {},
+): Promise<Execution> {
+  if (execution.status !== to && !canTransition(EXECUTION_TRANSITIONS, execution.status, to)) {
+    throw new CmsExecutionError("already_executed");
   }
-
-  return {
-    provider,
-    simulated: provider.simulated,
-    providerContext: {
-      site: parsed.value,
-      credential: { username, applicationPassword },
-      transport:
-        options.transport ?? createTransport({ site: parsed.value, resolve: options.resolve }),
-    },
-  };
+  return tx.execution.update({ where: { id: execution.id }, data: { ...data, status: to } });
 }
 
 async function appendStep(
@@ -270,9 +256,9 @@ export async function executeCmsDraft(
     payload = await buildPayload(context, claimed);
     ({ provider, providerContext, simulated } = await resolveProvider(context, claimed, options));
   } catch (error) {
-    // Nothing was sent: these all fail before a provider exists.
-    const code = error instanceof CmsExecutionError ? error.code : "cms_invalid_response";
-    return failBeforeSend(claimed, code, startedAt);
+    // Nothing was sent: these all fail before a provider exists. Both error
+    // classes speak the same vocabulary, and the code is the point.
+    return failBeforeSend(claimed, refusalCode(error), startedAt);
   }
 
   // --- 2. Create. One attempt, never repeated. ------------------------------
@@ -398,10 +384,12 @@ async function failBeforeSend(
   startedAt: Date,
 ): Promise<ExecuteResult> {
   await appendStep(execution, "CREATE_DRAFT", "SKIPPED", startedAt, { sent: false }, code);
-  const updated = await prisma.execution.update({
-    where: { id: execution.id },
-    data: { status: "FAILED", errorCode: code, errorSummary: EXECUTION_ERROR_MESSAGES[code] },
-  });
+  const updated = await prisma.$transaction((tx) =>
+    moveExecution(tx, execution, "FAILED", {
+      errorCode: code,
+      errorSummary: EXECUTION_ERROR_MESSAGES[code],
+    }),
+  );
   return { execution: updated, verified: false, verifications: [] };
 }
 
@@ -411,9 +399,9 @@ async function finishFailed(
   code: ExecutionErrorCode,
 ): Promise<ExecuteResult> {
   const updated = await prisma.$transaction(async (tx) => {
-    const row = await tx.execution.update({
-      where: { id: execution.id },
-      data: { status: "FAILED", errorCode: code, errorSummary: EXECUTION_ERROR_MESSAGES[code] },
+    const row = await moveExecution(tx, execution, "FAILED", {
+      errorCode: code,
+      errorSummary: EXECUTION_ERROR_MESSAGES[code],
     });
     await recordAudit(tx, context, {
       entityType: "Execution",
@@ -433,9 +421,9 @@ async function finishUnverified(
   code: ExecutionErrorCode,
 ): Promise<ExecuteResult> {
   const updated = await prisma.$transaction(async (tx) => {
-    const row = await tx.execution.update({
-      where: { id: execution.id },
-      data: { status: "VERIFYING", errorCode: code, errorSummary: EXECUTION_ERROR_MESSAGES[code] },
+    const row = await moveExecution(tx, execution, "VERIFYING", {
+      errorCode: code,
+      errorSummary: EXECUTION_ERROR_MESSAGES[code],
     });
     await recordAudit(tx, context, {
       entityType: "Execution",
@@ -536,18 +524,18 @@ async function finishVerification(
       });
     }
 
-    const row = await tx.execution.update({
-      where: { id: execution.id },
-      data: verified
-        ? { status: "VERIFIED", verifiedAt: new Date(), errorCode: null, errorSummary: null }
-        : {
-            // Stays VERIFYING with the failure on the record. The draft exists,
-            // its id is kept, and nothing creates another.
-            status: "VERIFYING",
-            errorCode: "verification_failed",
-            errorSummary: EXECUTION_ERROR_MESSAGES.verification_failed,
-          },
+    // The checks ran, so the execution is VERIFYING whatever they found.
+    const verifying = await moveExecution(tx, execution, "VERIFYING", {
+      errorCode: verified ? null : "verification_failed",
+      errorSummary: verified ? null : EXECUTION_ERROR_MESSAGES.verification_failed,
     });
+
+    // And only then, if every required check passed, VERIFIED. A failure stays
+    // at VERIFYING with the reason on the record: the draft exists, its id is
+    // kept, and nothing creates another.
+    const row = verified
+      ? await moveExecution(tx, verifying, "VERIFIED", { verifiedAt: new Date() })
+      : verifying;
 
     await recordAudit(tx, context, {
       entityType: "Execution",
@@ -617,11 +605,18 @@ export async function reconcileCmsDraft(
   });
   if (!execution) throw new CmsExecutionError("not_found");
   if (execution.externalEntityId !== null) throw new CmsExecutionError("already_executed");
+  // Only an attempt whose outcome could not be observed is reconciled. A READY
+  // execution has not been tried, and searching a CMS for a draft nobody sent
+  // could attach one somebody else made.
+  if (execution.status !== "FAILED" || isRetrySafeFailure(execution.errorCode)) {
+    throw new CmsExecutionError("already_executed");
+  }
 
   const payload = await buildPayload(context, execution);
   const { provider, providerContext } = await resolveProvider(context, execution, options);
 
   const startedAt = execution.startedAt ?? execution.createdAt;
+  const startedSearch = new Date();
   const candidates = await provider.reconcileCreate(providerContext, payload, {
     after: new Date(startedAt.getTime() - 60_000),
     before: new Date(startedAt.getTime() + 15 * 60_000),
@@ -635,24 +630,38 @@ export async function reconcileCmsDraft(
       (payload.excerpt === null || compareText(payload.excerpt, candidate.entity.excerpt)),
   );
 
-  await appendStep(execution, "RECONCILE", "SUCCEEDED", new Date(), {
+  // Exactly one candidate matching the whole approved revision, or nothing is
+  // attached. Closest is not a match.
+  const resolved = strong.length === 1;
+
+  await appendStep(execution, "RECONCILE", resolved ? "SUCCEEDED" : "FAILED", startedSearch, {
     provider: provider.name,
     candidates: candidates.length,
     strongMatches: strong.length,
   });
 
-  if (strong.length === 1) {
+  if (resolved) {
     const entity = strong[0]!.entity;
-    const updated = await prisma.execution.update({
-      where: { id: execution.id },
-      data: {
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await moveExecution(tx, execution, "SUCCEEDED", {
         externalEntityId: entity.externalId,
         externalStatus: entity.status,
         externalUrl: entity.url,
-        status: "SUCCEEDED",
         errorCode: null,
         errorSummary: null,
-      },
+      });
+      await recordAudit(tx, context, {
+        entityType: "Execution",
+        entityId: execution.id,
+        action: "UPDATE",
+        after: {
+          provider: provider.name,
+          outcome: "RECONCILED",
+          externalEntityId: entity.externalId,
+          externalStatus: entity.status,
+        },
+      });
+      return row;
     });
     return { outcome: "ATTACHED", execution: updated };
   }
@@ -660,12 +669,12 @@ export async function reconcileCmsDraft(
   if (strong.length > 1) return { outcome: "AMBIGUOUS", candidates: strong.length };
 
   if (candidates.length === 0) {
-    // The search ran and found nothing, so nothing was created and another
-    // attempt is safe. That is recorded as a code M6.1 recognises.
+    // The search ran, completely, and found nothing. Only that proves absence,
+    // and only then is another attempt safe. The status does not move — it is
+    // already FAILED — but the code now says we went and looked.
     await prisma.execution.update({
       where: { id: execution.id },
       data: {
-        status: "FAILED",
         errorCode: "reconciled_absent",
         errorSummary: EXECUTION_ERROR_MESSAGES.reconciled_absent,
       },

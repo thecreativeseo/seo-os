@@ -113,6 +113,11 @@ export const REVIEW_TRANSITIONS: Transitions<ContentDraftReviewStatus> = {
  * check keeps it there, with the issue open, until a later attempt passes or
  * a person resolves it (D5). ROLLED_BACK is a manual operation for a later
  * phase; P4 ships no automatic rollback.
+ *
+ * FAILED to SUCCEEDED is reconciliation's edge (M6.2, §21). An attempt whose
+ * outcome could not be observed rests at FAILED, blocking any second create.
+ * When a search later proves the CMS did hold exactly one matching draft, the
+ * execution did succeed and says so; nothing else may make that move.
  */
 export const EXECUTION_TRANSITIONS: Transitions<ExecutionStatus> = {
   PROPOSED: ["READY", "CANCELLED"],
@@ -123,7 +128,7 @@ export const EXECUTION_TRANSITIONS: Transitions<ExecutionStatus> = {
   SUCCEEDED: ["VERIFYING"],
   VERIFYING: ["VERIFIED"],
   VERIFIED: ["ROLLED_BACK"],
-  FAILED: ["READY", "APPROVED", "CANCELLED"],
+  FAILED: ["READY", "APPROVED", "CANCELLED", "SUCCEEDED"],
   CANCELLED: [],
   ROLLED_BACK: [],
 };

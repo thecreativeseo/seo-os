@@ -57,11 +57,21 @@ function headers(context: ProviderContext, json: boolean): Record<string, string
   };
 }
 
-/** Maps an HTTP status to our vocabulary. The body is never read for meaning. */
-function statusCode(status: number): CmsProviderError {
+/**
+ * Maps an HTTP status to our vocabulary. The body is never read for meaning.
+ *
+ * 404 means two different things by method. Asked for one entity, it is gone.
+ * Answering a create, it is the REST route that is missing — the API disabled,
+ * or a base URL pointing at something that is not this WordPress — and calling
+ * that "entity not found" would send someone looking for a post that was never
+ * asked for.
+ */
+function statusCode(status: number, mutating: boolean): CmsProviderError {
   if (status === 401) return new CmsProviderError("auth_required", false, status);
   if (status === 403) return new CmsProviderError("cms_permission_denied", false, status);
-  if (status === 404) return new CmsProviderError("entity_not_found", false, status);
+  if (status === 404) {
+    return new CmsProviderError(mutating ? "cms_client_error" : "entity_not_found", false, status);
+  }
   if (status === 429) return new CmsProviderError("rate_limited", false, status);
   if (status >= 500) return new CmsProviderError("cms_server_error", false, status);
   return new CmsProviderError("cms_client_error", false, status);
@@ -86,7 +96,7 @@ async function send(
   }
 
   if (result.status < 200 || result.status >= 300) {
-    const error = statusCode(result.status);
+    const error = statusCode(result.status, request.mutating);
     // A 5xx answer to a create is ambiguous: WordPress may have written the row
     // and failed afterwards.
     throw new CmsProviderError(error.code, request.mutating && result.status >= 500, result.status);
@@ -234,14 +244,12 @@ export class WordPressProvider implements CmsProvider {
       mutating: true,
     });
 
-    const entity = readEntity(payload);
-    if (entity.status !== "draft") {
-      // WordPress answered with something other than a draft. The entity exists,
-      // so this is not a clean failure; the caller keeps the id and records the
-      // mismatch rather than trying again.
-      throw new CmsProviderError("verification_failed", true);
-    }
-    return entity;
+    // Returned as WordPress described it, including a status that is not the
+    // draft we asked for. That is a verification failure and not a create
+    // failure: the entity exists and has an id, and losing the id here would
+    // leave a real post nothing points at. The caller persists it and records
+    // CMS_STATUS_DRAFT as failed.
+    return readEntity(payload);
   }
 
   async getEntity(
