@@ -851,7 +851,17 @@ describe("the real queue: round trip and the liveness rule", () => {
     expect(refreshed.latestDataDate?.toISOString().slice(0, 10)).toBe(day);
 
     // Done: nothing is pending for this connection any more, and nothing is live.
-    expect(await pendingHere(context.website.id, GSC)).toBeNull();
+    // The run reaches SUCCEEDED inside the handler, so the job is still active
+    // for the moment it takes pg-boss to record its own completion. Waited for
+    // rather than asserted instantly, which was a race.
+    const settled = Date.now() + 15_000;
+    let pending = await pendingHere(context.website.id, GSC);
+    while (pending !== null && Date.now() < settled) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      pending = await pendingHere(context.website.id, GSC);
+    }
+
+    expect(pending).toBeNull();
     expect(await hasLiveSyncJob(context.website.id, GSC, new Date(), { schema })).toBe(false);
   }, 60_000);
 });

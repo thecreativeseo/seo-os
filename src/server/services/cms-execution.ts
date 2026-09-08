@@ -125,11 +125,23 @@ async function buildPayload(
   };
 }
 
+/**
+ * What a provider call needs to be true before it is made.
+ *
+ * "create" is the full gate: a policy that permits drafts, and the exact
+ * CREATE_DRAFT capability for the exact kind of thing about to be created.
+ * "read" is what reconciliation and re-verification need — READ_CONTENT, and
+ * no policy gate, because reading a draft back is not writing to a CMS. A site
+ * switched to read-only can still be asked what it holds.
+ */
+type ProviderNeed = "create" | "read";
+
 /** The connection, checked again, and the provider it selects. */
 async function resolveProvider(
   context: TenantContext,
   execution: Execution,
   options: ExecuteOptions,
+  need: ProviderNeed = "create",
 ): Promise<{ provider: CmsProvider; providerContext: ProviderContext; simulated: boolean }> {
   // Provider, status, base URL and credential shape are the connection's own
   // business and are checked there. What is left here is what this execution
@@ -137,21 +149,26 @@ async function resolveProvider(
   // for the exact kind of thing it is about to create.
   const { connection, site } = await loadWordPressConnection(context, execution.connectionId);
 
-  const policy = await prisma.publishingPolicy.findFirst({
-    where: { websiteId: context.website.id, connectionId: connection.id },
-  });
-  if (!policy) throw new CmsExecutionError("not_configured");
-  if (policy.mode === "READ_ONLY" || policy.mode === "FULL_PUBLISH") {
-    throw new CmsExecutionError("policy_denied");
+  if (execution.targetEntityType === null) throw new CmsExecutionError("target_invalid");
+
+  if (need === "create") {
+    const policy = await prisma.publishingPolicy.findFirst({
+      where: { websiteId: context.website.id, connectionId: connection.id },
+    });
+    if (!policy) throw new CmsExecutionError("not_configured");
+    if (policy.mode === "READ_ONLY" || policy.mode === "FULL_PUBLISH") {
+      throw new CmsExecutionError("policy_denied");
+    }
   }
 
-  if (execution.targetEntityType === null) throw new CmsExecutionError("target_invalid");
+  // Asked of the connection as it is now, never inferred from the fact that an
+  // earlier attempt succeeded.
   const capability = await prisma.connectionCapability.findFirst({
     where: {
       connectionId: connection.id,
       websiteId: context.website.id,
-      capability: "CREATE_DRAFT",
-      entityType: execution.targetEntityType,
+      capability: need === "create" ? "CREATE_DRAFT" : "READ_CONTENT",
+      entityType: need === "create" ? execution.targetEntityType : null,
     },
   });
   if (!capability?.granted) throw new CmsExecutionError("capability_missing");
@@ -240,7 +257,14 @@ export async function executeCmsDraft(
 
     return tx.execution.update({
       where: { id: execution.id },
-      data: { status: "EXECUTING", startedAt: now(), attempt: { increment: 1 } },
+      data: {
+        status: "EXECUTING",
+        startedAt: now(),
+        attempt: { increment: 1 },
+        // The person this ran for. Recorded here so every path that executes
+        // answers "who" without the caller having to remember to say.
+        executedByUserId: context.user.id,
+      },
     });
   });
 
@@ -579,9 +603,99 @@ async function finishVerification(
   };
 }
 
+/**
+ * How long an EXECUTING execution may sit before it is treated as abandoned.
+ *
+ * A create is one HTTP call with a 30-second ceiling, so a row still EXECUTING
+ * long after that belongs to a process that is gone. Being abandoned is not
+ * evidence that nothing was created — it is the reason to go and look.
+ */
+export const STALE_EXECUTION_MINUTES = 15;
+
+/**
+ * Whether an attempt's outcome is genuinely unknown, and so worth searching for.
+ *
+ * Two shapes qualify. A failure that does not prove the CMS was left untouched,
+ * which is what M6.2 records for an ambiguous create. And an EXECUTING row old
+ * enough that the process holding it has died: it is never reset to READY and
+ * never retried blindly, because a draft may exist that nobody can see.
+ */
+export function isUnresolved(
+  execution: Pick<Execution, "status" | "errorCode" | "startedAt" | "createdAt">,
+  now: Date = new Date(),
+): boolean {
+  if (execution.status === "FAILED") return !isRetrySafeFailure(execution.errorCode);
+  if (execution.status !== "EXECUTING") return false;
+
+  const startedAt = execution.startedAt ?? execution.createdAt;
+  return now.getTime() - startedAt.getTime() >= STALE_EXECUTION_MINUTES * 60_000;
+}
+
+/**
+ * Looks at a draft SEO OS already created, and says whether it still matches.
+ *
+ * Read only, and deliberately so. It sends a GET, compares what comes back
+ * against the approved revision, and writes verification rows. It never
+ * creates, never updates and never publishes: if somebody has edited the draft
+ * in WordPress, the answer is a recorded mismatch, not a correction. The
+ * approved revision stays the evidence of what was authorized.
+ *
+ * Useful when an earlier read-back could not be made, when it found a
+ * difference somebody has since dealt with, or simply to ask again.
+ */
+export async function reverifyCmsDraft(
+  context: TenantContext,
+  executionId: string,
+  options: ExecuteOptions = {},
+): Promise<ExecuteResult> {
+  const execution = await prisma.execution.findFirst({
+    where: { id: executionId, ...websiteScope(context) },
+  });
+  if (!execution) throw new CmsExecutionError("not_found");
+  if (execution.executionType !== "CREATE_CMS_DRAFT") {
+    throw new CmsExecutionError("target_invalid");
+  }
+  // Nothing to look at. This is for drafts that exist.
+  if (execution.externalEntityId === null || execution.targetEntityType === null) {
+    throw new CmsExecutionError("not_found");
+  }
+
+  // The approved revision, recomputed and re-checked, is what the CMS is
+  // compared against — not whatever it happens to hold now.
+  const payload = await buildPayload(context, execution);
+  const { provider, providerContext } = await resolveProvider(context, execution, options, "read");
+
+  const startedAt = options.now?.() ?? new Date();
+  let observed: CmsEntity;
+
+  try {
+    observed = await provider.getEntity(
+      providerContext,
+      execution.targetEntityType,
+      execution.externalEntityId,
+    );
+  } catch (error) {
+    const code = refusalCode(error);
+    await appendStep(
+      execution,
+      "VERIFY_STATE",
+      "FAILED",
+      startedAt,
+      { provider: provider.name, externalEntityId: execution.externalEntityId, reverify: true },
+      code,
+    );
+    // The draft is still there as far as we know; we simply could not read it.
+    return finishUnverified(context, execution, code);
+  }
+
+  return finishVerification(context, execution, payload, observed, startedAt, provider.name);
+}
+
 export type ReconcileResult =
   | { outcome: "ATTACHED"; execution: Execution }
   | { outcome: "AMBIGUOUS"; candidates: number }
+  /** The search could not be completed, so it proves nothing either way. */
+  | { outcome: "SEARCH_FAILED"; code: ExecutionErrorCode }
   | { outcome: "ABSENT" };
 
 /**
@@ -608,7 +722,7 @@ export async function reconcileCmsDraft(
   // Only an attempt whose outcome could not be observed is reconciled. A READY
   // execution has not been tried, and searching a CMS for a draft nobody sent
   // could attach one somebody else made.
-  if (execution.status !== "FAILED" || isRetrySafeFailure(execution.errorCode)) {
+  if (!isUnresolved(execution, options.now?.() ?? new Date())) {
     throw new CmsExecutionError("already_executed");
   }
 
@@ -617,10 +731,31 @@ export async function reconcileCmsDraft(
 
   const startedAt = execution.startedAt ?? execution.createdAt;
   const startedSearch = new Date();
-  const candidates = await provider.reconcileCreate(providerContext, payload, {
-    after: new Date(startedAt.getTime() - 60_000),
-    before: new Date(startedAt.getTime() + 15 * 60_000),
-  });
+
+  // A search that fails proves nothing. It is not absence, and it is not a
+  // match: the attempt stays exactly as unresolved as it was, and nothing
+  // becomes retry-safe on the strength of a question we could not ask.
+  let candidates;
+  try {
+    candidates = await provider.reconcileCreate(providerContext, payload, {
+      after: new Date(startedAt.getTime() - 60_000),
+      before: new Date(startedAt.getTime() + 15 * 60_000),
+    });
+  } catch (error) {
+    const code = refusalCode(error);
+    await appendStep(
+      execution,
+      "RECONCILE",
+      "FAILED",
+      startedSearch,
+      {
+        provider: provider.name,
+        searched: false,
+      },
+      code,
+    );
+    return { outcome: "SEARCH_FAILED", code };
+  }
 
   const strong = candidates.filter(
     (candidate) =>
@@ -670,15 +805,15 @@ export async function reconcileCmsDraft(
 
   if (candidates.length === 0) {
     // The search ran, completely, and found nothing. Only that proves absence,
-    // and only then is another attempt safe. The status does not move — it is
-    // already FAILED — but the code now says we went and looked.
-    await prisma.execution.update({
-      where: { id: execution.id },
-      data: {
+    // and only then is another attempt safe. An abandoned EXECUTING row moves
+    // to FAILED to say so; one that was already FAILED only gains the code.
+    // Nothing is re-sent here: a person has to ask again.
+    await prisma.$transaction((tx) =>
+      moveExecution(tx, execution, "FAILED", {
         errorCode: "reconciled_absent",
         errorSummary: EXECUTION_ERROR_MESSAGES.reconciled_absent,
-      },
-    });
+      }),
+    );
     return { outcome: "ABSENT" };
   }
 

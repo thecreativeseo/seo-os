@@ -7,6 +7,12 @@ import { encryptCredential } from "@/server/crypto/credentials";
 import { getExecution, requestCmsDraftExecution } from "@/server/services/execution";
 import { executeCmsDraft, reconcileCmsDraft } from "@/server/services/cms-execution";
 import { testCmsConnection } from "@/server/services/cms-connection";
+import {
+  CREATE_WORDPRESS_DRAFT,
+  requestCreateWordPressDraft,
+  requestReconcileWordPressDraft,
+  requestReverifyWordPressDraft,
+} from "@/server/services/cms-draft-request";
 import type {
   CmsRequest,
   CmsTransport,
@@ -327,5 +333,98 @@ describe("the application password", () => {
     );
     expect(recorded).not.toContain(OWNER_PASSWORD);
     expect(recorded).not.toContain("incorrect_password");
+  }, 120_000);
+});
+
+describe("the three human actions, aimed at another tenant's work", () => {
+  /** A transport that fails loudly: none of these may reach a CMS at all. */
+  const forbidden = () =>
+    recording(() => {
+      throw new Error("no CMS call may be made for another tenant");
+    });
+
+  it("refuse to create against the owner's work item", async () => {
+    const cms = forbidden();
+    const before = await prisma.execution.count({
+      where: { contentWorkItemId: owner.item.id },
+    });
+
+    const result = await requestCreateWordPressDraft(
+      attacker,
+      {
+        contentWorkItemId: owner.item.id,
+        targetEntityType: "POST",
+        confirmation: CREATE_WORDPRESS_DRAFT,
+      },
+      { transport: cms.transport },
+    );
+
+    expect(result.outcome).toBe("REFUSED");
+    expect(result.code).toBe("not_found");
+    expect(result.executionId).toBeNull();
+    expect(cms.sent).toHaveLength(0);
+
+    // Nothing was written for either tenant: the owner's history is exactly as
+    // it was, and the attacker gained no execution of its own.
+    expect(await prisma.execution.count({ where: { contentWorkItemId: owner.item.id } })).toBe(
+      before,
+    );
+    expect(await prisma.execution.count({ where: { websiteId: attacker.website.id } })).toBe(0);
+  }, 60_000);
+
+  it("refuse to reconcile and to re-verify against it", async () => {
+    const cms = forbidden();
+    const aimed = { contentWorkItemId: owner.item.id };
+
+    const reconciled = await requestReconcileWordPressDraft(attacker, aimed, {
+      transport: cms.transport,
+    });
+    const rechecked = await requestReverifyWordPressDraft(attacker, aimed, {
+      transport: cms.transport,
+    });
+
+    expect(reconciled.outcome).toBe("REFUSED");
+    expect(rechecked.outcome).toBe("REFUSED");
+    expect(cms.sent).toHaveLength(0);
+  }, 60_000);
+
+  it("tell an attacker nothing about what exists", async () => {
+    const cms = forbidden();
+    const invented = "00000000-0000-4000-8000-0000000000ff";
+
+    const real = await requestReverifyWordPressDraft(
+      attacker,
+      { contentWorkItemId: owner.item.id },
+      { transport: cms.transport },
+    );
+    const imaginary = await requestReverifyWordPressDraft(
+      attacker,
+      { contentWorkItemId: invented },
+      { transport: cms.transport },
+    );
+
+    // A work item that exists and one that never did answer identically, so
+    // the refusal cannot be used to enumerate another tenant's work.
+    expect(real).toEqual(imaginary);
+    expect(cms.sent).toHaveLength(0);
+  }, 60_000);
+
+  it("cannot reach a draft the owner really has", async () => {
+    const execution = await freshExecution();
+    const created = await executeCmsDraft(owner.lead, execution.id, {
+      transport: faithfulCms().transport,
+    });
+    expect(created.execution.externalEntityId).toBe("41");
+
+    const cms = forbidden();
+    const result = await requestReverifyWordPressDraft(
+      attacker,
+      { contentWorkItemId: owner.item.id },
+      { transport: cms.transport },
+    );
+
+    expect(result.outcome).toBe("REFUSED");
+    expect(result.executionId).toBeNull();
+    expect(cms.sent).toHaveLength(0);
   }, 120_000);
 });

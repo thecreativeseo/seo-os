@@ -127,7 +127,11 @@ export const EXECUTION_TRANSITIONS: Transitions<ExecutionStatus> = {
   EXECUTING: ["SUCCEEDED", "FAILED"],
   SUCCEEDED: ["VERIFYING"],
   VERIFYING: ["VERIFIED"],
-  VERIFIED: ["ROLLED_BACK"],
+  // Back to VERIFYING when a person re-checks an existing draft (M6.3 §20).
+  // A draft that matched when it was made can stop matching afterwards, and
+  // the only way to know is to look again; the answer returns it to VERIFIED
+  // or leaves it here with the mismatch recorded.
+  VERIFIED: ["VERIFYING", "ROLLED_BACK"],
   FAILED: ["READY", "APPROVED", "CANCELLED", "SUCCEEDED"],
   CANCELLED: [],
   ROLLED_BACK: [],
