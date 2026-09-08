@@ -1,4 +1,4 @@
-import { createHash, type Hash } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import { Prisma } from "@/generated/prisma/client";
 import type { Connection, SyncRun, SyncStatus, SyncType } from "@/generated/prisma/client";
@@ -11,6 +11,14 @@ import { getAccessToken } from "@/server/services/connection-auth";
 import { normalizeUrl } from "@/lib/url/normalize-url";
 import { normalizeQuery } from "@/lib/query/normalize-query";
 import { EXPECTED_LAG_DAYS } from "@/lib/metrics/compare";
+import {
+  digestHex,
+  foldDigest,
+  ingestByDateWindows,
+  newDigest,
+  type AdaptiveResult,
+  type DateWindow,
+} from "@/lib/sync/windows";
 import {
   SearchConsoleError,
   streamSearchAnalytics,
@@ -411,7 +419,8 @@ type Tally = {
   /** Rows that were placed. Distinguishes a complete read from a partial one. */
   seen: number;
   latestDate: string | null;
-  checksum: Hash;
+  /** Order-independent, so the same rows hash alike however they were asked for. */
+  digest: Uint8Array;
 };
 
 function newTally(): Tally {
@@ -421,8 +430,62 @@ function newTally(): Tally {
     skipped: 0,
     seen: 0,
     latestDate: null,
-    checksum: createHash("sha256"),
+    digest: newDigest(),
   };
+}
+
+/** One row's contribution to the checksum. */
+function rowDigest(canonical: string): Uint8Array {
+  return createHash("sha256").update(canonical).digest();
+}
+
+/** What the counters were before a window, so a discarded probe can be undone. */
+type TallyMark = Pick<Tally, "received" | "written" | "skipped" | "seen" | "latestDate">;
+
+function markTally(tally: Tally): TallyMark {
+  return {
+    received: tally.received,
+    written: tally.written,
+    skipped: tally.skipped,
+    seen: tally.seen,
+    latestDate: tally.latestDate,
+  };
+}
+
+/**
+ * Rolls the counters back to a mark.
+ *
+ * Used when a window came back truncated and is being replaced by its halves.
+ * The rows it wrote stay in the database — they are real rows for real dates,
+ * and the halves rewrite the same grain — but they are not counted twice, and
+ * the probe contributes nothing to the checksum because its digest is simply
+ * never folded in.
+ */
+function restoreTally(tally: Tally, mark: TallyMark): void {
+  tally.received = mark.received;
+  tally.written = mark.written;
+  tally.skipped = mark.skipped;
+  tally.seen = mark.seen;
+  tally.latestDate = mark.latestDate;
+}
+
+/** What a window read, kept aside until the driver rules on the window. */
+type WindowContribution = { mark: TallyMark; digest: Uint8Array } | null;
+
+/**
+ * Keeps what a window read.
+ *
+ * Its counters already stand, so only the checksum needs settling: the window's
+ * rows are folded into the run's digest, which is why a discarded probe leaves
+ * no trace without anything having to be undone.
+ */
+function acceptWindow(tally: Tally, contribution: WindowContribution): void {
+  if (contribution) foldDigest(tally.digest, contribution.digest);
+}
+
+/** Undoes what a window read, because its halves are about to read it again. */
+function discardWindow(tally: Tally, contribution: WindowContribution): void {
+  if (contribution) restoreTally(tally, contribution.mark);
 }
 
 function noteDate(tally: Tally, date: string): void {
@@ -495,6 +558,9 @@ async function beginSnapshot(
   return snapshot.id;
 }
 
+/** At most this many incomplete windows are named, so metadata stays bounded. */
+const MAX_REPORTED_WINDOWS = 20;
+
 /**
  * Closes the snapshot with what the read turned out to be.
  *
@@ -503,19 +569,48 @@ async function beginSnapshot(
  * which, at four hundred thousand rows, was tens of megabytes allocated at the
  * worst possible moment.
  *
- * Counts and periods only. A snapshot never holds tokens, and the response
+ * It also records how the period was divided and which parts of it, if any,
+ * could not be finished — so a partial sync says which dates are missing rather
+ * than only that something was.
+ *
+ * Counts, dates and codes only. A snapshot never holds tokens, and the response
  * body is not retained in this phase.
  */
 async function finishSnapshot(
   snapshotId: string,
   tally: Tally,
+  range: DateWindow,
+  outcome: AdaptiveResult,
   extra: Record<string, unknown> = {},
 ): Promise<void> {
   await prisma.sourceSnapshot.update({
     where: { id: snapshotId },
     data: {
-      checksum: tally.checksum.digest("hex"),
-      metadataJson: { rowsReceived: tally.received, complete: true, ...extra },
+      checksum: digestHex(tally.digest),
+      // Counts, dates and codes. Bounded by the length of the period rather
+      // than by the number of rows, and never a row itself.
+      metadataJson: {
+        requestedStart: range.startDate,
+        requestedEnd: range.endDate,
+        rowsReceived: tally.received,
+        rowsWritten: tally.written,
+        windows: outcome.windows.length,
+        windowsCompleted: outcome.windows.length - outcome.incomplete.length,
+        providerRequests: outcome.requests,
+        truncated: !outcome.complete,
+        complete: outcome.complete,
+        ...(outcome.code ? { code: outcome.code } : {}),
+        ...(outcome.incomplete.length > 0
+          ? {
+              incompleteWindows: outcome.incomplete.slice(0, MAX_REPORTED_WINDOWS).map((entry) => ({
+                start: entry.startDate,
+                end: entry.endDate,
+                code: entry.code ?? null,
+              })),
+            }
+          : {}),
+        ...extra,
+      },
     },
   });
 }
@@ -669,6 +764,10 @@ export type GscSyncOptions = {
    * of rows instead of tens of thousands.
    */
   ingestChunk?: number;
+  /** Days in the first cut of the period. Defaults to DEFAULT_WINDOW_DAYS. */
+  windowDays?: number;
+  /** The ceiling on provider requests for one sync. */
+  maxRequests?: number;
   accessTokenFor?: (connectionId: string) => Promise<string>;
 };
 
@@ -820,30 +919,63 @@ export async function runGscSync(
     const snapshotId = await beginSnapshot(context, connection, window);
     const tally = newTally();
 
-    const { truncated } = await stream(
-      {
-        accessToken,
-        propertyId,
-        startDate: window.startDate,
-        endDate: window.endDate,
-      },
-      async (batch) => {
-        tally.received += batch.length;
-        for (const row of batch) {
-          tally.checksum.update(
-            `${row.date}|${row.page}|${row.query}|${row.clicks}|${row.impressions}\n`,
-          );
-        }
+    // What the window just read contributed, held until the driver says whether
+    // the window is kept or replaced by its halves. Only the driver knows which,
+    // so the decision is made in one place rather than guessed at from
+    // `truncated`: a truncated single day is kept, and its rows count.
+    let contribution: WindowContribution = null;
 
-        // Written in pieces, and each piece released before the next. Nothing
-        // from an earlier page is still referenced here.
-        for (const chunk of chunks(batch, options.ingestChunk)) {
-          await writeGscChunk(context, connection, snapshotId, chunk, tally);
-        }
+    // The period is read a window at a time, strictly one after another. A
+    // window that comes back truncated is abandoned and asked again in halves,
+    // so a busy property is read completely instead of being cut off at the
+    // provider's ceiling.
+    const outcome = await ingestByDateWindows(
+      { startDate: window.startDate, endDate: window.endDate },
+      async (slice) => {
+        const mark = markTally(tally);
+        const digest = newDigest();
+        let rows = 0;
+        let pages = 0;
+
+        const { truncated } = await stream(
+          {
+            accessToken,
+            propertyId,
+            startDate: slice.startDate,
+            endDate: slice.endDate,
+          },
+          async (batch) => {
+            pages += 1;
+            rows += batch.length;
+            tally.received += batch.length;
+
+            for (const row of batch) {
+              foldDigest(
+                digest,
+                rowDigest(`${row.date}|${row.page}|${row.query}|${row.clicks}|${row.impressions}`),
+              );
+            }
+
+            // Written in pieces, and each piece released before the next.
+            // Nothing from an earlier page is still referenced here.
+            for (const chunk of chunks(batch, options.ingestChunk)) {
+              await writeGscChunk(context, connection, snapshotId, chunk, tally);
+            }
+          },
+        );
+
+        contribution = { mark, digest };
+        return { rows, pages, truncated };
+      },
+      {
+        initialDays: options.windowDays,
+        maxRequests: options.maxRequests,
+        onAccept: () => acceptWindow(tally, contribution),
+        onDiscard: () => discardWindow(tally, contribution),
       },
     );
 
-    await finishSnapshot(snapshotId, tally, { truncated });
+    await finishSnapshot(snapshotId, tally, window, outcome);
 
     return await completeRun(context, connection, run, {
       window,
@@ -851,7 +983,8 @@ export async function runGscSync(
       written: tally.written,
       skipped: tally.skipped,
       latestDate: tally.latestDate,
-      partial: truncated,
+      partial: !outcome.complete,
+      complete: outcome.complete,
       seen: tally.seen,
     });
   } catch (error) {
@@ -954,6 +1087,10 @@ export type Ga4SyncOptions = {
   pages?: typeof streamLandingPageMetrics;
   /** How many rows are held at once. See GscSyncOptions.ingestChunk. */
   ingestChunk?: number;
+  /** Days in the first cut of the period. See GscSyncOptions.windowDays. */
+  windowDays?: number;
+  /** The ceiling on provider requests for one sync. */
+  maxRequests?: number;
   days?: number;
   now?: Date;
   source?: (params: {
@@ -1087,28 +1224,64 @@ export async function runGa4Sync(
     const snapshotId = await beginSnapshot(context, connection, window);
     const tally = newTally();
 
-    const { availableMetrics, truncated } = await stream(
-      {
-        accessToken,
-        propertyId,
-        startDate: window.startDate,
-        endDate: window.endDate,
-      },
-      // The metrics arrive with the page, because rows are written before the
-      // read is over and each one has to know what this property reports.
-      async (batch, metrics) => {
-        tally.received += batch.length;
-        for (const row of batch) {
-          tally.checksum.update(`${row.date}|${row.landingPage}|${row.metrics.sessions ?? ""}\n`);
-        }
+    // Which metrics the property could report. Settled by the first window
+    // and the same for every one after it.
+    let availableMetrics: Ga4MetricName[] = [];
 
-        for (const chunk of chunks(batch, options.ingestChunk)) {
-          await writeGa4Chunk(context, connection, snapshotId, chunk, metrics, tally);
-        }
+    // Held until the driver says whether this window is kept. See the same
+    // variable in the Search Console sync.
+    let contribution: WindowContribution = null;
+
+    const outcome = await ingestByDateWindows(
+      { startDate: window.startDate, endDate: window.endDate },
+      async (slice) => {
+        const mark = markTally(tally);
+        const digest = newDigest();
+        let rows = 0;
+        let pages = 0;
+
+        const result = await stream(
+          {
+            accessToken,
+            propertyId,
+            startDate: slice.startDate,
+            endDate: slice.endDate,
+          },
+          // The metrics arrive with the page, because rows are written before
+          // the read is over and each one has to know what this property
+          // reports.
+          async (batch, metrics) => {
+            pages += 1;
+            rows += batch.length;
+            tally.received += batch.length;
+
+            for (const row of batch) {
+              foldDigest(
+                digest,
+                rowDigest(`${row.date}|${row.landingPage}|${row.metrics.sessions ?? ""}`),
+              );
+            }
+
+            for (const chunk of chunks(batch, options.ingestChunk)) {
+              await writeGa4Chunk(context, connection, snapshotId, chunk, metrics, tally);
+            }
+          },
+        );
+
+        availableMetrics = result.availableMetrics;
+        contribution = { mark, digest };
+
+        return { rows, pages, truncated: result.truncated };
+      },
+      {
+        initialDays: options.windowDays,
+        maxRequests: options.maxRequests,
+        onAccept: () => acceptWindow(tally, contribution),
+        onDiscard: () => discardWindow(tally, contribution),
       },
     );
 
-    await finishSnapshot(snapshotId, tally, { availableMetrics, truncated });
+    await finishSnapshot(snapshotId, tally, window, outcome, { availableMetrics });
 
     return await completeRun(context, connection, run, {
       window,
@@ -1116,7 +1289,8 @@ export async function runGa4Sync(
       written: tally.written,
       skipped: tally.skipped,
       latestDate: tally.latestDate,
-      partial: truncated,
+      partial: !outcome.complete,
+      complete: outcome.complete,
       seen: tally.seen,
     });
   } catch (error) {
@@ -1152,6 +1326,17 @@ async function completeRun(
     skipped: number;
     latestDate: string | null;
     partial: boolean;
+    /**
+     * Whether the whole requested period was read.
+     *
+     * Distinct from `skipped`, which counts rows the provider gave us that
+     * cannot be attributed to a page of this website — an app-store listing,
+     * say. Those make a run PARTIAL but the period was still read completely,
+     * so the data really is as fresh as it claims. A period that could not be
+     * read completely is a different thing, and it is the one that must not
+     * move the freshness dates.
+     */
+    complete: boolean;
     seen: number;
   },
 ): Promise<SyncOutcome> {
@@ -1175,15 +1360,28 @@ async function completeRun(
     await tx.connection.update({
       where: { id: connection.id },
       data: {
-        lastSyncedAt: finishedAt,
-        // Only moves forward, and only when rows actually arrived. A quiet period
-        // with no data must not make the connection look newer than it is.
-        ...(result.latestDate &&
-        (!connection.latestDataDate ||
-          result.latestDate > connection.latestDataDate.toISOString().slice(0, 10))
-          ? { latestDataDate: new Date(`${result.latestDate}T00:00:00.000Z`) }
-          : {}),
+        // The provider answered, so whatever it was last complaining about is
+        // over. This is about the connection working, not about the data being
+        // complete, and the two are cleared on different conditions.
         lastError: null,
+
+        // Freshness moves only when the whole requested period was read. A run
+        // that could not finish has really written rows, and they are really
+        // correct, but they are not the complete picture these dates claim — so
+        // an incomplete period leaves them where they were, and the connection
+        // goes on reporting the last date it can actually stand behind.
+        ...(result.complete
+          ? {
+              lastSyncedAt: finishedAt,
+              // Only moves forward, and only when rows actually arrived. A quiet
+              // period with no data must not make the connection look newer.
+              ...(result.latestDate &&
+              (!connection.latestDataDate ||
+                result.latestDate > connection.latestDataDate.toISOString().slice(0, 10))
+                ? { latestDataDate: new Date(`${result.latestDate}T00:00:00.000Z`) }
+                : {}),
+            }
+          : {}),
       },
     });
 
@@ -1328,6 +1526,10 @@ export async function runSemrushSync(
       // difference between "this is the whole picture" and "this is what we paid
       // for".
       partial: result.truncated,
+      // The period asked for is a single day and it was read. "Truncated"
+      // here means our own row ceiling, which is a cost decision rather than
+      // a gap in the period, so freshness still advances as it always has.
+      complete: true,
       seen: result.rows.length,
     });
   } catch (error) {
@@ -1446,6 +1648,10 @@ export async function runAhrefsSync(
       skipped: result.malformed,
       latestDate: result.rows.length > 0 ? today : null,
       partial: result.truncated,
+      // The period asked for is a single day and it was read. "Truncated"
+      // here means our own row ceiling, which is a cost decision rather than
+      // a gap in the period, so freshness still advances as it always has.
+      complete: true,
       seen: result.rows.length,
     });
   } catch (error) {
