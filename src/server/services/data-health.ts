@@ -205,3 +205,134 @@ export async function getDataHealth(
 
   return health;
 }
+
+// ---------------------------------------------------------------------------
+// Recent runs
+// ---------------------------------------------------------------------------
+
+/** Runs shown on one page of the Recent runs table. */
+export const RUNS_PER_PAGE = 3;
+
+export type SyncRunPage = {
+  runs: SyncRun[];
+  /** Every run this website has ever recorded. History is never pruned. */
+  total: number;
+  /** The page actually returned, after the requested one was normalized. */
+  page: number;
+  pageCount: number;
+  perPage: number;
+};
+
+/**
+ * Turns whatever arrived in the URL into a page number that exists.
+ *
+ * A query string is user input and can be anything: absent, empty, negative,
+ * fractional, "abc", or a number past the end of the history. None of those is
+ * an error worth showing a person, so each resolves to the nearest page that
+ * does exist rather than to a crash or an empty table.
+ */
+export function normalizeRunsPage(raw: string | string[] | undefined, pageCount: number): number {
+  const last = Math.max(1, pageCount);
+  const text = Array.isArray(raw) ? raw[0] : raw;
+  if (text === undefined) return 1;
+
+  // Number() would accept "1e3" and " 12 "; parseInt would accept "3abc". Only
+  // a plain run of digits is a page number.
+  if (!/^\d+$/.test(text.trim())) return 1;
+
+  const parsed = Number.parseInt(text.trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return 1;
+
+  return Math.min(parsed, last);
+}
+
+/**
+ * One page of this website's sync history, newest first.
+ *
+ * Paged in the database rather than in the page: the table shows three rows and
+ * the history grows without limit, so loading all of it to render three would
+ * get slower every day for no visible benefit.
+ *
+ * Ordering is by start time, which is what the table's first column shows. A
+ * run that has not started has no start time and is put first: it is a sync
+ * happening now, and burying it under yesterday's finished runs would be a
+ * strange answer to "what is my pipeline doing".
+ */
+export async function listSyncRunPage(
+  context: TenantContext,
+  requestedPage: string | string[] | undefined,
+  perPage: number = RUNS_PER_PAGE,
+): Promise<SyncRunPage> {
+  const size = Math.max(1, Math.floor(perPage));
+  const total = await prisma.syncRun.count({ where: websiteScope(context) });
+  const pageCount = Math.max(1, Math.ceil(total / size));
+  const page = normalizeRunsPage(requestedPage, pageCount);
+
+  const runs =
+    total === 0
+      ? []
+      : await prisma.syncRun.findMany({
+          where: websiteScope(context),
+          orderBy: [{ startedAt: { sort: "desc", nulls: "first" } }, { createdAt: "desc" }],
+          skip: (page - 1) * size,
+          take: size,
+        });
+
+  return { runs, total, page, pageCount, perPage: size };
+}
+
+/**
+ * The short note under a run's status badge.
+ *
+ * A recovered orphan is by far the most common failure, and its stored summary
+ * is a full explanation — correct, but three lines of the same three lines on
+ * every row of the table. The explanation is worth making once, above the
+ * table; here the row only needs to say which kind of failure this was.
+ *
+ * Every other code keeps its own sentence, because the distinction between
+ * "we were rate limited" and "that property no longer exists" is the whole
+ * value of the column. The stored summary is used as-is: it is written from a
+ * fixed table of our own sentences, never from a provider's response body.
+ */
+export function runFailureNote(run: Pick<SyncRun, "errorCode" | "errorSummary">): string | null {
+  if (run.errorCode === "stale_run_recovered") return "Interrupted before completion";
+  return run.errorSummary;
+}
+
+/**
+ * Which page numbers to offer.
+ *
+ * Every page as its own link is fine at eight runs and absurd at eight
+ * thousand: a website syncing hourly reaches a thousand pages within six weeks,
+ * and a row of a thousand links is neither usable nor small. So the ends and
+ * the neighbourhood of the current page are shown, and the stretches between
+ * them collapse to a gap.
+ *
+ * A gap is a marker rather than a link, because the pages it stands for are
+ * still reachable — by stepping, or by editing the number in the URL, which is
+ * why the page number lives in the URL in the first place.
+ */
+export type PageStep = number | "gap";
+
+export function runsPageWindow(page: number, pageCount: number, radius = 2): PageStep[] {
+  if (pageCount <= 1) return [1];
+
+  const wanted = new Set<number>([1, pageCount]);
+  for (let step = page - radius; step <= page + radius; step += 1) {
+    if (step >= 1 && step <= pageCount) wanted.add(step);
+  }
+
+  const steps: PageStep[] = [];
+  let previous = 0;
+
+  for (const target of [...wanted].sort((a, b) => a - b)) {
+    // A gap standing for a single page is longer than the page number it hides.
+    if (previous !== 0 && target - previous > 1) {
+      steps.push(target - previous === 2 ? previous + 1 : "gap");
+    }
+    steps.push(target);
+    previous = target;
+  }
+
+  return steps;
+}

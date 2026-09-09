@@ -4,10 +4,7 @@ import { prisma } from "@/server/db/prisma";
 import type { TenantContext } from "@/server/auth/guards";
 import { buildEvidenceId } from "@/lib/evidence/id";
 import { PAGE_DIAGNOSIS_POLICY } from "@/lib/evidence/retrieval-policy";
-import {
-  resolveEvidenceId,
-  resolveEvidenceIds,
-} from "@/server/services/evidence";
+import { resolveEvidenceId, resolveEvidenceIds } from "@/server/services/evidence";
 import {
   assemblePageDiagnosisPackage,
   getPackage,
@@ -15,6 +12,8 @@ import {
   renderPackage,
   sealPackage,
 } from "@/server/services/evidence-assembler";
+import { getDiagnosisEvidence } from "@/server/services/diagnosis";
+import { buildEvidenceView, describeOmitted } from "@/lib/evidence/presentation";
 import { deleteOrganizations } from "../helpers/teardown";
 
 /**
@@ -506,5 +505,145 @@ describe("tenant isolation in assembly", () => {
 
     expect(await getPackage(a, theirs.package.id)).toBeNull();
     expect(await sealPackage(a, theirs.package.id)).toBeNull();
+  });
+});
+
+/**
+ * Reading a real package (P1/P3 observability).
+ *
+ * The unit tests cover the rearranging in isolation. These cover the join
+ * between it and the database: that a page and a query get their real names,
+ * that the names are fetched under tenant scope, and that every figure on
+ * screen still leads back to a record id someone can re-resolve.
+ */
+describe("presenting a sealed package", () => {
+  it("gives every measurement a metric name and a subject name", async () => {
+    const tenant = await makeTenant("present");
+    const { package: assembled } = await assemblePageDiagnosisPackage(tenant, tenant.pageId);
+
+    const diagnosis = await prisma.diagnosis.create({
+      data: {
+        websiteId: tenant.website.id,
+        targetType: "PAGE",
+        targetId: tenant.pageId,
+        evidencePackageId: assembled.id,
+        executiveSummary: "Clicks fell.",
+        overallConfidence: "MEDIUM",
+      },
+    });
+
+    const read = await getDiagnosisEvidence(tenant, diagnosis.id);
+    expect(read).not.toBeNull();
+
+    const view = buildEvidenceView(read!.evidence, read!.manifest, read!.subjectLabels);
+
+    // Grouped by provider rather than one card per record.
+    const gsc = view.groups.find((group) => group.source === "Google Search Console");
+    expect(gsc).toBeDefined();
+
+    const subject = gsc!.subjects[0];
+    expect(subject).toBeDefined();
+
+    // The metric is named, and it is not named "window".
+    const labels = subject!.metrics.map((metric) => metric.label);
+    expect(labels).toContain("Clicks");
+    expect(labels).toContain("Impressions");
+    expect(labels.join(" ")).not.toMatch(/window/i);
+
+    // And the thing measured is named by its URL, not by a UUID.
+    expect(subject!.label).toContain("/pricing");
+    expect(subject!.label).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/);
+  });
+
+  it("keeps every figure traceable back to a record id", async () => {
+    const tenant = await makeTenant("trace");
+    const { package: assembled } = await assemblePageDiagnosisPackage(tenant, tenant.pageId);
+
+    const diagnosis = await prisma.diagnosis.create({
+      data: {
+        websiteId: tenant.website.id,
+        targetType: "PAGE",
+        targetId: tenant.pageId,
+        evidencePackageId: assembled.id,
+        executiveSummary: "Clicks fell.",
+        overallConfidence: "MEDIUM",
+      },
+    });
+
+    const read = await getDiagnosisEvidence(tenant, diagnosis.id);
+    const view = buildEvidenceView(read!.evidence, read!.manifest, read!.subjectLabels);
+
+    const shown = new Set([
+      ...view.groups.flatMap((group) => group.subjects.flatMap((subject) => subject.evidenceIds)),
+      ...view.groups.flatMap((group) => group.records.map((record) => record.id)),
+    ]);
+
+    // Folding records into tables must not lose any of them: everything the
+    // model was shown is still reachable in the provenance section.
+    for (const record of read!.evidence) {
+      expect(shown.has(record.id)).toBe(true);
+    }
+    expect(shown.size).toBe(read!.evidence.length);
+  });
+
+  it("resolves subject names only within the tenant that asked", async () => {
+    const mine = await makeTenant("scope-mine");
+    const theirs = await makeTenant("scope-theirs");
+
+    const { package: assembled } = await assemblePageDiagnosisPackage(mine, mine.pageId);
+    const diagnosis = await prisma.diagnosis.create({
+      data: {
+        websiteId: mine.website.id,
+        targetType: "PAGE",
+        targetId: mine.pageId,
+        evidencePackageId: assembled.id,
+        executiveSummary: "Clicks fell.",
+        overallConfidence: "MEDIUM",
+      },
+    });
+
+    // The other tenant cannot read the diagnosis at all, so there is nothing to
+    // label — the isolation is upstream of the labelling, which is where it
+    // belongs.
+    expect(await getDiagnosisEvidence(theirs, diagnosis.id)).toBeNull();
+
+    const read = await getDiagnosisEvidence(mine, diagnosis.id);
+    for (const [id, label] of read!.subjectLabels) {
+      expect(typeof label).toBe("string");
+      // Every id labelled belongs to a page or query of this website.
+      const owned =
+        (await prisma.page.count({ where: { id, websiteId: mine.website.id } })) +
+        (await prisma.query.count({ where: { id, websiteId: mine.website.id } }));
+      expect(owned).toBe(1);
+    }
+  });
+
+  it("says what was left out without mentioning a budget", async () => {
+    const tenant = await makeTenant("omitted");
+    const { package: assembled } = await assemblePageDiagnosisPackage(tenant, tenant.pageId);
+
+    const diagnosis = await prisma.diagnosis.create({
+      data: {
+        websiteId: tenant.website.id,
+        targetType: "PAGE",
+        targetId: tenant.pageId,
+        evidencePackageId: assembled.id,
+        executiveSummary: "Clicks fell.",
+        overallConfidence: "MEDIUM",
+      },
+    });
+
+    const read = await getDiagnosisEvidence(tenant, diagnosis.id);
+    const view = buildEvidenceView(read!.evidence, read!.manifest, read!.subjectLabels);
+    const text = describeOmitted(view.omitted);
+
+    if (text !== null) {
+      expect(text).not.toMatch(/budget/i);
+      expect(text).toMatch(/available but not included/);
+    }
+
+    // The counts survive whether or not anything was dropped.
+    expect(view.counts.included).toBe(read!.evidence.length);
+    expect(view.counts.available).toBeGreaterThanOrEqual(view.counts.included);
   });
 });

@@ -1120,6 +1120,14 @@ export type DiagnosisEvidenceView = {
   evidence: Evidence[];
   /** IDs in the sealed package that no longer resolve. Shown, not hidden. */
   stale: string[];
+  /**
+   * A readable name for each page or query the evidence measures, by entity id.
+   *
+   * Presentation only. Without it a measurement can say what it counted but not
+   * what it counted it for, and "This page" is a poor answer on a page whose
+   * whole subject is which URL is losing clicks.
+   */
+  subjectLabels: Map<string, string>;
 };
 
 /**
@@ -1146,6 +1154,7 @@ export async function getDiagnosisEvidence(
     manifest: null,
     evidence: [],
     stale: [],
+    subjectLabels: new Map(),
   };
 
   if (!diagnosis.evidencePackageId) return empty;
@@ -1171,7 +1180,53 @@ export async function getDiagnosisEvidence(
     manifest: (pkg.retrievalManifestJson as RetrievalManifest | null) ?? null,
     evidence,
     stale: [...resolution.unresolved, ...resolution.invalid],
+    subjectLabels: await resolveSubjectLabels(context, evidence),
   };
+}
+
+/**
+ * Names for the pages and queries the evidence measures.
+ *
+ * Two batched, website-scoped reads rather than one per record. Anything that
+ * does not come back is simply left unnamed: a page deleted since the package
+ * was sealed should not stop the measurement it explains from being shown.
+ */
+async function resolveSubjectLabels(
+  context: TenantContext,
+  evidence: Evidence[],
+): Promise<Map<string, string>> {
+  const pageIds = new Set<string>();
+  const queryIds = new Set<string>();
+
+  for (const item of evidence) {
+    if (!item.sourceEntityId) continue;
+    const subject = item.contextJson?.subject;
+    if (subject === "page") pageIds.add(item.sourceEntityId);
+    else if (subject === "query") queryIds.add(item.sourceEntityId);
+  }
+
+  const labels = new Map<string, string>();
+  if (pageIds.size === 0 && queryIds.size === 0) return labels;
+
+  const [pages, queries] = await Promise.all([
+    pageIds.size > 0
+      ? prisma.page.findMany({
+          where: { id: { in: [...pageIds] }, ...websiteScope(context) },
+          select: { id: true, url: true },
+        })
+      : Promise.resolve([]),
+    queryIds.size > 0
+      ? prisma.query.findMany({
+          where: { id: { in: [...queryIds] }, ...websiteScope(context) },
+          select: { id: true, query: true },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  for (const page of pages) labels.set(page.id, page.url);
+  for (const query of queries) labels.set(query.id, query.query);
+
+  return labels;
 }
 
 /**

@@ -1,9 +1,16 @@
+import Link from "next/link";
+
 import { requireWebsiteAccess } from "@/server/auth/guards";
 import { hasRole } from "@/server/auth/roles";
-import { getDataHealth, type LatestAttempt } from "@/server/services/data-health";
+import {
+  getDataHealth,
+  listSyncRunPage,
+  runFailureNote,
+  runsPageWindow,
+  type LatestAttempt,
+} from "@/server/services/data-health";
 import { SITEMAP_ERROR_MESSAGES, type SitemapFetchError } from "@/server/connectors/sitemap/fetch";
 import { listSitemaps } from "@/server/services/sitemap";
-import { listSyncRuns } from "@/server/services/sync";
 import { Badge, EmptyState, PageHeader } from "@/components/governance/primitives";
 import { AddSitemapForm, SitemapRowActions } from "@/components/connections/sitemap-controls";
 import { SyncButton } from "@/components/connections/sync-controls";
@@ -24,6 +31,90 @@ function sitemapErrorMessage(code: string): string {
 
 function clock(value: Date | null): string {
   return value ? value.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "";
+}
+
+/**
+ * Paging through the run history.
+ *
+ * Every page is a plain link, so the table works before any JavaScript arrives
+ * and a particular page can be linked to or reloaded. The current page is a
+ * span rather than a link: there is nowhere for it to go, and a link that does
+ * nothing is a small lie to anyone navigating by keyboard.
+ */
+function RunsPagination({
+  page,
+  pageCount,
+  total,
+  perPage,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  perPage: number;
+}) {
+  if (total === 0) return null;
+
+  const first = (page - 1) * perPage + 1;
+  const last = Math.min(page * perPage, total);
+  const pages = runsPageWindow(page, pageCount);
+  const href = (target: number) => (target === 1 ? "?" : `?runsPage=${target}`);
+
+  const step = "border-border rounded-md border px-2 py-1";
+  const muted = "text-muted-foreground cursor-not-allowed opacity-50";
+
+  return (
+    <nav
+      aria-label="Recent runs pages"
+      className="text-muted-foreground flex flex-wrap items-center justify-between gap-3 text-xs"
+    >
+      <p>
+        Showing {first.toLocaleString("en-GB")}–{last.toLocaleString("en-GB")} of{" "}
+        {total.toLocaleString("en-GB")} {total === 1 ? "run" : "runs"}
+      </p>
+
+      <div className="flex flex-wrap items-center gap-1">
+        {page > 1 ? (
+          <Link className={step} href={href(page - 1)} rel="prev">
+            Previous
+          </Link>
+        ) : (
+          <span aria-disabled="true" className={`${step} ${muted}`}>
+            Previous
+          </span>
+        )}
+
+        {pages.map((target, index) =>
+          target === "gap" ? (
+            <span className="px-1" key={`gap-${index}`}>
+              …
+            </span>
+          ) : target === page ? (
+            <span
+              aria-current="page"
+              className={`${step} text-foreground font-medium`}
+              key={target}
+            >
+              {target}
+            </span>
+          ) : (
+            <Link aria-label={`Page ${target}`} className={step} href={href(target)} key={target}>
+              {target}
+            </Link>
+          ),
+        )}
+
+        {page < pageCount ? (
+          <Link className={step} href={href(page + 1)} rel="next">
+            Next
+          </Link>
+        ) : (
+          <span aria-disabled="true" className={`${step} ${muted}`}>
+            Next
+          </span>
+        )}
+      </div>
+    </nav>
+  );
 }
 
 /**
@@ -80,16 +171,20 @@ function AttemptCell({ attempt }: { attempt: LatestAttempt }) {
 
 export default async function DataHealthPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ websiteId: string }>;
+  searchParams: Promise<{ runsPage?: string | string[] }>;
 }) {
   const { websiteId } = await params;
+  const { runsPage } = await searchParams;
   const context = await requireWebsiteAccess(websiteId);
-  const [health, sitemaps, runs] = await Promise.all([
+  const [health, sitemaps, runPage] = await Promise.all([
     getDataHealth(context),
     listSitemaps(context),
-    listSyncRuns(context, 10),
+    listSyncRunPage(context, runsPage),
   ]);
+  const runs = runPage.runs;
 
   const canWrite = hasRole(context.membership.role, "MEMBER");
   const active = health.filter((source) => source.status !== "NOT_CONNECTED");
@@ -188,9 +283,14 @@ export default async function DataHealthPage({
 
       <section className="space-y-3">
         <h2 className="text-sm font-medium">Recent runs</h2>
+        {/*
+          Said once, here, instead of on every failed row. The table below then
+          only has to name the kind of failure, which is what differs between
+          one row and the next.
+        */}
         <p className="text-muted-foreground text-sm">
-          Every attempt, including the ones that failed. A failed run leaves the figures above
-          unchanged rather than making the data look newer than it is.
+          Every attempt is preserved. Failed or incomplete runs do not change the latest successful
+          data shown above.
         </p>
 
         {runs.length === 0 ? (
@@ -225,8 +325,8 @@ export default async function DataHealthPage({
                     </td>
                     <td className="px-3 py-3">
                       <Badge>{run.status}</Badge>
-                      {run.errorSummary ? (
-                        <p className="mt-1 text-xs text-red-600">{run.errorSummary}</p>
+                      {runFailureNote(run) ? (
+                        <p className="mt-1 text-xs text-red-600">{runFailureNote(run)}</p>
                       ) : null}
                     </td>
                     <td className="px-3 py-3 text-right tabular-nums">
@@ -244,6 +344,13 @@ export default async function DataHealthPage({
             </table>
           </div>
         )}
+
+        <RunsPagination
+          page={runPage.page}
+          pageCount={runPage.pageCount}
+          perPage={runPage.perPage}
+          total={runPage.total}
+        />
       </section>
 
       <section className="space-y-3">

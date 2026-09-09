@@ -12,9 +12,11 @@ import {
 import { PageHeader } from "@/components/governance/primitives";
 import { DemoBadge } from "@/components/metrics/primitives";
 import { MarkReviewedButton } from "@/components/diagnosis/controls";
+import { buildEvidenceView } from "@/lib/evidence/presentation";
 import {
   ConfidenceBadge,
   EvidenceList,
+  EvidenceSummary,
   LevelBadge,
   MissingEvidenceList,
   StaleEvidenceNote,
@@ -67,6 +69,14 @@ export default async function DiagnosisPage({
 
   const history = page ? await listDiagnosesForPage(context, page.id, 20) : [];
   const byId = new Map((evidenceView?.evidence ?? []).map((record) => [record.id, record]));
+
+  // The same records the model saw, rearranged for a person: grouped by source,
+  // paired current against previous, with the raw identities folded away.
+  const evidenceSummary = buildEvidenceView(
+    evidenceView?.evidence ?? [],
+    evidenceView?.manifest ?? null,
+    evidenceView?.subjectLabels,
+  );
   const canReview = hasRole(context.membership.role, REQUIRED.APPROVE);
   const reviewer = diagnosis.reviewedByUserId
     ? await prisma.user.findUnique({
@@ -122,11 +132,15 @@ export default async function DiagnosisPage({
 
       {/* ---------------------------------------------------------- Evidence */}
       <section className="space-y-3">
-        <h2 className="text-sm font-medium">Evidence</h2>
+        <h2 className="text-sm font-medium">Evidence used in this diagnosis</h2>
+        {/*
+          Measured facts, kept visibly separate from the interpretation below.
+          Naming the section this way is not decoration: a reader who cannot
+          tell which of the two they are looking at cannot judge either.
+        */}
         <p className="text-muted-foreground text-xs">
-          {evidenceView?.evidence.length ?? 0} records, sealed
+          What the model was shown, grouped by source. Sealed
           {evidenceView?.sealedAt ? ` ${evidenceView.sealedAt.toLocaleString("en-GB")}` : ""}.
-          Ordered most direct first. This is the whole of what the model was shown.
         </p>
         <StaleEvidenceNote ids={evidenceView?.stale ?? []} />
         {evidenceView?.manifest?.notes.length ? (
@@ -139,19 +153,13 @@ export default async function DiagnosisPage({
             </ul>
           </div>
         ) : null}
-        {evidenceView?.manifest?.omitted.length ? (
-          <p className="text-muted-foreground text-xs">
-            Left out to fit the budget:{" "}
-            {evidenceView.manifest.omitted
-              .map((entry) => `${entry.count} ${humanize(entry.category).toLowerCase()}`)
-              .join(", ")}
-            .
+        {evidenceView ? (
+          <EvidenceSummary stale={evidenceView.stale} view={evidenceSummary} />
+        ) : (
+          <p className="text-muted-foreground text-sm">
+            No evidence could be assembled for this page.
           </p>
-        ) : null}
-        <EvidenceList
-          evidence={evidenceView?.evidence ?? []}
-          emptyText="No evidence could be assembled for this page."
-        />
+        )}
       </section>
 
       {/* --------------------------------------------------------- Diagnosis */}
