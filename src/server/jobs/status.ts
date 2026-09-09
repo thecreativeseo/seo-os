@@ -25,6 +25,12 @@ export type PendingJob = {
   createdOn: Date;
   startedOn: Date | null;
   heartbeatOn: Date | null;
+  /**
+   * When pg-boss will let the job run. A retry is deliberately held back by
+   * its backoff, and until this passes it is waiting on purpose rather than
+   * waiting on a worker — the two look identical without it.
+   */
+  startAfter: Date | null;
 };
 
 type JobRow = {
@@ -33,6 +39,7 @@ type JobRow = {
   createdOn: Date;
   startedOn: Date | null;
   heartbeatOn: Date | null;
+  startAfter: Date | null;
 };
 
 export type QueueReadOptions = {
@@ -51,7 +58,8 @@ export async function pendingManualSyncJob(
   try {
     const rows = await prisma.$queryRawUnsafe<JobRow[]>(
       `SELECT id, state::text AS state, created_on AS "createdOn",
-              started_on AS "startedOn", heartbeat_on AS "heartbeatOn"
+              started_on AS "startedOn", heartbeat_on AS "heartbeatOn",
+              start_after AS "startAfter"
        FROM ${schema}.job
        WHERE name = $1 AND singleton_key = $2 AND state IN ('created', 'retry', 'active')
        ORDER BY created_on DESC
@@ -69,6 +77,7 @@ export async function pendingManualSyncJob(
       createdOn: row.createdOn,
       startedOn: row.startedOn,
       heartbeatOn: row.heartbeatOn,
+      startAfter: row.startAfter,
     };
   } catch {
     return null;

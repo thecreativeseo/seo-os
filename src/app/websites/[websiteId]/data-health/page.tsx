@@ -138,6 +138,16 @@ function AttemptCell({ attempt }: { attempt: LatestAttempt }) {
       </span>
     );
   }
+  if (attempt.state === "retrying") {
+    // The previous attempt failed and the queue has already scheduled the next
+    // one. That is the pipeline working, and the row below still says FAILED,
+    // so this says only when — never "is the worker running?", which it is.
+    return (
+      <span className="text-foreground">
+        Retry scheduled{attempt.retryAt ? ` for ${clock(attempt.retryAt)}` : ""}
+      </span>
+    );
+  }
   if (attempt.state === "starting") {
     return <span className="text-foreground">Sync starting</span>;
   }

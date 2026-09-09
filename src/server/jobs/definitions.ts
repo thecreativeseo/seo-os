@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { fingerprintError, fingerprintFields } from "@/lib/sync/failure";
 
 import { prisma } from "@/server/db/prisma";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
@@ -445,6 +446,11 @@ async function contextForConnectionSync(payload: ConnectionSyncPayload): Promise
 export type ConnectionSyncOptions = {
   now?: Date;
   signal?: AbortSignal;
+  /**
+   * The queue job running this sync, so a retry can be logged as the
+   * attempt it is. Absent when called outside the worker, as tests do.
+   */
+  job?: { id: string; attempt: number; retryLimit: number };
   /** Test seams: the context resolver, the provider fakes, and detection. */
   contextFor?: (payload: ConnectionSyncPayload) => Promise<ResolvedContext>;
   gsc?: GscSyncOptions;
@@ -493,7 +499,14 @@ export async function runConnectionSync(
     // already running — or a finalisation that could not even record itself.
     if (error instanceof SyncError) {
       if (isRetryableSyncFailure(error.code)) {
-        log({ at: JOB_NAMES.CONNECTION_SYNC, event: "retry", ...summary, code: error.code });
+        log({
+          at: JOB_NAMES.CONNECTION_SYNC,
+          event: "retry",
+          ...summary,
+          ...retryIdentity(options.job),
+          code: error.code,
+          ...fingerprintFields(fingerprintError(error)),
+        });
         throw new RetryableJobError(error.code);
       }
       return { ...summary, status: "failed", detail: `sync:${error.code}`, actor };
@@ -515,12 +528,18 @@ export async function runConnectionSync(
     const code = outcome.run.errorCode ?? "unknown";
 
     if (isRetryableSyncFailure(code)) {
+      // The one line an operator will have when a sync fails inside the
+      // database: which attempt of how many, the category, and the safe
+      // shape of the error — class, Prisma code, SQLSTATE, stage. Never the
+      // message, which is where the SQL and the parameters would be.
       log({
         at: JOB_NAMES.CONNECTION_SYNC,
         event: "retry",
         ...summary,
+        ...retryIdentity(options.job),
         runId: outcome.run.id,
         code,
+        ...fingerprintFields(outcome.failure),
       });
       throw new RetryableJobError(code);
     }
@@ -694,6 +713,16 @@ function log(payload: Record<string, unknown>): void {
   console.log(JSON.stringify(payload));
 }
 
+/** The job as the queue counts it: attempt 1 of 3 rather than retryCount 0 of 2. */
+function retryIdentity(job: ConnectionSyncOptions["job"]): {
+  jobId: string | null;
+  attempt: number | null;
+  maxAttempts: number | null;
+} {
+  if (!job) return { jobId: null, attempt: null, maxAttempts: null };
+  return { jobId: job.id, attempt: job.attempt + 1, maxAttempts: job.retryLimit + 1 };
+}
+
 /** Wires the handlers to their queues. Called once, by the worker. */
 export async function registerJobs(queue: Queue): Promise<void> {
   await queue.work<z.infer<typeof dailySyncPayload>>(JOB_NAMES.SYNC_DAILY, async (job) => {
@@ -712,7 +741,10 @@ export async function registerJobs(queue: Queue): Promise<void> {
 
   await queue.work<ConnectionSyncPayload>(JOB_NAMES.CONNECTION_SYNC, async (job) => {
     const payload = connectionSyncPayload.parse(job.data);
-    const summary = await runConnectionSync(payload, { signal: job.signal });
+    const summary = await runConnectionSync(payload, {
+      signal: job.signal,
+      job: { id: job.id, attempt: job.attempt, retryLimit: job.retryLimit },
+    });
     log({ at: JOB_NAMES.CONNECTION_SYNC, event: "completed", jobId: job.id, ...summary });
     return summary;
   });

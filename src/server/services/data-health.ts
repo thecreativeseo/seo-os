@@ -22,7 +22,19 @@ import type { ConnectionStatus, SyncRun } from "@/generated/prisma/client";
  * retire it.
  */
 export type AttemptState =
-  "none" | "queued" | "starting" | "running" | "stale" | "succeeded" | "partial" | "failed";
+  | "none"
+  | "queued"
+  /**
+   * A retry pg-boss is holding back on purpose. The previous attempt failed
+   * and the queue has scheduled another; nothing is wrong with the worker.
+   */
+  | "retrying"
+  | "starting"
+  | "running"
+  | "stale"
+  | "succeeded"
+  | "partial"
+  | "failed";
 
 export type LatestAttempt = {
   state: AttemptState;
@@ -32,10 +44,15 @@ export type LatestAttempt = {
   errorCode: string | null;
   /** When the waiting job was queued. */
   queuedAt: Date | null;
+  /** When a scheduled retry becomes eligible to run. Null unless retrying. */
+  retryAt: Date | null;
   /**
    * A queued job nobody has picked up for longer than the worker's polling
    * could explain. The worker claims within seconds; minutes means it is not
    * running, and the page should say so rather than show a hopeful "queued".
+   *
+   * Measured from when the job became eligible, not from when it was created:
+   * a retry waiting out its backoff has not been ignored by anyone.
    */
   unattended: boolean;
 };
@@ -70,6 +87,7 @@ const NONE: LatestAttempt = {
   finishedAt: null,
   errorCode: null,
   queuedAt: null,
+  retryAt: null,
   unattended: false,
 };
 
@@ -91,19 +109,38 @@ function describeAttempt(
   // A job waiting or just claimed is the newest attempt, and it outranks
   // whatever the last run left behind — including an orphan it will retire.
   if (job) {
-    return job.state === "active"
-      ? {
-          ...NONE,
-          state: "starting",
-          startedAt: job.startedOn ?? job.createdOn,
-          queuedAt: job.createdOn,
-        }
-      : {
-          ...NONE,
-          state: "queued",
-          queuedAt: job.createdOn,
-          unattended: now.getTime() - job.createdOn.getTime() > QUEUE_PATIENCE_MS,
-        };
+    if (job.state === "active") {
+      return {
+        ...NONE,
+        state: "starting",
+        startedAt: job.startedOn ?? job.createdOn,
+        queuedAt: job.createdOn,
+      };
+    }
+
+    // A retry the queue is deliberately holding back. Until its backoff
+    // passes it is not eligible to run, so nobody has failed to pick it up,
+    // and asking whether the worker is running would blame the wrong thing.
+    if (job.startAfter && job.startAfter.getTime() > now.getTime()) {
+      return {
+        ...NONE,
+        state: job.state === "retry" ? "retrying" : "queued",
+        queuedAt: job.createdOn,
+        retryAt: job.startAfter,
+      };
+    }
+
+    // Eligible now. Patience is counted from the moment it became eligible,
+    // which for a plain job is its creation and for a retry is its backoff
+    // expiring.
+    const eligibleSince = Math.max(job.createdOn.getTime(), job.startAfter?.getTime() ?? 0);
+
+    return {
+      ...NONE,
+      state: "queued",
+      queuedAt: job.createdOn,
+      unattended: now.getTime() - eligibleSince > QUEUE_PATIENCE_MS,
+    };
   }
 
   if (!run) return NONE;

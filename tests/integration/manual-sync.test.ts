@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/server/db/prisma";
 import type { TenantContext } from "@/server/auth/guards";
@@ -285,6 +285,7 @@ describe("asking for a sync: the web request", () => {
         createdOn: queuedAt,
         startedOn: null,
         heartbeatOn: null,
+        startAfter: null,
       }),
     });
     expect(waiting.status).toBe("already_queued");
@@ -298,6 +299,7 @@ describe("asking for a sync: the web request", () => {
         createdOn: queuedAt,
         startedOn: NOW,
         heartbeatOn: NOW,
+        startAfter: null,
       }),
     });
     expect(active.status).toBe("already_running");
@@ -634,6 +636,7 @@ describe("what Data Health says while a sync is on its way", () => {
     createdOn,
     startedOn: state === "active" ? new Date(createdOn.getTime() + 1_000) : null,
     heartbeatOn: null,
+    startAfter: null,
   });
 
   it("shows a waiting job as queued, and as unattended once it has waited too long", async () => {
@@ -864,4 +867,203 @@ describe("the real queue: round trip and the liveness rule", () => {
     expect(pending).toBeNull();
     expect(await hasLiveSyncJob(context.website.id, GSC, new Date(), { schema })).toBe(false);
   }, 60_000);
+});
+
+/**
+ * The line an operator gets when a sync fails inside the database (P1 sync
+ * observability).
+ *
+ * The retry event used to say `code: "unknown"` and nothing else, which is how
+ * a production failure went undiagnosed. It now names the attempt, the class,
+ * the Prisma code, the SQLSTATE and the stage — and still never the message,
+ * because the message is where the SQL and the parameters live.
+ */
+describe("what a retry logs about its failure", () => {
+  function capture(): { lines: Record<string, unknown>[]; restore: () => void } {
+    const lines: Record<string, unknown>[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      const first = args[0];
+      if (typeof first !== "string") return;
+      try {
+        lines.push(JSON.parse(first) as Record<string, unknown>);
+      } catch {
+        // Not one of ours.
+      }
+    });
+    return { lines, restore: () => spy.mockRestore() };
+  }
+
+  const retryEvents = (lines: Record<string, unknown>[]) =>
+    lines.filter((line) => line.at === JOB_NAMES.CONNECTION_SYNC && line.event === "retry");
+
+  it("names a database refusal by class, code and stage, as attempt N of M", async () => {
+    const context = await makeTenant("fingerprint");
+    const connection = await connect(context, GSC);
+    const host = context.website.normalizedDomain;
+    const rows = [{ date: "2026-08-30", path: "/a", query: "alpha", clicks: 5, impressions: 100 }];
+
+    const { lines, restore } = capture();
+    try {
+      // The same fault as the finalisation test above: an actor the audit
+      // trail cannot name makes completeRun's transaction fail with a real
+      // foreign-key error from Postgres.
+      await caught(
+        runConnectionSync(
+          { websiteId: context.website.id, provider: GSC },
+          {
+            now: NOW,
+            job: { id: "job-1", attempt: 1, retryLimit: 2 },
+            gsc: { days: 7, accessTokenFor: TOKEN, source: async () => gscPayload(host, rows) },
+            contextFor: async () => ({
+              context: { ...context, user: { ...context.user, id: crypto.randomUUID() } },
+              actor: "requester",
+            }),
+          },
+        ),
+        RetryableJobError,
+      );
+    } finally {
+      restore();
+    }
+
+    const [event] = retryEvents(lines);
+    expect(event).toBeDefined();
+    expect(event).toMatchObject({
+      websiteId: context.website.id,
+      provider: GSC,
+      jobId: "job-1",
+      attempt: 2,
+      maxAttempts: 3,
+      code: "unknown",
+      errorName: "PrismaClientKnownRequestError",
+      prismaCode: "P2003",
+      stage: "sync_run_finalize",
+    });
+
+    const run = await prisma.syncRun.findFirstOrThrow({ where: { connectionId: connection.id } });
+    expect(event!.runId).toBe(run.id);
+    // The row keeps its sentence; the fingerprint travels in the log.
+    expect(run.errorCode).toBe("unknown");
+    expect(run.errorSummary).toBe("The sync did not complete.");
+  });
+
+  it("names a provider failure by its stage too", async () => {
+    const context = await makeTenant("fingerprint-provider");
+    await connect(context, GSC);
+
+    const { lines, restore } = capture();
+    try {
+      await caught(
+        runConnectionSync(
+          { websiteId: context.website.id, provider: GSC },
+          {
+            now: NOW,
+            gsc: {
+              days: 7,
+              accessTokenFor: TOKEN,
+              source: async () => {
+                throw new SearchConsoleError("slow down", "rate_limited");
+              },
+            },
+          },
+        ),
+        RetryableJobError,
+      );
+    } finally {
+      restore();
+    }
+
+    const [event] = retryEvents(lines);
+    expect(event).toMatchObject({
+      code: "rate_limited",
+      errorName: "SearchConsoleError",
+      prismaCode: null,
+      sqlState: null,
+      stage: "provider_fetch",
+      // No job was supplied, so nothing is invented about the attempt.
+      jobId: null,
+      attempt: null,
+      maxAttempts: null,
+    });
+  });
+
+  it("never lets a message, a stack, SQL or a parameter into the log", async () => {
+    const context = await makeTenant("fingerprint-redact");
+    await connect(context, GSC);
+    const host = context.website.normalizedDomain;
+    const rows = [{ date: "2026-08-30", path: "/a", query: "alpha", clicks: 5, impressions: 100 }];
+
+    const { lines, restore } = capture();
+    try {
+      await caught(
+        runConnectionSync(
+          { websiteId: context.website.id, provider: GSC },
+          {
+            now: NOW,
+            gsc: { days: 7, accessTokenFor: TOKEN, source: async () => gscPayload(host, rows) },
+            contextFor: async () => ({
+              context: { ...context, user: { ...context.user, id: crypto.randomUUID() } },
+              actor: "requester",
+            }),
+          },
+        ),
+        RetryableJobError,
+      );
+    } finally {
+      restore();
+    }
+
+    const serialized = JSON.stringify(retryEvents(lines));
+    expect(serialized.length).toBeGreaterThan(0);
+    for (const forbidden of [
+      "message",
+      "stack",
+      "Foreign key",
+      "constraint",
+      "INSERT",
+      "SELECT",
+      "audit_event",
+      "at runConnectionSync",
+      host,
+      "alpha",
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
+  it("writes the fingerprint to the audit trail when the actor can be named", async () => {
+    const context = await makeTenant("fingerprint-audit");
+    const connection = await connect(context, GSC);
+
+    await caught(
+      runConnectionSync(
+        { websiteId: context.website.id, provider: GSC },
+        {
+          now: NOW,
+          gsc: {
+            days: 7,
+            accessTokenFor: TOKEN,
+            source: async () => {
+              throw new SearchConsoleError("slow down", "rate_limited");
+            },
+          },
+        },
+      ),
+      RetryableJobError,
+    );
+
+    const run = await prisma.syncRun.findFirstOrThrow({ where: { connectionId: connection.id } });
+    const event = await prisma.auditEvent.findFirst({
+      where: { entityType: "SyncRun", entityId: run.id, action: "UPDATE" },
+    });
+
+    expect(event).not.toBeNull();
+    expect(event!.websiteId).toBe(context.website.id);
+    expect(event!.afterSnapshotJson).toMatchObject({
+      status: "FAILED",
+      errorCode: "rate_limited",
+      failure: { name: "SearchConsoleError", stage: "provider_fetch" },
+    });
+    expect(JSON.stringify(event!.afterSnapshotJson)).not.toContain("slow down");
+  });
 });

@@ -142,7 +142,15 @@ export type Queue = {
    */
   work<T>(
     name: JobName,
-    handler: (job: { id: string; data: T; signal: AbortSignal }) => Promise<unknown>,
+    handler: (job: {
+      id: string;
+      data: T;
+      signal: AbortSignal;
+      /** How many times pg-boss has already retried this job. Zero on the first attempt. */
+      attempt: number;
+      /** How many retries pg-boss will allow before the job is failed for good. */
+      retryLimit: number;
+    }) => Promise<unknown>,
   ): Promise<void>;
   /** Drains in-flight work, then closes the pool. */
   stop(options?: { graceful?: boolean; timeoutMs?: number }): Promise<void>;
@@ -288,9 +296,17 @@ export function createQueue(config: QueueConfig): Queue {
 
     async work(name, handler) {
       await start();
-      await boss.work(name, { batchSize: 1 }, async (jobs) => {
+      // includeMetadata is what carries retryCount and retryLimit to the handler,
+      // so a retry can be logged as "attempt 2 of 3" rather than as a fresh job.
+      await boss.work(name, { batchSize: 1, includeMetadata: true }, async (jobs) => {
         for (const job of jobs) {
-          await handler({ id: job.id, data: job.data as never, signal: job.signal });
+          await handler({
+            id: job.id,
+            data: job.data as never,
+            signal: job.signal,
+            attempt: job.retryCount,
+            retryLimit: job.retryLimit,
+          });
         }
       });
     },

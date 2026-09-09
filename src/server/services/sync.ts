@@ -5,6 +5,12 @@ import type { Connection, SyncRun, SyncStatus, SyncType } from "@/generated/pris
 
 import { prisma } from "@/server/db/prisma";
 import { recordAudit } from "@/server/audit/record";
+import {
+  fingerprintError,
+  newStageTracker,
+  type StageTracker,
+  type SyncFailureFingerprint,
+} from "@/lib/sync/failure";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
 import { hasLiveSyncJob } from "@/server/jobs/status";
 import { getAccessToken } from "@/server/services/connection-auth";
@@ -240,6 +246,12 @@ export type SyncOutcome = {
   skipped: number;
   /** True when the run was satisfied from an earlier successful sync. */
   reused: boolean;
+  /**
+   * The safe shape of the error, when the run failed. In memory only, for the
+   * job that decides whether to retry and logs why; the run row keeps its
+   * code and its sentence exactly as before.
+   */
+  failure?: SyncFailureFingerprint;
 };
 
 export async function connectionFor(
@@ -378,10 +390,14 @@ async function claimRun(
   return { run, alreadyDone: false };
 }
 
-async function failRun(run: SyncRun, error: unknown): Promise<SyncRun> {
+async function failRun(
+  run: SyncRun,
+  error: unknown,
+  diagnostics: { context?: TenantContext; failure?: SyncFailureFingerprint } = {},
+): Promise<SyncRun> {
   const code = errorCodeFor(error);
 
-  return prisma.syncRun.update({
+  const failed = await prisma.syncRun.update({
     where: { id: run.id },
     data: {
       status: "FAILED",
@@ -392,6 +408,35 @@ async function failRun(run: SyncRun, error: unknown): Promise<SyncRun> {
   });
   // Note what is NOT here: the connection is left untouched, so lastSyncedAt and
   // latestDataDate still describe the last run that genuinely worked.
+
+  // The safe fingerprint goes to the audit trail, which already exists, is
+  // tenant-scoped, and is never shown on Data Health. It is written after the
+  // run row and on its own: a diagnostic that could not be recorded must not
+  // take the FAILED status down with it, and the error being diagnosed may
+  // well be the database refusing writes.
+  if (diagnostics.context && diagnostics.failure) {
+    const { context, failure } = diagnostics;
+    try {
+      await prisma.$transaction((tx) =>
+        recordAudit(tx, context, {
+          entityType: "SyncRun",
+          entityId: run.id,
+          action: "UPDATE",
+          after: {
+            status: "FAILED",
+            provider: run.provider,
+            errorCode: code,
+            failure,
+          },
+        }),
+      );
+    } catch {
+      // Deliberately silent. The run is already marked, and the retry log
+      // carries the same fingerprint.
+    }
+  }
+
+  return failed;
 }
 
 /**
@@ -804,7 +849,10 @@ async function writeGscChunk(
   snapshotId: string,
   rows: SearchConsoleRow[],
   tally: Tally,
+  progress: StageTracker,
 ): Promise<void> {
+  progress.stage = "normalize";
+
   // Normalize first, so a row that cannot be placed is counted as skipped
   // rather than stored against a guessed identity.
   const urls = new Map<
@@ -849,6 +897,7 @@ async function writeGscChunk(
 
   if (staged.length === 0) return;
 
+  progress.stage = "identity_lookup";
   const pageIds = await resolvePages(
     context.website.id,
     [...urls.values()],
@@ -884,6 +933,7 @@ async function writeGscChunk(
     });
   }
 
+  progress.stage = "database_write";
   tally.written += await upsertGscRows(insertRows);
 }
 
@@ -910,12 +960,18 @@ export async function runGscSync(
     };
   }
 
+  // Where the run is, for the failure record. Advanced at each boundary and
+  // read only in the catch; nothing branches on it.
+  const progress = newStageTracker();
+
   try {
+    progress.stage = "provider_fetch";
     const accessToken = await (options.accessTokenFor ?? getAccessToken)(connection.id);
     const stream = gscStream(options);
 
     // The snapshot exists before any row is written, because every row points
     // at it. What it says about the read is filled in when the read is done.
+    progress.stage = "snapshot_open";
     const snapshotId = await beginSnapshot(context, connection, window);
     const tally = newTally();
 
@@ -937,6 +993,7 @@ export async function runGscSync(
         let rows = 0;
         let pages = 0;
 
+        progress.stage = "provider_fetch";
         const { truncated } = await stream(
           {
             accessToken,
@@ -959,8 +1016,11 @@ export async function runGscSync(
             // Written in pieces, and each piece released before the next.
             // Nothing from an earlier page is still referenced here.
             for (const chunk of chunks(batch, options.ingestChunk)) {
-              await writeGscChunk(context, connection, snapshotId, chunk, tally);
+              await writeGscChunk(context, connection, snapshotId, chunk, tally, progress);
             }
+            // The next thing that happens is the provider being asked for
+            // another page.
+            progress.stage = "provider_fetch";
           },
         );
 
@@ -975,8 +1035,10 @@ export async function runGscSync(
       },
     );
 
+    progress.stage = "snapshot_finalize";
     await finishSnapshot(snapshotId, tally, window, outcome);
 
+    progress.stage = "sync_run_finalize";
     return await completeRun(context, connection, run, {
       window,
       received: tally.received,
@@ -988,7 +1050,8 @@ export async function runGscSync(
       seen: tally.seen,
     });
   } catch (error) {
-    const failed = await failRun(run, error);
+    const failure = fingerprintError(error, progress.stage);
+    const failed = await failRun(run, error, { context, failure });
 
     return {
       run: failed,
@@ -998,6 +1061,7 @@ export async function runGscSync(
       written: 0,
       skipped: 0,
       reused: false,
+      failure,
     };
   }
 }
@@ -1125,7 +1189,9 @@ async function writeGa4Chunk(
   rows: Ga4Result["rows"],
   availableMetrics: Ga4MetricName[],
   tally: Tally,
+  progress: StageTracker,
 ): Promise<void> {
+  progress.stage = "normalize";
   const urls = new Map<
     string,
     { normalized: string; hostname: string; protocol: string; path: string }
@@ -1153,6 +1219,7 @@ async function writeGa4Chunk(
 
   if (staged.length === 0) return;
 
+  progress.stage = "identity_lookup";
   const pageIds = await resolvePages(context.website.id, [...urls.values()], "GOOGLE_ANALYTICS");
 
   // A metric this property cannot report stays null for every row. Reading it
@@ -1192,6 +1259,7 @@ async function writeGa4Chunk(
     });
   }
 
+  progress.stage = "database_write";
   tally.written += await upsertGa4Rows(insertRows);
 }
 
@@ -1217,10 +1285,14 @@ export async function runGa4Sync(
     };
   }
 
+  const progress = newStageTracker();
+
   try {
+    progress.stage = "provider_fetch";
     const accessToken = await (options.accessTokenFor ?? getAccessToken)(connection.id);
     const stream = ga4Stream(options);
 
+    progress.stage = "snapshot_open";
     const snapshotId = await beginSnapshot(context, connection, window);
     const tally = newTally();
 
@@ -1240,6 +1312,7 @@ export async function runGa4Sync(
         let rows = 0;
         let pages = 0;
 
+        progress.stage = "provider_fetch";
         const result = await stream(
           {
             accessToken,
@@ -1263,8 +1336,9 @@ export async function runGa4Sync(
             }
 
             for (const chunk of chunks(batch, options.ingestChunk)) {
-              await writeGa4Chunk(context, connection, snapshotId, chunk, metrics, tally);
+              await writeGa4Chunk(context, connection, snapshotId, chunk, metrics, tally, progress);
             }
+            progress.stage = "provider_fetch";
           },
         );
 
@@ -1281,8 +1355,10 @@ export async function runGa4Sync(
       },
     );
 
+    progress.stage = "snapshot_finalize";
     await finishSnapshot(snapshotId, tally, window, outcome, { availableMetrics });
 
+    progress.stage = "sync_run_finalize";
     return await completeRun(context, connection, run, {
       window,
       received: tally.received,
@@ -1294,7 +1370,8 @@ export async function runGa4Sync(
       seen: tally.seen,
     });
   } catch (error) {
-    const failed = await failRun(run, error);
+    const failure = fingerprintError(error, progress.stage);
+    const failed = await failRun(run, error, { context, failure });
 
     return {
       run: failed,
@@ -1304,6 +1381,7 @@ export async function runGa4Sync(
       written: 0,
       skipped: 0,
       reused: false,
+      failure,
     };
   }
 }
