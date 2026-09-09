@@ -11,6 +11,7 @@ import {
   type StageTracker,
   type SyncFailureFingerprint,
 } from "@/lib/sync/failure";
+import { GSC_FIXED_DIMENSIONS, collapseGscRows, hasUniqueGscGrains } from "@/lib/sync/grain";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
 import { hasLiveSyncJob } from "@/server/jobs/status";
 import { getAccessToken } from "@/server/services/connection-auth";
@@ -721,10 +722,16 @@ type GscInsertRow = {
   pageId: string;
   queryId: string;
   date: string;
+  // The three dimensions this writer fixes. Carried on the row so the grain
+  // it is collapsed on is the schema's grain, column for column.
+  country: string;
+  device: string;
+  searchType: string;
   clicks: number;
   impressions: number;
-  ctr: number;
-  position: number;
+  /** Null only for an aggregate with no impressions to compute it from. */
+  ctr: number | null;
+  position: number | null;
   connectionId: string;
   snapshotId: string;
 };
@@ -737,6 +744,13 @@ type GscInsertRow = {
  * freeze the first, incomplete number in place forever.
  */
 async function upsertGscRows(rows: GscInsertRow[]): Promise<number> {
+  // Postgres refuses a statement whose VALUES list names the same conflict
+  // key twice, so the writer collapses collisions before it gets here. This
+  // is the check that it did, said without naming any row.
+  if (!hasUniqueGscGrains(rows)) {
+    throw new Error("gsc upsert batch contains the same grain more than once");
+  }
+
   let written = 0;
 
   for (let index = 0; index < rows.length; index += BATCH_SIZE) {
@@ -749,9 +763,9 @@ async function upsertGscRows(rows: GscInsertRow[]): Promise<number> {
         ${row.pageId}::uuid,
         ${row.queryId}::uuid,
         ${row.date}::date,
-        'ALL',
-        'ALL',
-        'WEB'::"SearchType",
+        ${row.country},
+        ${row.device},
+        ${row.searchType}::"SearchType",
         ${row.clicks}::int,
         ${row.impressions}::int,
         ${row.ctr}::numeric(9,6),
@@ -924,6 +938,7 @@ async function writeGscChunk(
       pageId,
       queryId,
       date: row.date,
+      ...GSC_FIXED_DIMENSIONS,
       clicks: row.clicks,
       impressions: row.impressions,
       ctr: row.ctr,
@@ -933,8 +948,14 @@ async function writeGscChunk(
     });
   }
 
+  // Only now, with identities resolved, is the persisted grain known. Rows
+  // that turned out to be the same page and query on the same day — the
+  // provider's spellings of one thing — become one measurement here, summed
+  // as measurements rather than dropped as duplicates.
+  const stored = collapseGscRows(insertRows);
+
   progress.stage = "database_write";
-  tally.written += await upsertGscRows(insertRows);
+  tally.written += await upsertGscRows(stored);
 }
 
 /** Search Console → Page, Query, GscMetricDaily. */
