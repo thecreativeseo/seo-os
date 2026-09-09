@@ -542,3 +542,26 @@ function humanizeKey(key: string): string {
   const words = key.toLowerCase().replaceAll("_", " ");
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
+
+/**
+ * How much evidence a finding cites, in one line.
+ *
+ * The records themselves are shown once, at the top of the page, grouped and
+ * compared. Repeating those tables under every finding made the same figures
+ * appear five and six times on one screen, which buries the findings rather
+ * than supporting them.
+ *
+ * What a finding still needs to say is how much it rests on, so a reader can
+ * tell a claim backed by nine records from one backed by none, and knows where
+ * to look. The link between finding and evidence is unchanged in the database;
+ * only the second rendering of it is gone.
+ */
+export function describeCitedEvidence(supporting: number, contradicting: number): string {
+  if (supporting === 0 && contradicting === 0) return "No evidence cited for this finding.";
+
+  const parts: string[] = [];
+  if (supporting > 0) parts.push(`${supporting} supporting`);
+  if (contradicting > 0) parts.push(`${contradicting} contradicting`);
+
+  return `Evidence: ${parts.join(" · ")} — shown above.`;
+}

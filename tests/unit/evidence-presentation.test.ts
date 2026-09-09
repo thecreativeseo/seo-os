@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildEvidenceView,
   describeOmitted,
+  describeCitedEvidence,
   describeQueryCoverage,
   formatChange,
   formatMetric,
@@ -649,5 +650,44 @@ describe("counting queries versus counting clicks", () => {
       .sort((a, b) => (b ?? 0) - (a ?? 0));
 
     expect(clicks).toEqual([51, 12]);
+  });
+});
+
+/**
+ * Saying how much a finding rests on, without saying it all again.
+ *
+ * The records are shown once, grouped and compared, at the top of the page.
+ * Six findings each repeating those tables turned a diagnosis into six copies
+ * of the same four numbers, which buries the findings in their own supporting
+ * material. The link itself is untouched in the database; only the second
+ * rendering of it is gone.
+ */
+describe("what a finding says about its evidence", () => {
+  it("counts what supports and what contradicts, and points upward", () => {
+    expect(describeCitedEvidence(2, 1)).toBe(
+      "Evidence: 2 supporting · 1 contradicting — shown above.",
+    );
+  });
+
+  it("names only the side that exists", () => {
+    expect(describeCitedEvidence(9, 0)).toBe("Evidence: 9 supporting — shown above.");
+    expect(describeCitedEvidence(0, 3)).toBe("Evidence: 3 contradicting — shown above.");
+  });
+
+  it("says so plainly when a finding cites nothing", () => {
+    // A claim resting on no evidence is worth noticing, not hiding behind an
+    // empty space.
+    expect(describeCitedEvidence(0, 0)).toBe("No evidence cited for this finding.");
+  });
+
+  it("is a reference, never a rendering", () => {
+    const line = describeCitedEvidence(2, 1);
+
+    // No metric, no figure, no period: everything a table would carry is
+    // absent, because the table is above.
+    for (const leaked of ["Clicks", "Impressions", "CTR", "Average position", "Sessions", "vs"]) {
+      expect(line).not.toContain(leaked);
+    }
+    expect(line.length).toBeLessThan(60);
   });
 });

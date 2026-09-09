@@ -12,9 +12,8 @@ import {
 import { PageHeader } from "@/components/governance/primitives";
 import { DemoBadge } from "@/components/metrics/primitives";
 import { MarkReviewedButton } from "@/components/diagnosis/controls";
-import { buildEvidenceView } from "@/lib/evidence/presentation";
+import { buildEvidenceView, describeCitedEvidence } from "@/lib/evidence/presentation";
 import {
-  CitedEvidence,
   ConfidenceBadge,
   EvidenceSummary,
   LevelBadge,
@@ -68,7 +67,6 @@ export default async function DiagnosisPage({
   ]);
 
   const history = page ? await listDiagnosesForPage(context, page.id, 20) : [];
-  const byId = new Map((evidenceView?.evidence ?? []).map((record) => [record.id, record]));
 
   // The same records the model saw, rearranged for a person: grouped by source,
   // paired current against previous, with the raw identities folded away.
@@ -170,15 +168,6 @@ export default async function DiagnosisPage({
         ) : (
           <ul className="space-y-3">
             {diagnosis.findings.map((finding) => {
-              const supporting = finding.evidence
-                .filter((link) => link.relationship === "SUPPORTS")
-                .map((link) => byId.get(link.evidenceId))
-                .filter((record): record is NonNullable<typeof record> => record !== undefined);
-              const contradicting = finding.evidence
-                .filter((link) => link.relationship === "CONTRADICTS")
-                .map((link) => byId.get(link.evidenceId))
-                .filter((record): record is NonNullable<typeof record> => record !== undefined);
-
               return (
                 <li
                   key={finding.id}
@@ -206,30 +195,19 @@ export default async function DiagnosisPage({
                     </p>
                   ) : null}
 
-                  <div className="grid gap-4 lg:grid-cols-2">
-                    <div className="space-y-1">
-                      <p className="text-muted-foreground text-xs font-medium">
-                        Supporting evidence ({finding.supportingEvidenceCount})
-                      </p>
-                      <CitedEvidence
-                        emptyText="None cited."
-                        evidence={supporting}
-                        labels={evidenceView?.subjectLabels}
-                        manifest={evidenceView?.manifest ?? null}
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-muted-foreground text-xs font-medium">
-                        Contradicting evidence ({finding.contradictingEvidenceCount})
-                      </p>
-                      <CitedEvidence
-                        emptyText="None cited."
-                        evidence={contradicting}
-                        labels={evidenceView?.subjectLabels}
-                        manifest={evidenceView?.manifest ?? null}
-                      />
-                    </div>
-                  </div>
+                  {/*
+                    A reference, not a second rendering. The records are shown
+                    once at the top of the page, grouped and compared; repeating
+                    those tables under each of six findings buried the findings
+                    in their own supporting material. What is kept is how much
+                    each finding rests on, and where to look.
+                  */}
+                  <p className="text-muted-foreground text-xs">
+                    {describeCitedEvidence(
+                      finding.supportingEvidenceCount,
+                      finding.contradictingEvidenceCount,
+                    )}
+                  </p>
 
                   <MissingEvidenceList items={finding.missingEvidenceJson} />
                 </li>
