@@ -15,7 +15,7 @@ import { DemoBadge } from "@/components/metrics/primitives";
 import { DecisionPanel } from "@/components/review/controls";
 import {
   ConfidenceBadge,
-  EvidenceList,
+  CitedEvidence,
   LevelBadge,
   MissingEvidenceList,
   StaleEvidenceNote,
@@ -138,7 +138,14 @@ export default async function ReviewPage({
           reliability on each.
         </p>
         <StaleEvidenceNote ids={staleEvidenceIds} />
-        <EvidenceList evidence={evidence} emptyText="Nothing cited." />
+        {/*
+          No retrieval manifest reaches this screen, so there is nothing that
+          says which window is "current" and these records are not paired into
+          comparisons. They are still grouped by source and still named by the
+          metric they hold, which is what matters: no screen may show a reader
+          the shape of the query that produced a number instead of the number.
+        */}
+        <CitedEvidence emptyText="Nothing cited." evidence={evidence} manifest={null} />
       </section>
 
       {/* --------------------------------------------------------- Diagnosis */}

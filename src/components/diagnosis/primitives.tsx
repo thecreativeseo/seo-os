@@ -1,15 +1,20 @@
 import type { Evidence } from "@/lib/evidence/types";
 import { RELIABILITY_LABELS } from "@/lib/evidence/types";
 import {
+  buildEvidenceView,
   describeOmitted,
   describeQueryCoverage,
+  describeRecordValue,
+  evidenceHeading,
   formatChange,
   formatMetric,
   formatPeriod,
+  type EvidenceManifest,
   type EvidenceView,
   type MeasuredSubject,
   type MetricRow,
   type SourceGroup,
+  type SubjectLabels,
 } from "@/lib/evidence/presentation";
 
 /**
@@ -91,12 +96,10 @@ export function StatusBadge({ status }: { status: string }) {
 }
 
 function formatValue(evidence: Evidence): string | null {
-  if (evidence.numericValue !== null) {
-    const number = Number(evidence.numericValue);
-    const shown = Number.isInteger(number) ? number.toLocaleString("en-GB") : number.toFixed(2);
-    return evidence.metricKey ? `${humanize(evidence.metricKey)}: ${shown}` : shown;
-  }
-  return evidence.metricKey ? humanize(evidence.metricKey) : null;
+  return describeRecordValue({
+    metricKey: evidence.metricKey,
+    numericValue: evidence.numericValue === null ? null : Number(evidence.numericValue),
+  });
 }
 
 function truncate(text: string, max = 240): string {
@@ -122,7 +125,7 @@ export function EvidenceCard({
   return (
     <li className="border-border space-y-1 rounded-md border p-3 text-sm">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="font-medium">{humanize(evidence.type)}</span>
+        <span className="font-medium">{evidenceHeading(evidence.type)}</span>
         {relationship ? (
           <span className="text-muted-foreground text-xs">{humanize(relationship)}</span>
         ) : null}
@@ -136,33 +139,6 @@ export function EvidenceCard({
         <p className="text-muted-foreground leading-relaxed">{truncate(evidence.textValue)}</p>
       ) : null}
     </li>
-  );
-}
-
-export function EvidenceList({
-  evidence,
-  emptyText,
-  relationships,
-}: {
-  evidence: Evidence[];
-  emptyText: string;
-  /** Optional per-id relationship label (SUPPORTS / CONTRADICTS). */
-  relationships?: Map<string, string>;
-}) {
-  if (evidence.length === 0) {
-    return <p className="text-muted-foreground text-sm">{emptyText}</p>;
-  }
-
-  return (
-    <ul className="space-y-2">
-      {evidence.map((record) => (
-        <EvidenceCard
-          key={record.id}
-          evidence={record}
-          relationship={relationships?.get(record.id)}
-        />
-      ))}
-    </ul>
   );
 }
 
@@ -347,10 +323,18 @@ function MetricTable({ metrics, showPrevious }: { metrics: MetricRow[]; showPrev
  * between queries, and a page can easily carry dozens of them.
  */
 function QueryTable({ subjects }: { subjects: MeasuredSubject[] }) {
+  // A dash, not "Unknown". A query with no record in this period was not
+  // measured and found wanting: it did not appear, and saying "Unknown" would
+  // claim a gap in our data rather than a fact about the period.
   const cell = (subject: MeasuredSubject, key: string) => {
     const metric = subject.metrics.find((row) => row.key === key);
-    return metric ? formatMetric(metric.current, metric.format) : "—";
+    if (!metric || metric.current === null) return "—";
+    return formatMetric(metric.current, metric.format);
   };
+
+  const anyAbsent = subjects.some((subject) =>
+    subject.metrics.every((metric) => metric.current === null),
+  );
 
   return (
     <div className="space-y-1">
@@ -381,6 +365,11 @@ function QueryTable({ subjects }: { subjects: MeasuredSubject[] }) {
           </tbody>
         </table>
       </div>
+      {anyAbsent ? (
+        <p className="text-muted-foreground text-xs">
+          A dash means that query had no Search Console data in this period.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -447,5 +436,52 @@ export function TechnicalProvenance({ view, stale }: { view: EvidenceView; stale
         ) : null}
       </div>
     </details>
+  );
+}
+
+/**
+ * The evidence one finding cites, presented like all other evidence.
+ *
+ * A finding's supporting records are the same measurements as the package's,
+ * seen through a narrower opening, so they get the same treatment: grouped by
+ * source, paired current against previous, identities folded away. Falling back
+ * to raw cards here was what kept "Gsc page window: 6,846" on screen long after
+ * the section above it had stopped saying that.
+ *
+ * The two windows of one page are one comparison whether you arrive at them
+ * through the package or through the finding that cites them.
+ */
+export function CitedEvidence({
+  evidence,
+  manifest,
+  labels,
+  emptyText,
+}: {
+  evidence: Evidence[];
+  manifest: EvidenceManifest | null;
+  labels?: SubjectLabels;
+  emptyText: string;
+}) {
+  if (evidence.length === 0) {
+    return <p className="text-muted-foreground text-sm">{emptyText}</p>;
+  }
+
+  // The window pairs the records; the package's omission counts belong to the
+  // package, not to this finding. Carrying them here made a GA4 finding claim
+  // that Search Console items were "not included in this diagnosis package",
+  // and made "2 of 7 available" out of a finding that cites two records.
+  const view = buildEvidenceView(evidence, { window: manifest?.window ?? null }, labels);
+
+  return (
+    <div className="space-y-3">
+      {view.groups.map((group) => (
+        <SourceGroupCard group={group} key={group.source} />
+      ))}
+      {/*
+        Traceability is per finding as well as per package: this finding cites
+        these records, and each is named by an ID that re-resolves.
+      */}
+      <TechnicalProvenance stale={[]} view={view} />
+    </div>
   );
 }

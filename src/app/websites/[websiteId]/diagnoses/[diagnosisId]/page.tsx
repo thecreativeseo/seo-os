@@ -14,8 +14,8 @@ import { DemoBadge } from "@/components/metrics/primitives";
 import { MarkReviewedButton } from "@/components/diagnosis/controls";
 import { buildEvidenceView } from "@/lib/evidence/presentation";
 import {
+  CitedEvidence,
   ConfidenceBadge,
-  EvidenceList,
   EvidenceSummary,
   LevelBadge,
   MissingEvidenceList,
@@ -211,13 +211,23 @@ export default async function DiagnosisPage({
                       <p className="text-muted-foreground text-xs font-medium">
                         Supporting evidence ({finding.supportingEvidenceCount})
                       </p>
-                      <EvidenceList evidence={supporting} emptyText="None cited." />
+                      <CitedEvidence
+                        emptyText="None cited."
+                        evidence={supporting}
+                        labels={evidenceView?.subjectLabels}
+                        manifest={evidenceView?.manifest ?? null}
+                      />
                     </div>
                     <div className="space-y-1">
                       <p className="text-muted-foreground text-xs font-medium">
                         Contradicting evidence ({finding.contradictingEvidenceCount})
                       </p>
-                      <EvidenceList evidence={contradicting} emptyText="None cited." />
+                      <CitedEvidence
+                        emptyText="None cited."
+                        evidence={contradicting}
+                        labels={evidenceView?.subjectLabels}
+                        manifest={evidenceView?.manifest ?? null}
+                      />
                     </div>
                   </div>
 

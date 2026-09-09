@@ -432,15 +432,22 @@ export function formatChange(row: MetricRow): Change {
 
   if (direction === "flat") return { text: "No change", direction };
 
-  // Position is a rank: a smaller number is an improvement, and a percentage of
-  // a rank is meaningless. Points are what a person actually reads.
-  if (format === "decimal" || format === "percent" || previous === 0) {
+  const sign = delta > 0 ? "+" : "";
+
+  // Position is a rank and CTR is already a proportion. A percentage change of
+  // either is meaningless, so both move in points.
+  if (format === "decimal" || format === "percent") {
     const points = format === "percent" ? `${(delta * 100).toFixed(1)} pts` : delta.toFixed(1);
-    return { text: `${delta > 0 ? "+" : ""}${points}`, direction };
+    return { text: `${sign}${points}`, direction };
   }
 
+  // A count moves by an amount first — that is the fact — with the proportion
+  // after it, where there is a previous value to be a proportion of.
+  const moved = `${sign}${Math.round(delta).toLocaleString("en-GB")}`;
+  if (previous === 0) return { text: moved, direction };
+
   const percent = (delta / previous) * 100;
-  return { text: `${delta > 0 ? "+" : ""}${percent.toFixed(1)}%`, direction };
+  return { text: `${moved} (${sign}${percent.toFixed(1)}%)`, direction };
 }
 
 /** A period as a person would write it: "8 Aug – 4 Sep 2026". */
@@ -461,4 +468,77 @@ export function formatPeriod(period: Period | null): string | null {
 
   const sameYear = start.getUTCFullYear() === end.getUTCFullYear();
   return `${day(start, !sameYear)} – ${day(end, true)}`;
+}
+
+/**
+ * The heading for a single record, in words rather than an enum.
+ *
+ * `humanize` on the category produced "Gsc metric", which is the enum with its
+ * underscores removed rather than a name for the thing. These are the names.
+ */
+const TYPE_HEADINGS: Record<string, string> = {
+  GSC_METRIC: "Search Console measurement",
+  GA4_METRIC: "Analytics measurement",
+  KEYWORD_METRIC: "Keyword demand",
+  RANKING_SNAPSHOT: "Ranking position",
+  COMPETITOR_OBSERVATION: "Competitor position",
+  PAGE_CONTENT: "Page content",
+  INTERNAL_LINK: "Internal link",
+  BUSINESS_CONTEXT: "Business context",
+  BUSINESS_GOAL: "Business goal",
+  BRAND_FACT: "Brand fact",
+  SEO_RULE: "SEO rule",
+  KEYWORD_OWNERSHIP: "Keyword ownership",
+  TOPIC_MAPPING: "Topic mapping",
+  TECHNICAL_FINDING: "Technical finding",
+  PREVIOUS_CHANGE: "Previous change",
+  PREVIOUS_DIAGNOSIS: "Previous diagnosis",
+  PREVIOUS_LEARNING: "Previous learning",
+  MANUAL_VERIFICATION: "Manual verification",
+};
+
+export function evidenceHeading(type: string): string {
+  const known = TYPE_HEADINGS[type];
+  if (known) return known;
+  const words = type.toLowerCase().replaceAll("_", " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * What a single record's number is, said properly.
+ *
+ * A windowed record's key names the query that produced it rather than the
+ * figure it holds, so the figure is named here instead: clicks for Search
+ * Console, sessions for GA4. This is the last line of defence — grouped
+ * rendering pairs these records into tables and never reaches this function —
+ * but a record that falls outside both windows still lands on a card, and it
+ * must not be the one place "Gsc page window" survives.
+ */
+export function describeRecordValue(evidence: {
+  metricKey: string | null;
+  numericValue: number | null;
+}): string | null {
+  const windowed = parseWindowKey(evidence.metricKey);
+
+  if (windowed) {
+    const headline = WINDOW_METRICS[windowed.family]![0]!;
+    if (evidence.numericValue === null) return headline.label;
+    return `${headline.label}: ${formatMetric(evidence.numericValue, headline.format)}`;
+  }
+
+  if (evidence.numericValue === null) {
+    return evidence.metricKey ? humanizeKey(evidence.metricKey) : null;
+  }
+
+  const shown = Number.isInteger(evidence.numericValue)
+    ? evidence.numericValue.toLocaleString("en-GB")
+    : evidence.numericValue.toFixed(2);
+
+  return evidence.metricKey ? `${humanizeKey(evidence.metricKey)}: ${shown}` : shown;
+}
+
+/** A metric key as words. Only used for keys that already read meaningfully. */
+function humanizeKey(key: string): string {
+  const words = key.toLowerCase().replaceAll("_", " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
