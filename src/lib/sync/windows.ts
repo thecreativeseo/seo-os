@@ -143,7 +143,7 @@ export type AdaptiveOptions = {
    * the best that day will have. What it is not is provisional — nothing will
    * replace those rows, so they count.
    */
-  onAccept?: (window: DateWindow) => void;
+  onAccept?: (window: DateWindow) => void | Promise<void>;
   /**
    * Called when a truncated window is abandoned in favour of its halves.
    *
@@ -154,8 +154,12 @@ export type AdaptiveOptions = {
    *
    * Exactly one of onAccept and onDiscard is called for each fetch, so a caller
    * can settle a window's contribution without repeating the driver's decision.
+   *
+   * Either may be asynchronous. A caller that writes a window only once it is
+   * kept does its writing here, and the driver waits for it before moving on,
+   * so windows are still read and written strictly one at a time.
    */
-  onDiscard?: (window: DateWindow) => void;
+  onDiscard?: (window: DateWindow) => void | Promise<void>;
 };
 
 /**
@@ -190,7 +194,7 @@ export async function ingestByDateWindows(
     requests += Math.max(1, result.pages);
 
     if (!result.truncated) {
-      options.onAccept?.(window);
+      await options.onAccept?.(window);
       windows.push({ ...window, ...result, complete: true });
       continue;
     }
@@ -199,12 +203,12 @@ export async function ingestByDateWindows(
       // One day, and the provider still will not give all of it. There is
       // nothing smaller to ask for, so what it gave is kept — those rows are
       // the best that day will have — and the period carries on incomplete.
-      options.onAccept?.(window);
+      await options.onAccept?.(window);
       windows.push({ ...window, ...result, complete: false, code: DAY_EXCEEDS_PROVIDER_LIMIT });
       continue;
     }
 
-    options.onDiscard?.(window);
+    await options.onDiscard?.(window);
     const [left, right] = splitWindow(window);
     pending.unshift(left, right);
   }

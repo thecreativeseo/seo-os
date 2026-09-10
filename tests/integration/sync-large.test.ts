@@ -347,14 +347,21 @@ describe("GA4 over many pages", () => {
     });
 
     expect(outcome.status).toBe("FAILED");
+
+    // GA4 writes a window only once the whole window has been read, because
+    // the spellings of one page can be spread across its pages and only the
+    // complete window can say what the page's day added up to. A read that
+    // fails midway therefore leaves nothing behind for GA4 — unlike Search
+    // Console, which writes each chunk — and the retry reads the window again.
     expect(
       await prisma.ga4LandingPageMetricDaily.count({ where: { websiteId: tenant.website.id } }),
-    ).toBe(15);
+    ).toBe(0);
 
     const connection = await prisma.connection.findFirstOrThrow({
       where: { websiteId: tenant.website.id, provider: "GOOGLE_ANALYTICS" },
     });
     expect(connection.latestDataDate).toBeNull();
+    expect(connection.lastSyncedAt).toBeNull();
   }, 180_000);
 
   it("replays to the same rows", async () => {

@@ -12,6 +12,8 @@ import {
   type SyncFailureFingerprint,
 } from "@/lib/sync/failure";
 import { GSC_FIXED_DIMENSIONS, collapseGscRows, hasUniqueGscGrains } from "@/lib/sync/grain";
+import { Ga4WindowAccumulator, hasUniqueGa4Grains } from "@/lib/sync/ga4-grain";
+import type { NormalizedUrl } from "@/lib/url/normalize-url";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
 import { hasLiveSyncJob } from "@/server/jobs/status";
 import { getAccessToken } from "@/server/services/connection-auth";
@@ -1102,6 +1104,13 @@ type Ga4InsertRow = {
 };
 
 async function upsertGa4Rows(rows: Ga4InsertRow[]): Promise<number> {
+  // Postgres refuses a statement that names the same conflict key twice; the
+  // window accumulator collapses collisions before this point, and this says
+  // so without naming a row.
+  if (!hasUniqueGa4Grains(rows)) {
+    throw new Error("ga4 upsert batch contains the same grain more than once");
+  }
+
   let written = 0;
 
   for (let index = 0; index < rows.length; index += BATCH_SIZE) {
@@ -1202,22 +1211,27 @@ function ga4Stream(options: Ga4SyncOptions): typeof streamLandingPageMetrics {
   };
 }
 
-/** One bounded piece of a GA4 page: normalised, placed, written, released. */
-async function writeGa4Chunk(
+/**
+ * Normalises one bounded piece of a GA4 page into the window's accumulator.
+ *
+ * Nothing is written here. GA4 reports the same page under several spellings
+ * — with and without a query string, a trailing slash, an index file — that
+ * the normalizer folds into one, and those spellings can arrive in different
+ * provider pages and different chunks. A row written per chunk would let a
+ * later chunk replace an earlier one for the same page and day, and for the
+ * unique-user counts that is not even wrong in a recoverable way. So a
+ * window's rows are gathered by grain and written once, when the window is
+ * kept. What the accumulator holds is a few numbers per distinct page and
+ * day, never the rows.
+ */
+function stageGa4Chunk(
   context: TenantContext,
-  connection: Connection,
-  snapshotId: string,
   rows: Ga4Result["rows"],
-  availableMetrics: Ga4MetricName[],
+  window: Ga4WindowState,
   tally: Tally,
   progress: StageTracker,
-): Promise<void> {
+): void {
   progress.stage = "normalize";
-  const urls = new Map<
-    string,
-    { normalized: string; hostname: string; protocol: string; path: string }
-  >();
-  const staged: { date: string; url: string; metrics: Ga4Result["rows"][number]["metrics"] }[] = [];
 
   for (const row of rows) {
     const candidate = landingPageToUrl(row.landingPage, context.website.normalizedDomain);
@@ -1234,47 +1248,69 @@ async function writeGa4Chunk(
       continue;
     }
 
-    urls.set(url.value.normalized, url.value);
-    staged.push({ date: row.date, url: url.value.normalized, metrics: row.metrics });
+    window.urls.set(url.value.normalized, url.value);
+    window.accumulator.add(row.date, url.value.normalized, row.metrics);
   }
+}
 
-  if (staged.length === 0) return;
+/** Everything a window gathers before it is kept or thrown away. */
+type Ga4WindowState = {
+  accumulator: Ga4WindowAccumulator;
+  /** The pages seen, by normalized URL, for one bounded identity lookup each. */
+  urls: Map<string, NormalizedUrl>;
+};
+
+/**
+ * Writes a kept window: one row per page per day.
+ *
+ * Identities are resolved in bounded batches, so a window with many distinct
+ * pages costs several small lookups rather than one enormous IN list. The
+ * rows are then upserted in batches on the documented grain, exactly as a
+ * replay of the same window would upsert them again.
+ */
+async function flushGa4Window(
+  context: TenantContext,
+  connection: Connection,
+  snapshotId: string,
+  window: Ga4WindowState,
+  tally: Tally,
+  progress: StageTracker,
+): Promise<void> {
+  const measurements = window.accumulator.drain();
+  if (measurements.length === 0) return;
 
   progress.stage = "identity_lookup";
-  const pageIds = await resolvePages(context.website.id, [...urls.values()], "GOOGLE_ANALYTICS");
-
-  // A metric this property cannot report stays null for every row. Reading it
-  // off the row alone would store null for a page that simply had none that
-  // day, which is a different fact.
-  const measured = new Set(availableMetrics);
-  const valueOf = (
-    metrics: Ga4Result["rows"][number]["metrics"],
-    name: Ga4MetricName,
-  ): number | null => (measured.has(name) ? (metrics[name] ?? 0) : null);
+  const pageIds = new Map<string, string>();
+  const urls = [...window.urls.values()];
+  for (const batch of chunks(urls, INGEST_CHUNK)) {
+    const resolved = await resolvePages(context.website.id, batch, "GOOGLE_ANALYTICS");
+    for (const [url, id] of resolved) pageIds.set(url, id);
+  }
+  window.urls.clear();
 
   const insertRows: Ga4InsertRow[] = [];
 
-  for (const row of staged) {
-    const pageId = pageIds.get(row.url);
+  for (const measurement of measurements) {
+    const pageId = pageIds.get(measurement.url);
 
     if (!pageId) {
-      tally.skipped += 1;
+      tally.skipped += measurement.rawRows;
       continue;
     }
 
-    tally.seen += 1;
-    noteDate(tally, row.date);
+    tally.seen += measurement.rawRows;
+    noteDate(tally, measurement.date);
 
     insertRows.push({
       websiteId: context.website.id,
       pageId,
-      date: row.date,
-      sessions: valueOf(row.metrics, "sessions"),
-      engagedSessions: valueOf(row.metrics, "engagedSessions"),
-      users: valueOf(row.metrics, "totalUsers"),
-      newUsers: valueOf(row.metrics, "newUsers"),
-      keyEvents: valueOf(row.metrics, "keyEvents"),
-      revenue: valueOf(row.metrics, "totalRevenue"),
+      date: measurement.date,
+      sessions: measurement.sessions,
+      engagedSessions: measurement.engagedSessions,
+      users: measurement.users,
+      newUsers: measurement.newUsers,
+      keyEvents: measurement.keyEvents,
+      revenue: measurement.revenue,
       connectionId: connection.id,
       snapshotId,
     });
@@ -1283,7 +1319,6 @@ async function writeGa4Chunk(
   progress.stage = "database_write";
   tally.written += await upsertGa4Rows(insertRows);
 }
-
 export async function runGa4Sync(
   context: TenantContext,
   options: Ga4SyncOptions = {},
@@ -1321,9 +1356,12 @@ export async function runGa4Sync(
     // and the same for every one after it.
     let availableMetrics: Ga4MetricName[] = [];
 
-    // Held until the driver says whether this window is kept. See the same
-    // variable in the Search Console sync.
+    // Held until the driver says whether this window is kept. For GA4 the
+    // window's rows are held too — gathered by grain, not stored as rows —
+    // and written only on acceptance, so a probe that is split never writes
+    // and the same page's spellings across chunks become one measurement.
     let contribution: WindowContribution = null;
+    let pending: Ga4WindowState | null = null;
 
     const outcome = await ingestByDateWindows(
       { startDate: window.startDate, endDate: window.endDate },
@@ -1356,8 +1394,9 @@ export async function runGa4Sync(
               );
             }
 
+            pending ??= { accumulator: new Ga4WindowAccumulator(metrics), urls: new Map() };
             for (const chunk of chunks(batch, options.ingestChunk)) {
-              await writeGa4Chunk(context, connection, snapshotId, chunk, metrics, tally, progress);
+              stageGa4Chunk(context, chunk, pending, tally, progress);
             }
             progress.stage = "provider_fetch";
           },
@@ -1371,8 +1410,18 @@ export async function runGa4Sync(
       {
         initialDays: options.windowDays,
         maxRequests: options.maxRequests,
-        onAccept: () => acceptWindow(tally, contribution),
-        onDiscard: () => discardWindow(tally, contribution),
+        onAccept: async () => {
+          acceptWindow(tally, contribution);
+          const kept = pending;
+          pending = null;
+          if (kept) await flushGa4Window(context, connection, snapshotId, kept, tally, progress);
+        },
+        onDiscard: () => {
+          // Nothing was written for a probe, so there is nothing to undo in
+          // the database; only the counters and the gathered rows go.
+          discardWindow(tally, contribution);
+          pending = null;
+        },
       },
     );
 

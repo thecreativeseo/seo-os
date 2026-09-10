@@ -252,7 +252,11 @@ describe("reading a period in windows", () => {
     const outcome = await ingestByDateWindows(
       { startDate: "2026-09-01", endDate: "2026-09-02" },
       async (window) => ({ rows: 1, pages: 3, truncated: windowLength(window) > 1 }),
-      { onDiscard: () => (discarded += 1) },
+      {
+        onDiscard: () => {
+          discarded += 1;
+        },
+      },
     );
 
     expect(discarded).toBe(1);
