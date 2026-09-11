@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/server/db/prisma";
 import type { TenantContext } from "@/server/auth/guards";
+import { Prisma } from "@/generated/prisma/client";
 import type { Ga4Result } from "@/server/connectors/google/analytics";
 import {
   SearchConsoleError,
@@ -13,6 +14,7 @@ import {
   RetryableJobError,
   connectionSyncPayload,
   runConnectionSync,
+  type ConnectionSyncOptions,
   type ConnectionSyncPayload,
 } from "@/server/jobs/definitions";
 import { JOB_NAMES, manualSyncKey } from "@/server/jobs/names";
@@ -629,6 +631,292 @@ describe("doing the sync: the worker", () => {
   });
 });
 
+/**
+ * What happens after the pull (P1 manual sync post-processing).
+ *
+ * Signal detection runs after a finalised run, and in production it failed —
+ * a score the column could not hold — after ingestion, snapshot and freshness
+ * had all succeeded. The exception left the handler, pg-boss retried the job,
+ * and the provider was pulled again, twice, for a fault it had no part in.
+ *
+ * Detection is now its own failure domain. Ingestion failures, provider and
+ * database alike, still go back to the queue exactly as before; a detection
+ * failure after them is logged, noted in the audit trail, reported in the
+ * summary — and never retried, because there is nothing to retry.
+ */
+describe("after the pull: signal detection is its own failure domain", () => {
+  const rows = [
+    { date: "2026-08-30", path: "/a", query: "alpha", clicks: 5, impressions: 100 },
+    { date: "2026-08-30", path: "/b", query: "beta", clicks: 1, impressions: 20 },
+  ];
+
+  /** The production fault, with a message that must never travel. */
+  const overflow = () =>
+    new Prisma.PrismaClientKnownRequestError(
+      "numeric field overflow: value 188993 in column score SECRET-PARAMETER",
+      { code: "P2020", clientVersion: "test" },
+    );
+
+  function capture(): { lines: Record<string, unknown>[]; restore: () => void } {
+    const lines: Record<string, unknown>[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      const first = args[0];
+      if (typeof first !== "string") return;
+      try {
+        lines.push(JSON.parse(first) as Record<string, unknown>);
+      } catch {
+        // Not one of ours.
+      }
+    });
+    return { lines, restore: () => spy.mockRestore() };
+  }
+
+  it("reports a successful detection alongside the completed run", async () => {
+    const context = await makeTenant("post-ok");
+    const connection = await connect(context, GSC);
+    const host = context.website.normalizedDomain;
+
+    const summary = await runConnectionSync(
+      { websiteId: context.website.id, provider: GSC, requestedByUserId: context.user.id },
+      {
+        now: NOW,
+        gsc: { days: 7, accessTokenFor: TOKEN, source: async () => gscPayload(host, rows) },
+        detect: async () => ({ detected: 3, resolved: 1 }),
+      },
+    );
+
+    expect(summary.status).toBe("done");
+    expect(summary.signals).toEqual({
+      step: "signals",
+      status: "done",
+      detail: "3 detected, 1 resolved",
+    });
+
+    const run = await prisma.syncRun.findUniqueOrThrow({ where: { id: summary.runId! } });
+    expect(run.status).toBe("SUCCEEDED");
+    const refreshed = await prisma.connection.findUniqueOrThrow({ where: { id: connection.id } });
+    expect(refreshed.latestDataDate?.toISOString().slice(0, 10)).toBe("2026-08-30");
+  });
+
+  it("a detection failure after a completed pull finishes the job with the run intact", async () => {
+    const context = await makeTenant("post-throws");
+    const connection = await connect(context, GSC);
+    const host = context.website.normalizedDomain;
+    let pulls = 0;
+    const gsc = {
+      days: 7,
+      accessTokenFor: TOKEN,
+      source: async () => {
+        pulls += 1;
+        return gscPayload(host, rows);
+      },
+    };
+
+    const { lines, restore } = capture();
+    let summary;
+    try {
+      // Resolves. Before, this rejected and the whole job went back to the queue.
+      summary = await runConnectionSync(
+        { websiteId: context.website.id, provider: GSC, requestedByUserId: context.user.id },
+        {
+          now: NOW,
+          job: { id: "job-post", attempt: 0, retryLimit: 2 },
+          gsc,
+          detect: async () => {
+            throw overflow();
+          },
+        },
+      );
+    } finally {
+      restore();
+    }
+
+    // The job is done and says plainly that detection was not.
+    expect(summary.status).toBe("done");
+    expect(summary.written).toBe(2);
+    expect(summary.signals).toEqual({
+      step: "signals",
+      status: "failed",
+      detail: "PrismaClientKnownRequestError",
+    });
+
+    // The run is the ingestion's result, untouched: SUCCEEDED, closed, fresh.
+    const run = await prisma.syncRun.findUniqueOrThrow({ where: { id: summary.runId! } });
+    expect(run.status).toBe("SUCCEEDED");
+    expect(run.finishedAt).not.toBeNull();
+    expect(run.errorCode).toBeNull();
+    expect(run.recordsWritten).toBe(2);
+    const refreshed = await prisma.connection.findUniqueOrThrow({ where: { id: connection.id } });
+    expect(refreshed.lastSyncedAt).not.toBeNull();
+    expect(refreshed.latestDataDate?.toISOString().slice(0, 10)).toBe("2026-08-30");
+
+    // One pull. And what a retry would have done, had there been one, is nothing:
+    // the same request is satisfied by the run that already completed.
+    expect(pulls).toBe(1);
+    const again = await runConnectionSync(
+      { websiteId: context.website.id, provider: GSC },
+      { now: NOW, gsc, detect: noDetect },
+    );
+    expect(again.status).toBe("reused");
+    expect(pulls).toBe(1);
+    expect(await prisma.syncRun.count({ where: { connectionId: connection.id } })).toBe(1);
+
+    // The failure is logged as the attempt it was, by its safe shape only.
+    const event = lines.find(
+      (line) => line.at === JOB_NAMES.CONNECTION_SYNC && line.event === "signals_failed",
+    );
+    expect(event).toMatchObject({
+      websiteId: context.website.id,
+      provider: GSC,
+      jobId: "job-post",
+      attempt: 1,
+      maxAttempts: 3,
+      runId: run.id,
+      runStatus: "SUCCEEDED",
+      step: "signals",
+      errorName: "PrismaClientKnownRequestError",
+      prismaCode: "P2020",
+    });
+    expect(lines.some((line) => line.event === "retry")).toBe(false);
+    expect(JSON.stringify(lines)).not.toContain("overflow");
+    expect(JSON.stringify(lines)).not.toContain("SECRET-PARAMETER");
+
+    // And in the audit trail, against the run it followed, without rewriting it.
+    const audit = await prisma.auditEvent.findFirst({
+      where: { entityType: "SyncRun", entityId: run.id, action: "UPDATE" },
+    });
+    expect(audit).not.toBeNull();
+    expect(audit!.afterSnapshotJson).toMatchObject({
+      status: "SUCCEEDED",
+      signals: "FAILED",
+      failure: { name: "PrismaClientKnownRequestError", prismaCode: "P2020" },
+    });
+    expect(JSON.stringify(audit!.afterSnapshotJson)).not.toContain("SECRET-PARAMETER");
+  });
+
+  it("a PARTIAL pull followed by a detection failure stays PARTIAL, never FAILED", async () => {
+    const context = await makeTenant("post-partial");
+    const connection = await connect(context, GSC);
+    const host = context.website.normalizedDomain;
+    const payload = gscPayload(host, rows);
+    // One row the provider gave that belongs to no page of this website: it is
+    // skipped, which makes the run PARTIAL although the period was read whole.
+    payload.rows.push({
+      date: "2026-08-30",
+      page: "https://elsewhere.invalid/x",
+      query: "",
+      clicks: 1,
+      impressions: 1,
+      ctr: 1,
+      position: 1,
+    });
+
+    const summary = await runConnectionSync(
+      { websiteId: context.website.id, provider: GSC },
+      {
+        now: NOW,
+        gsc: { days: 7, accessTokenFor: TOKEN, source: async () => payload },
+        detect: async () => {
+          throw new Error("detection broke, and this sentence must not travel");
+        },
+      },
+    );
+
+    expect(summary.status).toBe("done");
+    expect(summary.signals).toMatchObject({ status: "failed", detail: "Error" });
+
+    const run = await prisma.syncRun.findUniqueOrThrow({ where: { id: summary.runId! } });
+    expect(run.status).toBe("PARTIAL");
+    expect(run.recordsSkipped).toBe(1);
+    expect(run.recordsWritten).toBe(2);
+    expect(run.errorCode).toBeNull();
+    // Skipped rows do not make the period incomplete, so freshness still moved.
+    const refreshed = await prisma.connection.findUniqueOrThrow({ where: { id: connection.id } });
+    expect(refreshed.lastSyncedAt).not.toBeNull();
+  });
+
+  it("a provider failure still goes back to the queue, and detection never runs", async () => {
+    const context = await makeTenant("post-provider");
+    await connect(context, GSC);
+    const detect = vi.fn(async () => undefined);
+
+    const error = await caught(
+      runConnectionSync(
+        { websiteId: context.website.id, provider: GSC },
+        {
+          now: NOW,
+          gsc: {
+            days: 7,
+            accessTokenFor: TOKEN,
+            source: async () => {
+              throw new SearchConsoleError("slow down", "rate_limited");
+            },
+          },
+          detect,
+        },
+      ),
+      RetryableJobError,
+    );
+
+    expect(error.code).toBe("rate_limited");
+    expect(detect).not.toHaveBeenCalled();
+  });
+
+  it("a database refusal during ingestion still goes back to the queue, and detection never runs", async () => {
+    const context = await makeTenant("post-db");
+    const connection = await connect(context, GSC);
+    const host = context.website.normalizedDomain;
+    const detect = vi.fn(async () => undefined);
+
+    // The same fault as the finalisation test: an actor the audit trail cannot
+    // name makes completeRun's transaction fail after the rows were written.
+    const error = await caught(
+      runConnectionSync(
+        { websiteId: context.website.id, provider: GSC },
+        {
+          now: NOW,
+          gsc: { days: 7, accessTokenFor: TOKEN, source: async () => gscPayload(host, rows) },
+          contextFor: async () => ({
+            context: { ...context, user: { ...context.user, id: crypto.randomUUID() } },
+            actor: "requester",
+          }),
+          detect,
+        },
+      ),
+      RetryableJobError,
+    );
+
+    expect(error.code).toBe("unknown");
+    expect(detect).not.toHaveBeenCalled();
+    const run = await prisma.syncRun.findFirstOrThrow({ where: { connectionId: connection.id } });
+    expect(run.status).toBe("FAILED");
+  });
+
+  it("Data Health shows the completed run, not a scheduled retry, after a detection failure", async () => {
+    const context = await makeTenant("post-health");
+    await connect(context, GSC);
+    const host = context.website.normalizedDomain;
+
+    await runConnectionSync(
+      { websiteId: context.website.id, provider: GSC },
+      {
+        now: NOW,
+        gsc: { days: 7, accessTokenFor: TOKEN, source: async () => gscPayload(host, rows) },
+        detect: async () => {
+          throw overflow();
+        },
+      },
+    );
+
+    // The job completed, so the queue holds nothing for this connection: no
+    // retry, and therefore no "Retry scheduled".
+    const [source] = await getDataHealth(context, NOW, { pendingJob: noJob });
+    expect(source?.attempt).toMatchObject({ state: "succeeded", retryAt: null, errorCode: null });
+    expect(source?.lastSyncedAt).not.toBeNull();
+    expect(source?.latestDataDate?.toISOString().slice(0, 10)).toBe("2026-08-30");
+  });
+});
+
 describe("what Data Health says while a sync is on its way", () => {
   const job = (state: PendingJob["state"], createdOn: Date): PendingJob => ({
     id: "j",
@@ -698,12 +986,30 @@ describe("the real queue: round trip and the liveness rule", () => {
   const pendingHere = (websiteId: string, provider: string) =>
     pendingManualSyncJob(websiteId, provider, { schema });
 
+  /**
+   * What the worker does for each website's job: the provider fake and the
+   * detection seam. One handler serves the whole describe — pg-boss runs every
+   * handler registered on a queue, so a second queue.work() would race the
+   * first for each job — and looks its behaviour up by website.
+   */
+  const behaviours = new Map<string, ConnectionSyncOptions>();
+
   beforeAll(async () => {
     previousSchema = process.env.PGBOSS_SCHEMA;
     process.env.PGBOSS_SCHEMA = schema;
     await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     queue = createQueue({ role: "worker", schema, max: 2 });
     await queue.start();
+
+    await queue.work<ConnectionSyncPayload>(JOB_NAMES.CONNECTION_SYNC, async (job) => {
+      const payload = connectionSyncPayload.parse(job.data);
+      const behaviour = behaviours.get(payload.websiteId);
+      if (!behaviour) throw new Error("a job for a website this test did not set up");
+      return runConnectionSync(payload, {
+        job: { id: job.id, attempt: job.attempt, retryLimit: job.retryLimit },
+        ...behaviour,
+      });
+    });
   }, 90_000);
 
   afterAll(async () => {
@@ -712,6 +1018,17 @@ describe("the real queue: round trip and the liveness rule", () => {
     if (previousSchema === undefined) delete process.env.PGBOSS_SCHEMA;
     else process.env.PGBOSS_SCHEMA = previousSchema;
   }, 60_000);
+
+  async function jobState(websiteId: string): Promise<string | null> {
+    const rows = await prisma.$queryRawUnsafe<{ state: string }[]>(
+      `SELECT state FROM ${schema}.job
+        WHERE name = $1 AND data->>'websiteId' = $2
+        ORDER BY created_on DESC LIMIT 1`,
+      JOB_NAMES.CONNECTION_SYNC,
+      websiteId,
+    );
+    return rows[0]?.state ?? null;
+  }
 
   /** A job row as pg-boss would leave it mid-handler, without a worker to hold it. */
   async function plantActiveJob(
@@ -815,21 +1132,18 @@ describe("the real queue: round trip and the liveness rule", () => {
     const day = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
     let pulls = 0;
 
-    await queue.work<ConnectionSyncPayload>(JOB_NAMES.CONNECTION_SYNC, async (job) => {
-      const payload = connectionSyncPayload.parse(job.data);
-      return runConnectionSync(payload, {
-        gsc: {
-          days: 7,
-          accessTokenFor: TOKEN,
-          source: async () => {
-            pulls += 1;
-            return gscPayload(host, [
-              { date: day, path: "/a", query: "alpha", clicks: 4, impressions: 40 },
-            ]);
-          },
+    behaviours.set(context.website.id, {
+      gsc: {
+        days: 7,
+        accessTokenFor: TOKEN,
+        source: async () => {
+          pulls += 1;
+          return gscPayload(host, [
+            { date: day, path: "/a", query: "alpha", clicks: 4, impressions: 40 },
+          ]);
         },
-        detect: noDetect,
-      });
+      },
+      detect: noDetect,
     });
 
     const first = await requestManualSync(context, GSC, { queue, pendingJob: pendingHere });
@@ -866,6 +1180,59 @@ describe("the real queue: round trip and the liveness rule", () => {
 
     expect(pending).toBeNull();
     expect(await hasLiveSyncJob(context.website.id, GSC, new Date(), { schema })).toBe(false);
+  }, 60_000);
+  it("round trip with a detection failure: the job completes, and nothing is retried", async () => {
+    const context = await makeTenant("roundtrip-signals");
+    const connection = await connect(context, GSC);
+    const host = context.website.normalizedDomain;
+    const day = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
+    let pulls = 0;
+
+    behaviours.set(context.website.id, {
+      gsc: {
+        days: 7,
+        accessTokenFor: TOKEN,
+        source: async () => {
+          pulls += 1;
+          return gscPayload(host, [
+            { date: day, path: "/a", query: "alpha", clicks: 4, impressions: 40 },
+          ]);
+        },
+      },
+      detect: async () => {
+        throw new Prisma.PrismaClientKnownRequestError("numeric field overflow", {
+          code: "P2020",
+          clientVersion: "test",
+        });
+      },
+    });
+
+    const requested = await requestManualSync(context, GSC, { queue, pendingJob: pendingHere });
+    expect(requested.status).toBe("queued");
+
+    const deadline = Date.now() + 40_000;
+    let run = await prisma.syncRun.findFirst({ where: { connectionId: connection.id } });
+    while ((!run || run.status === "RUNNING") && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      run = await prisma.syncRun.findFirst({ where: { connectionId: connection.id } });
+    }
+    expect(run?.status).toBe("SUCCEEDED");
+
+    // pg-boss records the job as completed — not retry, not failed — so the
+    // page has nothing to call "Retry scheduled", and the provider was pulled once.
+    const settled = Date.now() + 15_000;
+    let state = await jobState(context.website.id);
+    while (state !== "completed" && state !== "failed" && state !== "retry" && Date.now() < settled) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      state = await jobState(context.website.id);
+    }
+    expect(state).toBe("completed");
+    expect(pulls).toBe(1);
+    expect(await pendingHere(context.website.id, GSC)).toBeNull();
+
+    const [source] = await getDataHealth(context, new Date(), { pendingJob: pendingHere });
+    expect(source?.attempt.state).toBe("succeeded");
+    expect(source?.attempt.retryAt).toBeNull();
   }, 60_000);
 });
 

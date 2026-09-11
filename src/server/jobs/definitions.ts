@@ -2,6 +2,7 @@ import { z } from "zod";
 import { fingerprintError, fingerprintFields } from "@/lib/sync/failure";
 
 import { prisma } from "@/server/db/prisma";
+import { recordAudit } from "@/server/audit/record";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
 import { REQUIRED, hasRole } from "@/server/auth/roles";
 import { SitemapError } from "@/server/connectors/sitemap/fetch";
@@ -25,7 +26,7 @@ import {
   type SyncErrorCode,
   type SyncOutcome,
 } from "@/server/services/sync";
-import type { ConnectionProvider, DiagnosisRequest } from "@/generated/prisma/client";
+import type { ConnectionProvider, DiagnosisRequest, SyncStatus } from "@/generated/prisma/client";
 
 import { MANUAL_SYNC_PROVIDERS, type ManualSyncProvider } from "./names";
 import { JOB_NAMES, type Queue } from "./queue";
@@ -82,6 +83,12 @@ export type ConnectionSyncSummary = {
   written?: number;
   /** Whose name the audit trail carries for this run. */
   actor: "requester" | "system";
+  /**
+   * What became of signal detection after the pull. Its own failure domain:
+   * "failed" here never fails the job, because the run it follows is already
+   * finalised and a retry would pull the provider again for nothing.
+   */
+  signals?: StepResult;
 };
 
 /** A cron job carries no data; a manual trigger may say who asked. */
@@ -549,12 +556,26 @@ export async function runConnectionSync(
 
   // New metrics mean the previous detection is out of date — the step the
   // button used to take after a successful pull, taken here instead.
-  if (outcome.written > 0 && !options.signal?.aborted) {
-    const detect =
-      options.detect ??
-      ((target: TenantContext, at: Date) => detectAndStoreSignals(target, { now: at }));
-    await detect(context, now);
-  }
+  //
+  // From here on the run is finalised: rows committed, snapshot closed,
+  // freshness advanced where it may be. A failure in detection is a failure
+  // after the sync, not of it, so it is recorded and reported but never
+  // thrown — thrown, it would hand the job back to pg-boss, which would pull
+  // the provider again for a fault the provider had no part in.
+  const signals =
+    outcome.written > 0 && !options.signal?.aborted
+      ? await detectAfterSync(context, now, {
+          ...summary,
+          runId: outcome.run.id,
+          runStatus: outcome.status,
+          job: options.job,
+          detect: options.detect,
+        })
+      : {
+          step: "signals",
+          status: "skipped" as const,
+          detail: outcome.written > 0 ? "aborted" : "no new rows",
+        };
 
   return {
     ...summary,
@@ -563,7 +584,84 @@ export async function runConnectionSync(
     runId: outcome.run.id,
     written: outcome.written,
     actor,
+    signals,
   };
+}
+
+/**
+ * Signal detection after a finalised run, as a step that reports rather than
+ * throws.
+ *
+ * On failure the safe shape of the error — class, Prisma code, SQLSTATE,
+ * never the message — goes to the log as the attempt it was, and to the
+ * tenant's audit trail against the run it followed, the same channel an
+ * ingestion failure uses. The run row itself is not touched: it says what the
+ * ingestion did, and the ingestion did not fail.
+ */
+async function detectAfterSync(
+  context: TenantContext,
+  now: Date,
+  identity: {
+    websiteId: string;
+    provider: ManualSyncProvider;
+    runId: string;
+    runStatus: SyncStatus;
+    job: ConnectionSyncOptions["job"];
+    detect: ConnectionSyncOptions["detect"];
+  },
+): Promise<StepResult> {
+  const detect =
+    identity.detect ??
+    ((target: TenantContext, at: Date) => detectAndStoreSignals(target, { now: at }));
+
+  try {
+    const result = await detect(context, now);
+    return { step: "signals", status: "done", detail: describeDetection(result) };
+  } catch (error) {
+    const failure = fingerprintError(error);
+
+    log({
+      at: JOB_NAMES.CONNECTION_SYNC,
+      event: "signals_failed",
+      websiteId: identity.websiteId,
+      provider: identity.provider,
+      ...retryIdentity(identity.job),
+      runId: identity.runId,
+      runStatus: identity.runStatus,
+      step: "signals",
+      ...fingerprintFields(failure),
+    });
+
+    try {
+      await prisma.$transaction((tx) =>
+        recordAudit(tx, context, {
+          entityType: "SyncRun",
+          entityId: identity.runId,
+          action: "UPDATE",
+          after: {
+            status: identity.runStatus,
+            provider: identity.provider,
+            signals: "FAILED",
+            failure,
+          },
+        }),
+      );
+    } catch {
+      // Deliberately silent: the log line above carries the same fingerprint,
+      // and an audit row that cannot be written must not become a job failure.
+    }
+
+    return { step: "signals", status: "failed", detail: failure.name ?? "unknown" };
+  }
+}
+
+/** Counts from a detection result, in our words; nothing from a seam that returns none. */
+function describeDetection(result: unknown): string | undefined {
+  const record = result as { detected?: unknown; resolved?: unknown } | null | undefined;
+  if (!record || typeof record.detected !== "number" || typeof record.resolved !== "number") {
+    return undefined;
+  }
+  return `${record.detected} detected, ${record.resolved} resolved`;
 }
 
 // ---------------------------------------------------------------------------
