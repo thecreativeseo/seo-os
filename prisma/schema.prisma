@@ -1140,7 +1140,9 @@ model Signal {
   currentPeriodEnd      DateTime       @map("current_period_end") @db.Date
   comparisonPeriodStart DateTime       @map("comparison_period_start") @db.Date
   comparisonPeriodEnd   DateTime       @map("comparison_period_end") @db.Date
-  score                 Decimal?       @db.Decimal(9, 4)
+  /// An ordering magnitude in count units — clicks, impressions, a headroom
+  /// estimate — and unbounded by design. 9,4 overflowed on a real property.
+  score                 Decimal?       @db.Decimal(18, 4)
   scoringModelVersion   String         @map("scoring_model_version")
   headline              String
   summary               String?

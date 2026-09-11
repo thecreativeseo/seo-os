@@ -4,6 +4,7 @@ import { freshnessInDays } from "@/lib/metrics/compare";
 import {
   SCORING_MODEL_VERSION,
   detectSignals,
+  persistableScore,
   type DetectedSignal,
 } from "@/lib/signals/rules";
 import { renderSignal } from "@/lib/signals/templates";
@@ -138,7 +139,7 @@ async function upsertSignal(
 
   const data = {
     severity: signal.severity,
-    score: signal.score,
+    score: persistableScore(signal.score),
     scoringModelVersion: SCORING_MODEL_VERSION,
     headline: copy.headline,
     summary: copy.summary,

@@ -116,6 +116,29 @@ export const THRESHOLDS = {
   freshness: { staleAfterDays: 4 },
 } as const;
 
+/**
+ * The widest score the column can hold: numeric(18,4) leaves fourteen integer
+ * digits. Anything at or beyond it is not a measurement any rule can produce
+ * from real traffic — it is a sign that something upstream went wrong.
+ */
+export const MAX_PERSISTABLE_SCORE = 1e14;
+
+/**
+ * A score as the database may store it, or null.
+ *
+ * Every rule produces a finite, non-negative number by construction, so this
+ * changes nothing in the normal range: the value passes through untouched. It
+ * exists for the abnormal case. A NaN or Infinity, or a magnitude the column
+ * cannot represent, becomes null — unknown — rather than a failed INSERT that
+ * takes the whole detection run down with it, and rather than a clamp that
+ * would silently rank one signal as equal to another.
+ */
+export function persistableScore(score: number): number | null {
+  if (!Number.isFinite(score)) return null;
+  if (Math.abs(score) >= MAX_PERSISTABLE_SCORE) return null;
+  return score;
+}
+
 function relativeChange(current: number, previous: number): number | null {
   if (previous === 0) return null;
   return (current - previous) / previous;
