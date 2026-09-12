@@ -171,8 +171,9 @@ function capture(): { lines: Record<string, unknown>[]; restore: () => void } {
   return { lines, restore: () => spy.mockRestore() };
 }
 
-const byStep = (steps: { step: string }[]) =>
-  Object.fromEntries(steps.map((row) => [row.step, row]));
+function byStep<T extends { step: string }>(steps: T[]): Record<string, T> {
+  return Object.fromEntries(steps.map((row) => [row.step, row]));
+}
 
 afterAll(async () => {
   if (organizationIds.length > 0) {
