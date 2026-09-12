@@ -28,7 +28,7 @@ import {
 } from "@/server/services/sync";
 import type { ConnectionProvider, DiagnosisRequest, SyncStatus } from "@/generated/prisma/client";
 
-import { MANUAL_SYNC_PROVIDERS, type ManualSyncProvider } from "./names";
+import { MANUAL_SYNC_PROVIDERS, type JobName, type ManualSyncProvider } from "./names";
 import { JOB_NAMES, type Queue } from "./queue";
 import { listSyncableWebsiteIds, SystemContextError, systemContextFor } from "./system-context";
 
@@ -96,6 +96,19 @@ export const dailySyncPayload = z
   .object({ reason: z.string().max(200).optional() })
   .nullable()
   .optional();
+
+/** The queue job running a sync, so a failure can be logged as the attempt it was. */
+export type JobIdentity = { id: string; attempt: number; retryLimit: number };
+
+/** The detection seam: the real detector, or a test's stand-in. */
+export type DetectSeam = (context: TenantContext, now: Date) => Promise<unknown>;
+
+/**
+ * A run this job finalised — SUCCEEDED or PARTIAL, never reused, never
+ * FAILED. What signal detection follows, and what its failure is recorded
+ * against.
+ */
+type FinalisedRun = { provider: ConnectionProvider; runId: string; runStatus: SyncStatus };
 
 export type StepStatus = "done" | "reused" | "skipped" | "failed";
 
@@ -182,22 +195,24 @@ function fromOutcome(step: string, outcome: SyncOutcome): StepResult {
   };
 }
 
+type ProviderSeams = { gsc?: GscSyncOptions; ga4?: Ga4SyncOptions };
+
 type ProviderStep = {
   step: string;
   provider: ConnectionProvider;
-  run: (context: TenantContext, now: Date) => Promise<SyncOutcome>;
+  run: (context: TenantContext, now: Date, seams: ProviderSeams) => Promise<SyncOutcome>;
 };
 
 const PROVIDER_STEPS: ProviderStep[] = [
   {
     step: "gsc",
     provider: "GOOGLE_SEARCH_CONSOLE",
-    run: (context, now) => runGscSync(context, { now }),
+    run: (context, now, seams) => runGscSync(context, { now, ...seams.gsc }),
   },
   {
     step: "ga4",
     provider: "GOOGLE_ANALYTICS",
-    run: (context, now) => runGa4Sync(context, { now }),
+    run: (context, now, seams) => runGa4Sync(context, { now, ...seams.ga4 }),
   },
   { step: "semrush", provider: "SEMRUSH", run: (context, now) => runSemrushSync(context, { now }) },
   { step: "ahrefs", provider: "AHREFS", run: (context, now) => runAhrefsSync(context, { now }) },
@@ -248,13 +263,24 @@ async function attempt(
  * One website, start to finish. Exported on its own so a test can run it
  * without a queue, and so a "Sync everything now" action could call it later.
  */
+export type WebsiteSyncOptions = {
+  now?: Date;
+  signal?: AbortSignal;
+  job?: JobIdentity;
+  /** Test seams, as for connection.sync: the provider fakes and detection. */
+  gsc?: GscSyncOptions;
+  ga4?: Ga4SyncOptions;
+  detect?: DetectSeam;
+};
+
 export async function runWebsiteSync(
   websiteId: string,
-  options: { now?: Date; signal?: AbortSignal } = {},
+  options: WebsiteSyncOptions = {},
 ): Promise<WebsiteSyncSummary> {
   const now = options.now ?? new Date();
   const startedAt = new Date().toISOString();
   const steps: StepResult[] = [];
+  const finalised: FinalisedRun[] = [];
 
   const finish = (): WebsiteSyncSummary => ({
     websiteId,
@@ -290,9 +316,17 @@ export async function runWebsiteSync(
         continue;
       }
 
-      await attempt(steps, provider.step, async () =>
-        fromOutcome(provider.step, await provider.run(context, now)),
-      );
+      await attempt(steps, provider.step, async () => {
+        const outcome = await provider.run(context, now, options);
+        if (!outcome.reused && outcome.status !== "FAILED") {
+          finalised.push({
+            provider: provider.provider,
+            runId: outcome.run.id,
+            runStatus: outcome.status,
+          });
+        }
+        return fromOutcome(provider.step, outcome);
+      });
     }
 
     if (!aborted()) {
@@ -322,16 +356,22 @@ export async function runWebsiteSync(
     // deterministic upsert over what is stored, so a re-run with nothing new
     // changes nothing. Signals are the exception - they need metrics to read,
     // and a website that has none yet gets "not yet" rather than an error.
+    //
+    // Detection is not under attempt(): by now every provider run this job
+    // touched is finalised, and attempt() would rethrow an unexpected error
+    // and hand the whole job back to the queue to pull those providers again
+    // for a fault they had no part in. It reports its failure instead.
     if (!aborted()) {
       if (await hasAnyMetrics(context)) {
-        await attempt(steps, "signals", async () => {
-          const result = await detectAndStoreSignals(context, { now });
-          return {
-            step: "signals",
-            status: "done",
-            detail: `${result.detected} detected, ${result.resolved} resolved`,
-          };
-        });
+        steps.push(
+          await detectAfterSync(context, now, {
+            at: JOB_NAMES.WEBSITE_SYNC,
+            websiteId,
+            job: options.job,
+            runs: finalised,
+            detect: options.detect,
+          }),
+        );
       } else {
         steps.push({ step: "signals", status: "skipped", detail: "no metrics yet" });
       }
@@ -457,12 +497,12 @@ export type ConnectionSyncOptions = {
    * The queue job running this sync, so a retry can be logged as the
    * attempt it is. Absent when called outside the worker, as tests do.
    */
-  job?: { id: string; attempt: number; retryLimit: number };
+  job?: JobIdentity;
   /** Test seams: the context resolver, the provider fakes, and detection. */
   contextFor?: (payload: ConnectionSyncPayload) => Promise<ResolvedContext>;
   gsc?: GscSyncOptions;
   ga4?: Ga4SyncOptions;
-  detect?: (context: TenantContext, now: Date) => Promise<unknown>;
+  detect?: DetectSeam;
 };
 
 /**
@@ -565,10 +605,10 @@ export async function runConnectionSync(
   const signals =
     outcome.written > 0 && !options.signal?.aborted
       ? await detectAfterSync(context, now, {
-          ...summary,
-          runId: outcome.run.id,
-          runStatus: outcome.status,
+          at: JOB_NAMES.CONNECTION_SYNC,
+          websiteId: payload.websiteId,
           job: options.job,
+          runs: [{ provider: payload.provider, runId: outcome.run.id, runStatus: outcome.status }],
           detect: options.detect,
         })
       : {
@@ -589,25 +629,26 @@ export async function runConnectionSync(
 }
 
 /**
- * Signal detection after a finalised run, as a step that reports rather than
- * throws.
+ * Signal detection after finalised runs, as a step that reports rather than
+ * throws. Shared by "Sync now" and the scheduled sync.
  *
  * On failure the safe shape of the error — class, Prisma code, SQLSTATE,
- * never the message — goes to the log as the attempt it was, and to the
- * tenant's audit trail against the run it followed, the same channel an
- * ingestion failure uses. The run row itself is not touched: it says what the
- * ingestion did, and the ingestion did not fail.
+ * never the message — goes to the log as the attempt it was, one line per
+ * run it followed, and to the tenant's audit trail against each of those
+ * runs, the same channel an ingestion failure uses. The run rows themselves
+ * are not touched: they say what the ingestion did, and the ingestion did
+ * not fail.
  */
 async function detectAfterSync(
   context: TenantContext,
   now: Date,
   identity: {
+    at: JobName;
     websiteId: string;
-    provider: ManualSyncProvider;
-    runId: string;
-    runStatus: SyncStatus;
-    job: ConnectionSyncOptions["job"];
-    detect: ConnectionSyncOptions["detect"];
+    job: JobIdentity | undefined;
+    /** The runs this job finalised. Empty when nothing new was pulled. */
+    runs: FinalisedRun[];
+    detect: DetectSeam | undefined;
   },
 ): Promise<StepResult> {
   const detect =
@@ -619,36 +660,41 @@ async function detectAfterSync(
     return { step: "signals", status: "done", detail: describeDetection(result) };
   } catch (error) {
     const failure = fingerprintError(error);
+    const lines: (FinalisedRun | null)[] = identity.runs.length > 0 ? identity.runs : [null];
 
-    log({
-      at: JOB_NAMES.CONNECTION_SYNC,
-      event: "signals_failed",
-      websiteId: identity.websiteId,
-      provider: identity.provider,
-      ...retryIdentity(identity.job),
-      runId: identity.runId,
-      runStatus: identity.runStatus,
-      step: "signals",
-      ...fingerprintFields(failure),
-    });
+    for (const run of lines) {
+      log({
+        at: identity.at,
+        event: "signals_failed",
+        websiteId: identity.websiteId,
+        provider: run?.provider ?? null,
+        ...retryIdentity(identity.job),
+        runId: run?.runId ?? null,
+        runStatus: run?.runStatus ?? null,
+        step: "signals",
+        ...fingerprintFields(failure),
+      });
+    }
 
-    try {
-      await prisma.$transaction((tx) =>
-        recordAudit(tx, context, {
-          entityType: "SyncRun",
-          entityId: identity.runId,
-          action: "UPDATE",
-          after: {
-            status: identity.runStatus,
-            provider: identity.provider,
-            signals: "FAILED",
-            failure,
-          },
-        }),
-      );
-    } catch {
-      // Deliberately silent: the log line above carries the same fingerprint,
-      // and an audit row that cannot be written must not become a job failure.
+    for (const run of identity.runs) {
+      try {
+        await prisma.$transaction((tx) =>
+          recordAudit(tx, context, {
+            entityType: "SyncRun",
+            entityId: run.runId,
+            action: "UPDATE",
+            after: {
+              status: run.runStatus,
+              provider: run.provider,
+              signals: "FAILED",
+              failure,
+            },
+          }),
+        );
+      } catch {
+        // Deliberately silent: the log line above carries the same fingerprint,
+        // and an audit row that cannot be written must not become a job failure.
+      }
     }
 
     return { step: "signals", status: "failed", detail: failure.name ?? "unknown" };
@@ -832,7 +878,10 @@ export async function registerJobs(queue: Queue): Promise<void> {
 
   await queue.work<WebsiteSyncPayload>(JOB_NAMES.WEBSITE_SYNC, async (job) => {
     const payload = websiteSyncPayload.parse(job.data);
-    const summary = await runWebsiteSync(payload.websiteId, { signal: job.signal });
+    const summary = await runWebsiteSync(payload.websiteId, {
+      signal: job.signal,
+      job: { id: job.id, attempt: job.attempt, retryLimit: job.retryLimit },
+    });
     log({ at: JOB_NAMES.WEBSITE_SYNC, event: "completed", jobId: job.id, ...summary });
     return summary;
   });
