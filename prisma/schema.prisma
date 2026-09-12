@@ -363,6 +363,8 @@ model Website {
   queries         Query[]
   gscMetrics      GscMetricDaily[]
   ga4Metrics      Ga4LandingPageMetricDaily[]
+  gscPageDaily    GscPageDaily[]
+  gscQueryPageMonthly GscQueryPageMonthly[]
   sourceSnapshots SourceSnapshot[]
   syncRuns        SyncRun[]
   sitemaps        Sitemap[]
@@ -920,6 +922,8 @@ model Page {
   website    Website                     @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   gscMetrics GscMetricDaily[]
   ga4Metrics Ga4LandingPageMetricDaily[]
+  gscPageDaily GscPageDaily[]
+  gscQueryPageMonthly GscQueryPageMonthly[]
   signals    Signal[]
 
   // P2
@@ -955,6 +959,7 @@ model Query {
 
   website    Website          @relation(fields: [websiteId], references: [id], onDelete: Cascade)
   gscMetrics GscMetricDaily[]
+  gscQueryPageMonthly GscQueryPageMonthly[]
   signals    Signal[]
 
   @@unique([websiteId, normalizedQuery])
@@ -1002,6 +1007,68 @@ model GscMetricDaily {
   @@index([pageId, date])
   @@index([queryId, date])
   @@map("gsc_metric_daily")
+}
+
+/// Search Console rolled up to one row per page per day (P1 GSC storage).
+///
+/// Derived from gsc_metric_daily and nothing else — never from a provider
+/// payload — by summing a page's clicks and impressions across its queries,
+/// with CTR recomputed from the sums and position weighted by impressions,
+/// exactly as aggregateGscMeasurements does. Recomputed a whole calendar month
+/// at a time from what raw holds, so the result is a pure function of raw and
+/// the same raw always yields the same row. Kept indefinitely: this is the
+/// page's daily history once raw rows older than the retention window are
+/// gone. computed_at and source_max_updated_at say when it was last derived
+/// and from raw rows as fresh as when, which is what a later purge checks.
+model GscPageDaily {
+  websiteId          String   @map("website_id") @db.Uuid
+  pageId             String   @map("page_id") @db.Uuid
+  date               DateTime @db.Date
+  clicks             Int
+  impressions        Int
+  ctr                Decimal? @db.Decimal(9, 6)
+  position           Decimal? @db.Decimal(7, 3)
+  computedAt         DateTime @map("computed_at")
+  sourceMaxUpdatedAt DateTime @map("source_max_updated_at")
+
+  website Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  page    Page    @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@id([websiteId, pageId, date])
+  @@index([websiteId, date])
+  @@map("gsc_page_daily")
+}
+
+/// Search Console rolled up to one row per query per page per calendar month.
+///
+/// The page is part of the grain on purpose: a query that landed on two pages
+/// in a month is two rows, so the history of which pages a query reached is
+/// kept — the one fact a "top page" column would erase. Which page was top is
+/// derived when read, with a fixed tie-break. Metrics follow the same rules as
+/// GscPageDaily; days_with_data counts the distinct raw days behind the row.
+/// Whether a month is complete is not stored: it is the month ending on or
+/// before the connection's latestDataDate, which only advances when a whole
+/// period was read. month is the first day of the calendar month.
+model GscQueryPageMonthly {
+  websiteId          String   @map("website_id") @db.Uuid
+  queryId            String   @map("query_id") @db.Uuid
+  pageId             String   @map("page_id") @db.Uuid
+  month              DateTime @db.Date
+  clicks             Int
+  impressions        Int
+  ctr                Decimal? @db.Decimal(9, 6)
+  position           Decimal? @db.Decimal(7, 3)
+  daysWithData       Int      @map("days_with_data")
+  computedAt         DateTime @map("computed_at")
+  sourceMaxUpdatedAt DateTime @map("source_max_updated_at")
+
+  website     Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+  queryEntity Query   @relation(fields: [queryId], references: [id], onDelete: Cascade)
+  page        Page    @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@id([websiteId, queryId, pageId, month])
+  @@index([websiteId, month])
+  @@map("gsc_query_page_monthly")
 }
 
 /// GA4 landing-page metrics.

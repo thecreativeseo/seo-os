@@ -9,6 +9,7 @@
     "start": "next start",
     "worker": "tsx src/server/jobs/worker.ts",
     "worker:dev": "tsx --env-file=.env.local src/server/jobs/worker.ts",
+    "db:backfill:gsc-rollups": "tsx --env-file=.env.local scripts/gsc-rollups-backfill.ts",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
     "format": "prettier --write .",

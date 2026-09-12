@@ -5,6 +5,7 @@ import type { Connection, SyncRun, SyncStatus, SyncType } from "@/generated/pris
 
 import { prisma } from "@/server/db/prisma";
 import { recordAudit } from "@/server/audit/record";
+import { recomputeGscRollups } from "@/server/services/gsc-rollups";
 import {
   fingerprintError,
   newStageTracker,
@@ -1058,6 +1059,14 @@ export async function runGscSync(
       },
     );
 
+    // Every raw write for this run has settled. The rollups are derived once
+    // for each calendar month the requested period touches, from what raw now
+    // holds — never per provider window, never from the provider's rows. A
+    // failure here fails the run like any other database write, and the retry
+    // re-reads the same period and derives them again.
+    progress.stage = "database_write";
+    await recomputeGscRollups(context, window, { now });
+
     progress.stage = "snapshot_finalize";
     await finishSnapshot(snapshotId, tally, window, outcome);
 
@@ -1074,6 +1083,17 @@ export async function runGscSync(
     });
   } catch (error) {
     const failure = fingerprintError(error, progress.stage);
+
+    // Rows committed before the failure are canonical, so the months they
+    // touch are derived again as well as they can be now. Best effort: the run
+    // is already failing, its retry re-reads the period and derives properly,
+    // and a fault in this step must not replace the fault being recorded.
+    try {
+      await recomputeGscRollups(context, window, { now });
+    } catch {
+      // Deliberately silent.
+    }
+
     const failed = await failRun(run, error, { context, failure });
 
     return {
