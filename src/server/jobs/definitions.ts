@@ -267,10 +267,11 @@ export type WebsiteSyncOptions = {
   now?: Date;
   signal?: AbortSignal;
   job?: JobIdentity;
-  /** Test seams, as for connection.sync: the provider fakes and detection. */
+  /** Test seams, as for connection.sync: the provider fakes and both detections. */
   gsc?: GscSyncOptions;
   ga4?: Ga4SyncOptions;
   detect?: DetectSeam;
+  detectOpportunities?: DetectSeam;
 };
 
 export async function runWebsiteSync(
@@ -364,12 +365,14 @@ export async function runWebsiteSync(
     if (!aborted()) {
       if (await hasAnyMetrics(context)) {
         steps.push(
-          await detectAfterSync(context, now, {
+          await postSyncStep(context, now, {
+            step: "signals",
             at: JOB_NAMES.WEBSITE_SYNC,
             websiteId,
             job: options.job,
             runs: finalised,
-            detect: options.detect,
+            run: options.detect ?? detectSignals,
+            describe: describeDetection,
           }),
         );
       } else {
@@ -377,16 +380,21 @@ export async function runWebsiteSync(
       }
     }
 
+    // Opportunities follow the same rule as signals: they read what is
+    // stored, the runs are already finalised, and a failure here is reported
+    // rather than handed back to the queue.
     if (!aborted()) {
-      await attempt(steps, "opportunities", async () => {
-        const result = await detectAndStoreOpportunities(context, { now });
-        const detected = (result as { detected?: unknown }).detected;
-        return {
+      steps.push(
+        await postSyncStep(context, now, {
           step: "opportunities",
-          status: "done",
-          detail: typeof detected === "number" ? `${detected} detected` : undefined,
-        };
-      });
+          at: JOB_NAMES.WEBSITE_SYNC,
+          websiteId,
+          job: options.job,
+          runs: finalised,
+          run: options.detectOpportunities ?? detectOpportunities,
+          describe: describeOpportunities,
+        }),
+      );
     }
 
     if (aborted()) {
@@ -604,12 +612,14 @@ export async function runConnectionSync(
   // the provider again for a fault the provider had no part in.
   const signals =
     outcome.written > 0 && !options.signal?.aborted
-      ? await detectAfterSync(context, now, {
+      ? await postSyncStep(context, now, {
+          step: "signals",
           at: JOB_NAMES.CONNECTION_SYNC,
           websiteId: payload.websiteId,
           job: options.job,
           runs: [{ provider: payload.provider, runId: outcome.run.id, runStatus: outcome.status }],
-          detect: options.detect,
+          run: options.detect ?? detectSignals,
+          describe: describeDetection,
         })
       : {
           step: "signals",
@@ -628,36 +638,43 @@ export async function runConnectionSync(
   };
 }
 
+/** The steps that read what a sync stored, once every run it touched is finalised. */
+type PostSyncStepName = "signals" | "opportunities";
+
+const detectSignals: DetectSeam = (context, now) => detectAndStoreSignals(context, { now });
+const detectOpportunities: DetectSeam = (context, now) =>
+  detectAndStoreOpportunities(context, { now });
+
 /**
- * Signal detection after finalised runs, as a step that reports rather than
- * throws. Shared by "Sync now" and the scheduled sync.
+ * A step after finalised runs — signal detection, opportunity detection — that
+ * reports rather than throws. Shared by "Sync now" and the scheduled sync.
  *
  * On failure the safe shape of the error — class, Prisma code, SQLSTATE,
  * never the message — goes to the log as the attempt it was, one line per
  * run it followed, and to the tenant's audit trail against each of those
  * runs, the same channel an ingestion failure uses. The run rows themselves
  * are not touched: they say what the ingestion did, and the ingestion did
- * not fail.
+ * not fail. Each step fails on its own: signals that were stored before
+ * opportunities failed are as valid as they were.
  */
-async function detectAfterSync(
+async function postSyncStep(
   context: TenantContext,
   now: Date,
   identity: {
+    step: PostSyncStepName;
     at: JobName;
     websiteId: string;
     job: JobIdentity | undefined;
     /** The runs this job finalised. Empty when nothing new was pulled. */
     runs: FinalisedRun[];
-    detect: DetectSeam | undefined;
+    run: DetectSeam;
+    /** The step's detail on success, in our words. */
+    describe: (result: unknown) => string | undefined;
   },
 ): Promise<StepResult> {
-  const detect =
-    identity.detect ??
-    ((target: TenantContext, at: Date) => detectAndStoreSignals(target, { now: at }));
-
   try {
-    const result = await detect(context, now);
-    return { step: "signals", status: "done", detail: describeDetection(result) };
+    const result = await identity.run(context, now);
+    return { step: identity.step, status: "done", detail: identity.describe(result) };
   } catch (error) {
     const failure = fingerprintError(error);
     const lines: (FinalisedRun | null)[] = identity.runs.length > 0 ? identity.runs : [null];
@@ -665,13 +682,13 @@ async function detectAfterSync(
     for (const run of lines) {
       log({
         at: identity.at,
-        event: "signals_failed",
+        event: `${identity.step}_failed`,
         websiteId: identity.websiteId,
         provider: run?.provider ?? null,
         ...retryIdentity(identity.job),
         runId: run?.runId ?? null,
         runStatus: run?.runStatus ?? null,
-        step: "signals",
+        step: identity.step,
         ...fingerprintFields(failure),
       });
     }
@@ -686,7 +703,7 @@ async function detectAfterSync(
             after: {
               status: run.runStatus,
               provider: run.provider,
-              signals: "FAILED",
+              [identity.step]: "FAILED",
               failure,
             },
           }),
@@ -697,8 +714,14 @@ async function detectAfterSync(
       }
     }
 
-    return { step: "signals", status: "failed", detail: failure.name ?? "unknown" };
+    return { step: identity.step, status: "failed", detail: failure.name ?? "unknown" };
   }
+}
+
+/** A count from an opportunity result, in our words; nothing from a seam that returns none. */
+function describeOpportunities(result: unknown): string | undefined {
+  const record = result as { detected?: unknown } | null | undefined;
+  return record && typeof record.detected === "number" ? `${record.detected} detected` : undefined;
 }
 
 /** Counts from a detection result, in our words; nothing from a seam that returns none. */

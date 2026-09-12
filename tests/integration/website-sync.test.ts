@@ -30,6 +30,8 @@ import { registerOrganizations } from "../helpers/teardown";
  * one. Provider and database failures inside ingestion are recorded on their
  * run exactly as before; a detection failure after them is logged, noted in
  * the audit trail against each run it followed, and reported as a failed step.
+ * Opportunity detection, which follows signals, is held to the same rule and
+ * fails on its own: signals stored before it failed stay as valid as they were.
  *
  * No network: the Google connectors are injected.
  */
@@ -451,15 +453,308 @@ describe("the scheduled sync, after the pull", () => {
   });
 });
 
+describe("the scheduled sync, after detection: opportunities", () => {
+  it("records both detections alongside the completed run", async () => {
+    const site = await makeSite("opp-ok");
+    const connection = await connect(site, GSC);
+    const { gsc } = gscFake(site.host);
+
+    const summary = await runWebsiteSync(site.websiteId, {
+      now: NOW,
+      gsc,
+      detect: async () => ({ detected: 2, resolved: 0 }),
+      detectOpportunities: async () => ({ detected: 1 }),
+    });
+
+    const steps = byStep(summary.steps);
+    expect(steps["signals"]).toMatchObject({ status: "done", detail: "2 detected, 0 resolved" });
+    expect(steps["opportunities"]).toEqual({
+      step: "opportunities",
+      status: "done",
+      detail: "1 detected",
+    });
+
+    const run = await prisma.syncRun.findFirstOrThrow({ where: { connectionId: connection.id } });
+    expect(run.status).toBe("SUCCEEDED");
+  });
+
+  it("an unexpected opportunity failure after a completed pull does not fail the job", async () => {
+    const site = await makeSite("opp-throws");
+    const connection = await connect(site, GSC);
+    const { gsc, counter } = gscFake(site.host);
+
+    const { lines, restore } = capture();
+    let summary;
+    try {
+      // Resolves. Before, attempt() rethrew this and the whole job was retried.
+      summary = await runWebsiteSync(site.websiteId, {
+        now: NOW,
+        job: { id: "ws-opp", attempt: 0, retryLimit: 3 },
+        gsc,
+        detect: async () => ({ detected: 2, resolved: 0 }),
+        detectOpportunities: async () => {
+          throw overflow();
+        },
+      });
+    } finally {
+      restore();
+    }
+
+    const steps = byStep(summary.steps);
+    expect(steps["gsc"]).toMatchObject({ status: "done", written: 2 });
+    // Signals stored before the failure are as valid as they were.
+    expect(steps["signals"]).toMatchObject({ status: "done", detail: "2 detected, 0 resolved" });
+    expect(steps["opportunities"]).toEqual({
+      step: "opportunities",
+      status: "failed",
+      detail: "PrismaClientKnownRequestError",
+    });
+    expect(summary.wroteMetrics).toBe(true);
+
+    // The run is the ingestion's result, untouched: SUCCEEDED, closed, fresh.
+    const run = await prisma.syncRun.findFirstOrThrow({ where: { connectionId: connection.id } });
+    expect(run.status).toBe("SUCCEEDED");
+    expect(run.errorCode).toBeNull();
+    const refreshed = await prisma.connection.findUniqueOrThrow({ where: { id: connection.id } });
+    expect(refreshed.latestDataDate?.toISOString().slice(0, 10)).toBe("2026-08-30");
+
+    // One pull; a second job reuses the window.
+    expect(counter.pulls).toBe(1);
+    const again = await runWebsiteSync(site.websiteId, {
+      now: NOW,
+      gsc,
+      detect: async () => undefined,
+      detectOpportunities: async () => undefined,
+    });
+    expect(byStep(again.steps)["gsc"]?.status).toBe("reused");
+    expect(counter.pulls).toBe(1);
+
+    // Logged under its own name, as the attempt it was, safe shape only.
+    const event = lines.find(
+      (line) => line.at === JOB_NAMES.WEBSITE_SYNC && line.event === "opportunities_failed",
+    );
+    expect(event).toMatchObject({
+      websiteId: site.websiteId,
+      provider: GSC,
+      jobId: "ws-opp",
+      attempt: 1,
+      maxAttempts: 4,
+      runId: run.id,
+      runStatus: "SUCCEEDED",
+      step: "opportunities",
+      errorName: "PrismaClientKnownRequestError",
+      prismaCode: "P2020",
+    });
+    expect(lines.some((line) => line.event === "signals_failed")).toBe(false);
+    expect(lines.some((line) => line.event === "failed")).toBe(false);
+    expect(JSON.stringify(lines)).not.toContain("SECRET-PARAMETER");
+
+    // And in the audit trail, against the run, naming the step that failed.
+    const audit = await prisma.auditEvent.findFirst({
+      where: { entityType: "SyncRun", entityId: run.id, action: "UPDATE" },
+    });
+    expect(audit).not.toBeNull();
+    expect(audit!.afterSnapshotJson).toMatchObject({
+      status: "SUCCEEDED",
+      provider: GSC,
+      opportunities: "FAILED",
+      failure: { name: "PrismaClientKnownRequestError", prismaCode: "P2020" },
+    });
+    expect(audit!.afterSnapshotJson).not.toHaveProperty("signals");
+    expect(JSON.stringify(audit!.afterSnapshotJson)).not.toContain("SECRET-PARAMETER");
+  });
+
+  it("a PARTIAL pull followed by an opportunity failure stays PARTIAL, never FAILED", async () => {
+    const site = await makeSite("opp-partial");
+    const connection = await connect(site, GSC);
+    const payload = gscPayload(site.host, ROWS);
+    payload.rows.push({
+      date: "2026-08-30",
+      page: "https://elsewhere.invalid/x",
+      query: "",
+      clicks: 1,
+      impressions: 1,
+      ctr: 1,
+      position: 1,
+    });
+
+    const summary = await runWebsiteSync(site.websiteId, {
+      now: NOW,
+      gsc: { days: 7, accessTokenFor: TOKEN, source: async () => payload },
+      detect: async () => ({ detected: 0, resolved: 0 }),
+      detectOpportunities: async () => {
+        throw new Error("opportunities broke, and this sentence must not travel");
+      },
+    });
+
+    const steps = byStep(summary.steps);
+    expect(steps["gsc"]?.status).toBe("done");
+    expect(steps["signals"]?.status).toBe("done");
+    expect(steps["opportunities"]).toMatchObject({ status: "failed", detail: "Error" });
+
+    const run = await prisma.syncRun.findFirstOrThrow({ where: { connectionId: connection.id } });
+    expect(run.status).toBe("PARTIAL");
+    expect(run.recordsSkipped).toBe(1);
+    expect(run.errorCode).toBeNull();
+    const refreshed = await prisma.connection.findUniqueOrThrow({ where: { id: connection.id } });
+    expect(refreshed.lastSyncedAt).not.toBeNull();
+
+    const audit = await prisma.auditEvent.findFirst({
+      where: { entityType: "SyncRun", entityId: run.id, action: "UPDATE" },
+    });
+    expect(audit!.afterSnapshotJson).toMatchObject({ status: "PARTIAL", opportunities: "FAILED" });
+  });
+
+  it("when signals fail, opportunities still run, and each is reported on its own", async () => {
+    const site = await makeSite("opp-after-signals");
+    const connection = await connect(site, GSC);
+    const { gsc } = gscFake(site.host);
+    const detectOpportunities = vi.fn(async () => ({ detected: 3 }));
+
+    const { lines, restore } = capture();
+    let summary;
+    try {
+      summary = await runWebsiteSync(site.websiteId, {
+        now: NOW,
+        gsc,
+        detect: async () => {
+          throw overflow();
+        },
+        detectOpportunities,
+      });
+    } finally {
+      restore();
+    }
+
+    const steps = byStep(summary.steps);
+    expect(steps["signals"]?.status).toBe("failed");
+    expect(steps["opportunities"]).toMatchObject({ status: "done", detail: "3 detected" });
+    expect(detectOpportunities).toHaveBeenCalledTimes(1);
+
+    const events = lines.filter((line) => line.at === JOB_NAMES.WEBSITE_SYNC);
+    expect(events.map((line) => line.event)).toEqual(["signals_failed"]);
+
+    const run = await prisma.syncRun.findFirstOrThrow({ where: { connectionId: connection.id } });
+    const audit = await prisma.auditEvent.findFirst({
+      where: { entityType: "SyncRun", entityId: run.id, action: "UPDATE" },
+    });
+    expect(audit!.afterSnapshotJson).toMatchObject({ signals: "FAILED" });
+    expect(audit!.afterSnapshotJson).not.toHaveProperty("opportunities");
+  });
+
+  it("with two providers, one opportunity failure reruns neither", async () => {
+    const site = await makeSite("opp-two");
+    const gscConnection = await connect(site, GSC);
+    const ga4Connection = await connect(site, GA4);
+    const { gsc, counter: gscCount } = gscFake(site.host);
+    const { ga4, counter: ga4Count } = ga4Fake();
+
+    const { lines, restore } = capture();
+    let summary;
+    try {
+      summary = await runWebsiteSync(site.websiteId, {
+        now: NOW,
+        gsc,
+        ga4,
+        detect: async () => ({ detected: 1, resolved: 0 }),
+        detectOpportunities: async () => {
+          throw overflow();
+        },
+      });
+    } finally {
+      restore();
+    }
+
+    const steps = byStep(summary.steps);
+    expect(steps["gsc"]).toMatchObject({ status: "done", written: 2 });
+    expect(steps["ga4"]).toMatchObject({ status: "done", written: 1 });
+    expect(steps["signals"]?.status).toBe("done");
+    expect(steps["opportunities"]?.status).toBe("failed");
+
+    for (const connection of [gscConnection, ga4Connection]) {
+      const run = await prisma.syncRun.findFirstOrThrow({ where: { connectionId: connection.id } });
+      expect(run.status).toBe("SUCCEEDED");
+    }
+
+    const events = lines.filter(
+      (line) => line.at === JOB_NAMES.WEBSITE_SYNC && line.event === "opportunities_failed",
+    );
+    expect(events.map((line) => line.provider).sort()).toEqual([GA4, GSC].sort());
+    expect(
+      await prisma.auditEvent.count({
+        where: { entityType: "SyncRun", websiteId: site.websiteId, action: "UPDATE" },
+      }),
+    ).toBe(2);
+
+    expect(gscCount.pulls).toBe(1);
+    expect(ga4Count.pulls).toBe(1);
+    const again = await runWebsiteSync(site.websiteId, {
+      now: NOW,
+      gsc,
+      ga4,
+      detect: async () => undefined,
+      detectOpportunities: async () => undefined,
+    });
+    expect(byStep(again.steps)["gsc"]?.status).toBe("reused");
+    expect(byStep(again.steps)["ga4"]?.status).toBe("reused");
+    expect(gscCount.pulls).toBe(1);
+    expect(ga4Count.pulls).toBe(1);
+  });
+});
+
 describe("the real queue: a detection failure completes the job", () => {
   const schema = "pgboss_website_test";
   let queue: Queue;
+
+  /**
+   * What the worker does for each website's job. One handler serves the whole
+   * describe — pg-boss runs every handler registered on a queue, so a second
+   * queue.work() would race the first for each job — and looks its behaviour
+   * up by website.
+   */
+  const behaviours = new Map<string, WebsiteSyncOptions>();
 
   beforeAll(async () => {
     await prisma.$executeRawUnsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     queue = createQueue({ role: "worker", schema, max: 2 });
     await queue.start();
+
+    await queue.work<{ websiteId: string }>(JOB_NAMES.WEBSITE_SYNC, async (job) => {
+      const behaviour = behaviours.get(job.data.websiteId);
+      if (!behaviour) throw new Error("a job for a website this test did not set up");
+      return runWebsiteSync(job.data.websiteId, {
+        signal: job.signal,
+        job: { id: job.id, attempt: job.attempt, retryLimit: job.retryLimit },
+        ...behaviour,
+      });
+    });
   }, 90_000);
+
+  /** Enqueues one job for the site and waits for its run to settle and the job to be recorded. */
+  async function roundTrip(site: Site, connectionId: string) {
+    const jobId = await queue.enqueue(
+      JOB_NAMES.WEBSITE_SYNC,
+      { websiteId: site.websiteId },
+      { singletonKey: site.websiteId },
+    );
+    expect(jobId).toEqual(expect.any(String));
+
+    const deadline = Date.now() + 40_000;
+    let run = await prisma.syncRun.findFirst({ where: { connectionId } });
+    while ((!run || run.status === "RUNNING") && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      run = await prisma.syncRun.findFirst({ where: { connectionId } });
+    }
+
+    const settled = Date.now() + 15_000;
+    let state = await jobState(site.websiteId);
+    while (!["completed", "failed", "retry"].includes(state ?? "") && Date.now() < settled) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      state = await jobState(site.websiteId);
+    }
+
+    return { run, state };
+  }
 
   afterAll(async () => {
     await queue.stop({ graceful: false, timeoutMs: 5_000 });
@@ -485,41 +780,44 @@ describe("the real queue: a detection failure completes the job", () => {
       { date: day, path: "/a", query: "alpha", clicks: 4, impressions: 40 },
     ]);
 
+    behaviours.set(site.websiteId, {
+      gsc,
+      detect: async () => {
+        throw overflow();
+      },
+    });
+
     const spy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     try {
-      await queue.work<{ websiteId: string }>(JOB_NAMES.WEBSITE_SYNC, async (job) =>
-        runWebsiteSync(job.data.websiteId, {
-          signal: job.signal,
-          job: { id: job.id, attempt: job.attempt, retryLimit: job.retryLimit },
-          gsc,
-          detect: async () => {
-            throw overflow();
-          },
-        }),
-      );
-
-      const jobId = await queue.enqueue(
-        JOB_NAMES.WEBSITE_SYNC,
-        { websiteId: site.websiteId },
-        { singletonKey: site.websiteId },
-      );
-      expect(jobId).toEqual(expect.any(String));
-
-      const deadline = Date.now() + 40_000;
-      let run = await prisma.syncRun.findFirst({ where: { connectionId: connection.id } });
-      while ((!run || run.status === "RUNNING") && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        run = await prisma.syncRun.findFirst({ where: { connectionId: connection.id } });
-      }
+      const { run, state } = await roundTrip(site, connection.id);
       expect(run?.status).toBe("SUCCEEDED");
-
       // Completed — not retry, not failed — so no second pull is ever scheduled.
-      const settled = Date.now() + 15_000;
-      let state = await jobState(site.websiteId);
-      while (!["completed", "failed", "retry"].includes(state ?? "") && Date.now() < settled) {
-        await new Promise((resolve) => setTimeout(resolve, 250));
-        state = await jobState(site.websiteId);
-      }
+      expect(state).toBe("completed");
+      expect(counter.pulls).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+  }, 60_000);
+
+  it("round trip: the worker runs, opportunities throw, and pg-boss records completed", async () => {
+    const site = await makeSite("roundtrip-opp");
+    const connection = await connect(site, GSC);
+    const day = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
+    const { gsc, counter } = gscFake(site.host, [
+      { date: day, path: "/a", query: "alpha", clicks: 4, impressions: 40 },
+    ]);
+    behaviours.set(site.websiteId, {
+      gsc,
+      detect: async () => ({ detected: 0, resolved: 0 }),
+      detectOpportunities: async () => {
+        throw overflow();
+      },
+    });
+
+    const spy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      const { run, state } = await roundTrip(site, connection.id);
+      expect(run?.status).toBe("SUCCEEDED");
       expect(state).toBe("completed");
       expect(counter.pulls).toBe(1);
     } finally {
