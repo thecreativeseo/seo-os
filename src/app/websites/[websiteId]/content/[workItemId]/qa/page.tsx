@@ -184,6 +184,24 @@ export default async function QaReportPage({
         <h2 id="qa-actions" className="text-sm font-medium">
           What you can do
         </h2>
+
+        {/* The bridge to the one place a CMS execution is created and checked
+            (M6.4 §31). Approving for the CMS and creating the draft are two
+            separate acts, so this links rather than executing here. */}
+        {summary.itemStatus === "APPROVED_FOR_CMS" || summary.itemStatus === "CMS_DRAFT_CREATED" ? (
+          <p className="text-muted-foreground text-sm">
+            {summary.itemStatus === "APPROVED_FOR_CMS"
+              ? "Approved for the CMS. Nothing has been sent to WordPress yet — creating the draft is a separate, explicit act."
+              : "A WordPress draft has been created for this work."}{" "}
+            <Link
+              href={`/websites/${websiteId}/cms-drafts`}
+              className="text-foreground hover:underline"
+            >
+              CMS Drafts
+            </Link>{" "}
+            is where it happens.
+          </p>
+        ) : null}
         {controls.canRun ? (
           <RunQaButton
             websiteId={websiteId}

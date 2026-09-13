@@ -20,6 +20,11 @@ import type {
   CmsTransportResult,
 } from "@/server/connectors/wordpress/types";
 import type { ContentRevision, Execution } from "@/generated/prisma/client";
+import {
+  getCmsConnectionReadiness,
+  getCmsDraftCounts,
+  listCmsDrafts,
+} from "@/server/services/cms-drafts";
 import { CmsFixtures, type CmsFixture } from "../helpers/cms-fixture";
 
 /**
@@ -913,6 +918,97 @@ describe("nothing anywhere publishes", () => {
   }, 120_000);
 });
 
+/**
+ * What the CMS Drafts screen reads from all of this (M6.4 §12, §13, §27).
+ *
+ * Kept beside the actions rather than in the UI suite because it describes the
+ * same executions, and because building a second approved editorial pipeline
+ * to ask these questions would double a fixture this shared database already
+ * feels.
+ */
+describe("what the CMS Drafts screen reads", () => {
+  it("offers Create for approved work on a ready connection", async () => {
+    const rows = await listCmsDrafts(base.lead);
+    const row = rows.find((entry) => entry.workItemId === base.item.id);
+
+    expect(row).toBeDefined();
+    expect(row!.state).toBe("READY");
+    expect(row!.nextAction).toBe("CREATE");
+    expect(row!.blockedReason).toBeNull();
+    expect(row!.approvedByName).not.toBeNull();
+    expect(row!.revisionNumber).not.toBeNull();
+    // Nothing has been sent, so there is nothing external to show.
+    expect(row!.externalEntityId).toBeNull();
+    expect(row!.externalUrl).toBeNull();
+  }, 90_000);
+
+  it("shows a created draft, its checks and the act left to take", async () => {
+    await createdAndVerified();
+
+    const rows = await listCmsDrafts(base.lead);
+    const row = rows.find((entry) => entry.workItemId === base.item.id)!;
+
+    expect(row.state).toBe("VERIFIED");
+    expect(row.externalEntityId).toBe("41");
+    expect(row.targetEntityType).toBe("POST");
+    expect(row.executedByName).not.toBeNull();
+    // The one act still open on a verified draft is to look again.
+    expect(row.nextAction).toBe("REVERIFY");
+
+    const byType = new Map(row.verifications.map((check) => [check.type, check]));
+    expect(byType.get("CONTENT_PRESENT")?.required).toBe(true);
+    expect(byType.get("CONTENT_PRESENT")?.status).toBe("PASS");
+    // The slug is recorded and never decides anything.
+    expect(byType.get("SLUG_MATCH")?.required).toBe(false);
+
+    // No content anywhere in what the screen is handed.
+    const shown = JSON.stringify(row);
+    expect(shown).not.toContain("<p>");
+  }, 120_000);
+
+  it("asks for reconciliation, and offers only that, after an uncertain attempt", async () => {
+    await leftAmbiguous();
+
+    const rows = await listCmsDrafts(base.lead);
+    const row = rows.find((entry) => entry.workItemId === base.item.id)!;
+
+    expect(row.state).toBe("RECONCILIATION_REQUIRED");
+    expect(row.nextAction).toBe("RECONCILE");
+    expect(row.externalEntityId).toBeNull();
+  }, 90_000);
+
+  it("tells a reader without REVIEW why there are no controls", async () => {
+    const reader = await fixtures.qa.colleague(base.tenant, "MEMBER");
+
+    const rows = await listCmsDrafts(reader);
+    const row = rows.find((entry) => entry.workItemId === base.item.id)!;
+
+    expect(row.nextAction).toBe("NONE");
+    expect(row.blockedReason).toContain("do not have permission");
+    // They can still see the state; the screen is not the security boundary.
+    expect(row.state).toBe("READY");
+  }, 90_000);
+
+  it("counts what is waiting, for the Command Center", async () => {
+    const counts = await getCmsDraftCounts(base.lead);
+
+    expect(counts.readyToCreate).toBeGreaterThanOrEqual(1);
+    expect(counts.needsReconciliation).toBe(0);
+    expect(counts.verificationFailed).toBe(0);
+    expect(counts.verified).toBe(0);
+  }, 90_000);
+
+  it("shows another tenant nothing at all", async () => {
+    const attacker = await fixtures.qa.tenant("m64-b");
+
+    expect(await listCmsDrafts(attacker)).toHaveLength(0);
+
+    const readiness = await getCmsConnectionReadiness(attacker);
+    expect(readiness.configured).toBe(false);
+    expect(readiness.siteHost).toBeNull();
+    expect(readiness.credentialConfigured).toBe(false);
+  }, 90_000);
+});
 /**
  * Placed last on purpose. A CMS approval may only ever be invalidated, once,
  * and every test above needs it to still stand.

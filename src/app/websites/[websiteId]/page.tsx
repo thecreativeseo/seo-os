@@ -20,6 +20,7 @@ import { listDiagnoses } from "@/server/services/diagnosis";
 import { listRecommendations, listReviewQueue } from "@/server/services/decision";
 import { listDrafts } from "@/server/services/content-draft";
 import { listQaQueue } from "@/server/services/content-qa";
+import { getCmsDraftCounts } from "@/server/services/cms-drafts";
 import { qaWorkItemLabel } from "@/lib/content/qa-ux";
 import { ConfidenceBadge, VerdictBadge, humanize } from "@/components/diagnosis/primitives";
 
@@ -116,6 +117,11 @@ export default async function CommandCenterPage({
     (row) => row.itemStatus === "AWAITING_EDITOR_REVIEW",
   ).length;
   const qaApproved = qaRows.filter((row) => row.itemStatus === "APPROVED_FOR_CMS").length;
+
+  // M6.4 (§30). What is waiting at the one gate that touches a system outside
+  // SEO OS. Kept to four numbers: what could be sent, what is stuck, what did
+  // not match, and what is confirmed.
+  const cmsDrafts = await getCmsDraftCounts(context);
   const qaNextStep =
     qaRows.find((row) => row.outcome === "FAIL") ??
     qaRows.find((row) => row.itemStatus === "AWAITING_EDITOR_REVIEW") ??
@@ -350,6 +356,23 @@ export default async function CommandCenterPage({
             </Link>
           ))}
         </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            { label: "CMS drafts ready to create", count: cmsDrafts.readyToCreate },
+            { label: "Needs reconciliation", count: cmsDrafts.needsReconciliation },
+            { label: "Verification failed", count: cmsDrafts.verificationFailed },
+            { label: "Verified in WordPress", count: cmsDrafts.verified },
+          ].map((tile) => (
+            <Link
+              key={tile.label}
+              href={`/websites/${websiteId}/cms-drafts`}
+              className="border-border hover:bg-accent/40 flex flex-col gap-1 rounded-lg border p-4"
+            >
+              <p className="text-muted-foreground text-xs font-medium">{tile.label}</p>
+              <p className="text-xl font-semibold tabular-nums">{tile.count}</p>
+            </Link>
+          ))}
+        </div>
         {qaNextStep ? (
           <p className="text-muted-foreground text-sm">
             Next in QA:{" "}
@@ -363,6 +386,16 @@ export default async function CommandCenterPage({
             person authorized it; nothing is published.
           </p>
         ) : null}
+        <p className="text-muted-foreground text-sm">
+          A CMS draft is a draft in WordPress for a person to review.{" "}
+          <Link
+            href={`/websites/${websiteId}/cms-drafts`}
+            className="text-foreground hover:underline"
+          >
+            CMS Drafts
+          </Link>{" "}
+          is where it is created and checked. SEO OS does not publish.
+        </p>
       </section>
 
       <section className="space-y-3">

@@ -19,6 +19,11 @@ import {
   DisconnectButton,
   PropertyPicker,
 } from "@/components/connections/connect-controls";
+import {
+  TestWordPressButton,
+  WordPressConnectionForm,
+} from "@/components/connections/wordpress-controls";
+import { getCmsConnectionReadiness } from "@/server/services/cms-drafts";
 
 export const metadata = { title: "Connections · SEO OS" };
 
@@ -51,6 +56,16 @@ const CONNECTABLE = new Set(["GOOGLE_SEARCH_CONSOLE", "GOOGLE_ANALYTICS"]);
 /** Providers connected by pasting a key. */
 const KEY_CONNECTABLE = new Set(["SEMRUSH", "AHREFS"]);
 
+/** The CMS. Configured by hand, tested read-only, and draft-only by policy. */
+const CMS_CONNECTABLE = "WORDPRESS";
+
+/** How a discovered capability reads. Unknown is never shown as granted. */
+function capabilityLabel(granted: boolean | null): string {
+  if (granted === true) return "Granted";
+  if (granted === false) return "Not granted";
+  return "Unknown — not checked yet";
+}
+
 const KEY_HELP: Record<string, string> = {
   SEMRUSH:
     "SEO OS currently requires Semrush Analytics API v3 for Domain Reports. If your Semrush account shows a Version 3 API key, use that key here. Version 4 keys are not compatible with this connection. If your account does not provide a Version 3 key, use Ahrefs instead or contact Semrush Support about v3 API access. Stored encrypted, never shown again, and verified with a single-row request before it is saved. Rows are billed as API units.",
@@ -69,6 +84,9 @@ export default async function ConnectionsPage({
   const { error, select } = await searchParams;
   const context = await requireWebsiteAccess(websiteId);
   const cards = await listConnectionCards(context);
+  // What the WordPress connection can currently do, as discovered rather than
+  // assumed. Read here so the card can state each capability exactly.
+  const cms = await getCmsConnectionReadiness(context);
   const canManage = hasRole(context.membership.role, "ADMIN");
 
   const connected = cards.filter((card) => card.status === "CONNECTED").length;
@@ -229,6 +247,95 @@ export default async function ConnectionsPage({
                   {card.status !== "NOT_CONNECTED" ? (
                     <DisconnectButton websiteId={websiteId} slug={card.provider} />
                   ) : null}
+                </div>
+              ) : null}
+
+              {card.provider === CMS_CONNECTABLE ? (
+                <div className="space-y-3">
+                  <dl className="grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2">
+                    <div className="flex gap-2">
+                      <dt className="text-muted-foreground">Authentication</dt>
+                      <dd className="font-medium">Application Password</dd>
+                    </div>
+                    <div className="flex gap-2">
+                      <dt className="text-muted-foreground">Publishing mode</dt>
+                      <dd className="font-medium">DRAFT ONLY</dd>
+                    </div>
+                    <div className="flex gap-2">
+                      <dt className="text-muted-foreground">Site</dt>
+                      <dd className="font-medium break-all">{cms.siteHost ?? "Not configured"}</dd>
+                    </div>
+                    <div className="flex gap-2">
+                      <dt className="text-muted-foreground">Credentials</dt>
+                      <dd className="font-medium">
+                        {cms.credentialConfigured ? "Configured" : "Not configured"}
+                      </dd>
+                    </div>
+                    <div className="flex gap-2">
+                      <dt className="text-muted-foreground">Account</dt>
+                      <dd className="font-medium">{cms.accountName ?? "Unknown"}</dd>
+                    </div>
+                    <div className="flex gap-2">
+                      <dt className="text-muted-foreground">Last tested</dt>
+                      <dd className="font-medium">
+                        {cms.lastCheckedAt ? cms.lastCheckedAt.toLocaleString("en-GB") : "Never"}
+                      </dd>
+                    </div>
+                  </dl>
+
+                  <div className="space-y-1">
+                    <p className="text-xs font-medium">Discovered permissions</p>
+                    <dl className="grid gap-x-6 gap-y-1 text-xs sm:grid-cols-3">
+                      {[
+                        ["Read content", cms.capabilities.readContent] as const,
+                        ["Create draft — post", cms.capabilities.createPost] as const,
+                        ["Create draft — page", cms.capabilities.createPage] as const,
+                      ].map(([label, granted]) => (
+                        <div key={label} className="flex gap-2">
+                          <dt className="text-muted-foreground">{label}</dt>
+                          <dd className="font-medium">{capabilityLabel(granted)}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                    <p className="text-muted-foreground text-xs">
+                      Permissions come from what WordPress reports about this account. A permission
+                      it will not confirm is never assumed, and SEO OS does not create a test draft
+                      to find out.
+                    </p>
+                  </div>
+
+                  <p className="text-muted-foreground text-xs">
+                    SEO OS creates a WordPress draft for review. It does not publish the page,
+                    change one that already exists, or write Yoast, Rank Math or other plugin SEO
+                    fields. Publishing is not available in this version.
+                  </p>
+
+                  {canManage ? (
+                    <>
+                      <WordPressConnectionForm
+                        websiteId={websiteId}
+                        baseUrl={cms.baseUrl}
+                        credentialConfigured={cms.credentialConfigured}
+                      />
+                      {cms.configured ? <TestWordPressButton websiteId={websiteId} /> : null}
+                    </>
+                  ) : (
+                    <p className="text-muted-foreground text-sm">
+                      An owner or admin configures the WordPress connection.
+                    </p>
+                  )}
+
+                  {cms.reason ? (
+                    <p className="text-muted-foreground text-xs">{cms.reason}</p>
+                  ) : (
+                    <p className="text-muted-foreground text-xs">
+                      Ready to create drafts.{" "}
+                      <Link href={`/websites/${websiteId}/cms-drafts`} className="hover:underline">
+                        CMS Drafts
+                      </Link>{" "}
+                      is where a person creates and checks them.
+                    </p>
+                  )}
                 </div>
               ) : null}
 

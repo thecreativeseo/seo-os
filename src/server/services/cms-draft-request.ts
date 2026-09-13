@@ -1,6 +1,7 @@
 import { prisma } from "@/server/db/prisma";
 import { recordAudit } from "@/server/audit/record";
 import { websiteScope, type TenantContext } from "@/server/auth/guards";
+import { CREATE_WORDPRESS_DRAFT } from "@/lib/cms/draft-ux";
 import { REQUIRED, hasRole } from "@/server/auth/roles";
 import { SYSTEM_AUTH_USER_ID } from "@/server/jobs/system-context";
 import {
@@ -52,10 +53,13 @@ import type { CmsEntityType, Execution } from "@/generated/prisma/client";
  *
  * Not a boolean, and not any truthy value: an exact constant the server checks,
  * so a stray form field, a replayed request or a default-true flag cannot
- * amount to somebody deciding to write into a CMS. M6.4 will put a control
- * behind it; until then it is what makes the intent explicit.
+ * amount to somebody deciding to write into a CMS. The confirmation control
+ * sends it; this comparison is what makes it mean anything.
+ *
+ * Defined in lib/cms/draft-ux so a client component can name it without
+ * importing this service, and re-exported so callers here read naturally.
  */
-export const CREATE_WORDPRESS_DRAFT = "CREATE_WORDPRESS_DRAFT";
+export { CREATE_WORDPRESS_DRAFT } from "@/lib/cms/draft-ux";
 
 /**
  * What happened, in terms a screen can render and a person can act on.

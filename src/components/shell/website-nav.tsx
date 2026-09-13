@@ -44,13 +44,17 @@ const GROUPS: { heading: string; sections: Section[] }[] = [
   },
   {
     heading: "Execution",
-    // P4 (docs/P4_SPEC.md §38). Content Work → Briefs → Drafts → QA exist;
-    // Publishing is M6 and is shown disabled so the flow reads whole.
+    // P4 (docs/P4_SPEC.md §38). Content Work → Briefs → Drafts → QA → CMS
+    // Drafts exist; Publishing is not built and is shown disabled so the flow
+    // reads whole. CMS Drafts sits between QA and Publishing because that is
+    // where it sits in the work: after a person approves, before anything is
+    // published — which in this version is never.
     sections: [
       { slug: "content", label: "Content Work" },
       { slug: "briefs", label: "Briefs" },
       { slug: "drafts", label: "Drafts" },
       { slug: "qa", label: "QA" },
+      { slug: "cms-drafts", label: "CMS Drafts" },
       { slug: "publishing", label: "Publishing", comingNext: true },
     ],
   },

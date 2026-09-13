@@ -82,7 +82,9 @@ export const CONNECTION_PROVIDERS: readonly ProviderCard[] = [
   {
     provider: "WORDPRESS",
     name: "WordPress",
-    purpose: "Content + publishing",
-    availability: "Planned",
+    // Not "publishing": M6 creates drafts and cannot publish, and a purpose
+    // line that promised otherwise would be the first thing a reader believed.
+    purpose: "Content drafts for review",
+    availability: "Available",
   },
 ] as const;

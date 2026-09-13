@@ -86,6 +86,17 @@ describe("provider registry", () => {
     ]);
   });
 
+  it("describes WordPress as drafts for review, never as publishing", async () => {
+    // The purpose line is the first thing a reader believes about a CMS
+    // connection, and M6 cannot publish.
+    const context = await makeContext("wp-purpose");
+    const cards = await listConnectionCards(context);
+    const wordpress = cards.find((card) => card.provider === "WORDPRESS");
+
+    expect(wordpress?.purpose).toBe("Content drafts for review");
+    expect(wordpress?.purpose).not.toMatch(/publish/i);
+  });
+
   it("states availability for every provider", async () => {
     const context = await makeContext("availability");
     const cards = await listConnectionCards(context);
@@ -102,11 +113,20 @@ describe("provider registry", () => {
     expect(byProvider.get("GOOGLE_ANALYTICS")?.availability).toBe("Available");
     expect(byProvider.get("SEMRUSH")?.availability).toBe("Available");
     expect(byProvider.get("AHREFS")?.availability).toBe("Available");
+    // M6.4 gave WordPress a real configuration form, a read-only connection
+    // test and a draft-only policy, so it now carries a control like the rest.
+    expect(byProvider.get("WORDPRESS")?.availability).toBe("Available");
 
     // And nothing else does. This is the assertion that matters: the page offers
     // a connect control for exactly these, so any other card reading "Available"
     // would be promising an action that is not on the screen.
-    const connectable = new Set(["GOOGLE_SEARCH_CONSOLE", "GOOGLE_ANALYTICS", "SEMRUSH", "AHREFS"]);
+    const connectable = new Set([
+      "GOOGLE_SEARCH_CONSOLE",
+      "GOOGLE_ANALYTICS",
+      "SEMRUSH",
+      "AHREFS",
+      "WORDPRESS",
+    ]);
 
     for (const card of cards) {
       if (connectable.has(card.provider)) continue;
