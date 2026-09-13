@@ -1006,6 +1006,11 @@ model GscMetricDaily {
   @@index([websiteId, date])
   @@index([pageId, date])
   @@index([queryId, date])
+  // The two foreign keys a delete has to look up that nothing above leads
+  // with. Without them, removing a connection or a snapshot scanned the
+  // whole table once per row removed.
+  @@index([sourceConnectionId])
+  @@index([sourceSnapshotId])
   @@map("gsc_metric_daily")
 }
 
@@ -1036,6 +1041,9 @@ model GscPageDaily {
 
   @@id([websiteId, pageId, date])
   @@index([websiteId, date])
+  // For the cascade from page: the key leads with website, so a lookup by
+  // page alone walked the whole key.
+  @@index([pageId])
   @@map("gsc_page_daily")
 }
 
@@ -1068,6 +1076,10 @@ model GscQueryPageMonthly {
 
   @@id([websiteId, queryId, pageId, month])
   @@index([websiteId, month])
+  // For the cascades from page and from query: the key leads with website,
+  // so a lookup by either alone walked the whole key.
+  @@index([pageId])
+  @@index([queryId])
   @@map("gsc_query_page_monthly")
 }
 
