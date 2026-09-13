@@ -59,7 +59,7 @@ type GscAggregateRow = {
   position: number | null;
 };
 
-async function gscTotalsFor(
+export async function gscTotalsFor(
   websiteId: string,
   range: DateRange,
   extra: Prisma.Sql = Prisma.empty,
