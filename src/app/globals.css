@@ -10,8 +10,9 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   /* Set by next/font in app/layout.tsx. Fallbacks keep text readable if a font
-     file fails to load; next/font also generates size-adjusted fallback metrics
-     so the swap does not shift layout. */
+     file fails to load. The same stacks are named in layout.tsx, where
+     next/font is told not to synthesise size-adjusted fallbacks: its metrics
+     table has no entry for these families. */
   --font-sans:
     var(--font-google-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI",
     Roboto, "Helvetica Neue", Arial, sans-serif;

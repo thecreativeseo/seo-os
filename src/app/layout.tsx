@@ -25,6 +25,23 @@ const googleSans = Google_Sans({
   subsets: ["latin"],
   display: "swap",
   weight: "variable",
+  // next/font synthesises a size-adjusted fallback face from a table of font
+  // metrics it ships with, and that table has no entry for Google Sans yet, so
+  // every build warned that it could not and skipped it. Naming the fallbacks
+  // here — the same stack globals.css declares — takes the manual path, which
+  // never consults the table; adjustFontFallback covers the webpack loader,
+  // which gates on it. The font itself is unchanged.
+  fallback: [
+    "ui-sans-serif",
+    "system-ui",
+    "-apple-system",
+    "Segoe UI",
+    "Roboto",
+    "Helvetica Neue",
+    "Arial",
+    "sans-serif",
+  ],
+  adjustFontFallback: false,
 });
 
 const googleSansCode = Google_Sans_Code({
@@ -32,6 +49,17 @@ const googleSansCode = Google_Sans_Code({
   subsets: ["latin"],
   display: "swap",
   weight: "variable",
+  // Same as above: no metrics table entry for this family yet.
+  fallback: [
+    "ui-monospace",
+    "SFMono-Regular",
+    "SF Mono",
+    "Menlo",
+    "Consolas",
+    "Liberation Mono",
+    "monospace",
+  ],
+  adjustFontFallback: false,
 });
 
 export const metadata: Metadata = {
