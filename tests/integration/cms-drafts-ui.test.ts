@@ -9,7 +9,9 @@ import type { TenantContext } from "@/server/auth/guards";
 import { systemContextFor } from "@/server/jobs/system-context";
 import {
   configureWordPressConnection,
+  loadWordPressConnection,
   markConnectionTested,
+  requestWordPressConnectionTest,
   testCmsConnection,
 } from "@/server/services/cms-connection";
 import { getCmsConnectionReadiness } from "@/server/services/cms-drafts";
@@ -337,6 +339,156 @@ describe("what the connection is permitted to do", () => {
     const readiness = await getCmsConnectionReadiness(admin);
     expect(readiness.status).toBe("ERROR");
     expect(readiness.ready).toBe(false);
+  }, 90_000);
+});
+
+/**
+ * Testing a connection that is not yet connected (M6.4 inline fix).
+ *
+ * In production a freshly saved connection — CONNECTING, never tested — was
+ * answered "This connection is not currently connected" the moment Test was
+ * pressed, before WordPress was asked anything. The button's own lookup of
+ * the connection used the execution path's rule, which admits only CONNECTED,
+ * although the test path's rule admits CONNECTING as well; the test that
+ * would have made it CONNECTED could therefore never run. The test path now
+ * lives in one service function that finds the connection by its own rule —
+ * CONNECTING, ERROR or CONNECTED — and draft creation keeps the strict one.
+ */
+describe("testing a connection that is not yet connected", () => {
+  const status = async (context: TenantContext) =>
+    (await getCmsConnectionReadiness(context)).status;
+
+  it("tests a freshly saved CONNECTING connection instead of refusing it", async () => {
+    const saved = await configure();
+    expect(await status(admin)).toBe("CONNECTING");
+    const cms = transportThat(() => usersMe({ read: true, edit_posts: true, edit_pages: true }));
+
+    const result = await requestWordPressConnectionTest(admin, { transport: cms.transport });
+
+    // The production defect: refused before the transport was ever asked.
+    expect(result.ok || result.code).not.toBe("connection_disabled");
+    expect(cms.sent.length).toBeGreaterThan(0);
+    expect(result).toMatchObject({ ok: true, connectionId: saved.connectionId });
+    expect(await status(admin)).toBe("CONNECTED");
+
+    const connection = await prisma.connection.findUniqueOrThrow({
+      where: { id: saved.connectionId },
+    });
+    expect(connection.connectedAt).not.toBeNull();
+    expect(connection.lastError).toBeNull();
+    const readiness = await getCmsConnectionReadiness(admin);
+    expect(readiness.capabilities).toEqual({ readContent: true, createPost: true, createPage: true });
+  }, 90_000);
+
+  it("records a failed test as ERROR, with our own code, and never leaves it CONNECTING", async () => {
+    const saved = await configure();
+    const cms = transportThat(() => ({ ok: true, status: 401, body: "{}" }));
+
+    const result = await requestWordPressConnectionTest(admin, { transport: cms.transport });
+
+    expect(cms.sent.length).toBeGreaterThan(0);
+    expect(result).toMatchObject({ ok: false, connectionId: saved.connectionId, code: "auth_required" });
+    expect(await status(admin)).toBe("ERROR");
+    const connection = await prisma.connection.findUniqueOrThrow({
+      where: { id: saved.connectionId },
+    });
+    expect(connection.lastError).toBe("auth_required");
+    expect(JSON.stringify(result)).not.toContain(APP_PASSWORD);
+    expect(JSON.stringify(result)).not.toContain(USERNAME);
+  }, 90_000);
+
+  it("can be tested again from ERROR, and from CONNECTED", async () => {
+    const saved = await configure();
+    const failing = transportThat(() => ({ ok: true, status: 401, body: "{}" }));
+    await requestWordPressConnectionTest(admin, { transport: failing.transport });
+    expect(await status(admin)).toBe("ERROR");
+
+    // The password is corrected in WordPress; the next test succeeds.
+    const working = transportThat(() => usersMe({ read: true, edit_posts: true, edit_pages: false }));
+    const recovered = await requestWordPressConnectionTest(admin, { transport: working.transport });
+    expect(recovered.ok).toBe(true);
+    expect(await status(admin)).toBe("CONNECTED");
+
+    // Already connected: a re-test still runs, and replaces what was reported.
+    const narrower = transportThat(() => usersMe({ read: true, edit_posts: false, edit_pages: false }));
+    const again = await requestWordPressConnectionTest(admin, { transport: narrower.transport });
+    expect(again).toMatchObject({ ok: true, connectionId: saved.connectionId });
+    expect(narrower.sent.length).toBeGreaterThan(0);
+    const readiness = await getCmsConnectionReadiness(admin);
+    expect(readiness.capabilities).toEqual({ readContent: true, createPost: false, createPage: false });
+  }, 90_000);
+
+  it("keeps draft creation on the strict rule: CONNECTING and ERROR are refused, CONNECTED is not", async () => {
+    await configure();
+    // The lookup the execution path makes, with its default options.
+    expect((await caught(loadWordPressConnection(admin))).code).toBe("connection_disabled");
+
+    const failing = transportThat(() => ({ ok: true, status: 401, body: "{}" }));
+    await requestWordPressConnectionTest(admin, { transport: failing.transport });
+    expect(await status(admin)).toBe("ERROR");
+    expect((await caught(loadWordPressConnection(admin))).code).toBe("connection_disabled");
+
+    const working = transportThat(() => usersMe({ read: true, edit_posts: true, edit_pages: true }));
+    await requestWordPressConnectionTest(admin, { transport: working.transport });
+    await expect(loadWordPressConnection(admin)).resolves.toBeDefined();
+  }, 90_000);
+
+  it("fails safely without a configured connection", async () => {
+    await prisma.connection.deleteMany({ where: { websiteId: owner.website.id, provider: "WORDPRESS" } });
+    const cms = transportThat(() => usersMe({ read: true }));
+
+    const result = await requestWordPressConnectionTest(admin, { transport: cms.transport });
+
+    expect(result).toEqual({ ok: false, connectionId: null, code: "not_configured" });
+    expect(cms.sent).toHaveLength(0);
+  }, 90_000);
+
+  it("refuses everyone below admin and the scheduled-jobs actor, before any transport", async () => {
+    await configure();
+    const cms = transportThat(() => usersMe({ read: true }));
+    const system = await systemContextFor(owner.website.id);
+
+    for (const who of [lead, member, viewer, system]) {
+      const result = await requestWordPressConnectionTest(who, { transport: cms.transport });
+      expect(result).toEqual({ ok: false, connectionId: null, code: "forbidden" });
+    }
+    expect(cms.sent).toHaveLength(0);
+    expect(await status(admin)).toBe("CONNECTING");
+  }, 90_000);
+
+  it("carries no credential into the result, the log, or the audit trail", async () => {
+    const saved = await configure();
+    const cms = transportThat(() => usersMe({ read: true, edit_posts: true, edit_pages: true }));
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(" "));
+    });
+
+    let result;
+    try {
+      result = await requestWordPressConnectionTest(admin, { transport: cms.transport });
+    } finally {
+      spy.mockRestore();
+    }
+
+    for (const text of [JSON.stringify(result), lines.join("\n")]) {
+      expect(text).not.toContain(APP_PASSWORD);
+      expect(text).not.toContain(USERNAME);
+    }
+    const events = await prisma.auditEvent.findMany({
+      where: { entityType: "Connection", entityId: saved.connectionId },
+    });
+    for (const event of events) {
+      const payload = JSON.stringify([event.beforeSnapshotJson, event.afterSnapshotJson]);
+      expect(payload).not.toContain(APP_PASSWORD);
+      expect(payload).not.toContain(USERNAME);
+    }
+    // Capabilities are exactly what the transport reported, and nothing more.
+    expect((await getCmsConnectionReadiness(admin)).capabilities).toEqual({
+      readContent: true,
+      createPost: true,
+      createPage: true,
+    });
   }, 90_000);
 });
 

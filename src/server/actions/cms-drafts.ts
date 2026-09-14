@@ -14,10 +14,8 @@ import {
 import { CmsProviderError, type DiscoveredCapability } from "@/server/connectors/wordpress/types";
 import {
   configureWordPressConnection,
-  markConnectionTested,
-  testCmsConnection,
+  requestWordPressConnectionTest,
 } from "@/server/services/cms-connection";
-import { loadWordPressConnection } from "@/server/services/cms-connection";
 
 /**
  * The forms behind the CMS screens (M6.4).
@@ -250,33 +248,20 @@ export async function testWordPressConnectionAction(
   const websiteId = text(formData, "__websiteId");
   const context = await requireWebsiteAccess(websiteId, REQUIRED.APPROVE, { throwOnDenied: true });
 
-  let connectionId: string;
-  try {
-    ({
-      connection: { id: connectionId },
-    } = await loadWordPressConnection(context));
-  } catch (error) {
-    return connectionError(error);
-  }
+  // The whole test lives in the service, which finds the connection by the
+  // test path's rule — CONNECTING or ERROR included — and records the result.
+  // This wrapper only turns it into what the form shows.
+  const result = await requestWordPressConnectionTest(context);
+  revalidatePath(`/websites/${websiteId}/connections`);
 
-  try {
-    const outcome = await testCmsConnection(context);
-    await markConnectionTested(context, connectionId, { ok: true });
+  if (!result.ok) return connectionError(new CmsProviderError(result.code));
 
-    const granted = outcome.capabilities.filter((capability) => capability.granted).length;
-    revalidatePath(`/websites/${websiteId}/connections`);
-
-    return {
-      capabilities: outcome.capabilities,
-      message:
-        granted === 0
-          ? "Connected, but WordPress did not confirm any permissions for this account. Creating drafts is unavailable."
-          : `Connected as ${outcome.accountName ?? "the configured account"}.`,
-    };
-  } catch (error) {
-    const state = connectionError(error);
-    await markConnectionTested(context, connectionId, { ok: false, errorCode: state.code });
-    revalidatePath(`/websites/${websiteId}/connections`);
-    return state;
-  }
+  const granted = result.outcome.capabilities.filter((capability) => capability.granted).length;
+  return {
+    capabilities: result.outcome.capabilities,
+    message:
+      granted === 0
+        ? "Connected, but WordPress did not confirm any permissions for this account. Creating drafts is unavailable."
+        : `Connected as ${result.outcome.accountName ?? "the configured account"}.`,
+  };
 }

@@ -52,11 +52,20 @@ export type LoadConnectionOptions = {
    *
    * True everywhere that acts on a CMS. False for the connection test, which
    * is the thing that decides whether it is connected: a freshly saved
-   * connection is CONNECTING, and requiring CONNECTED here would mean it could
-   * never be tested and so never become connected.
+   * connection is CONNECTING, one whose last test failed is ERROR, and
+   * requiring CONNECTED of either would mean it could never be tested and so
+   * never become connected. Every caller on the test path — including the one
+   * that only wants the connection's id before testing — must say so.
    */
   requireConnected?: boolean;
 };
+
+/** The states a connection may be tested from. Draft creation accepts only the first. */
+const TESTABLE_STATUSES: ReadonlySet<Connection["status"]> = new Set([
+  "CONNECTED",
+  "CONNECTING",
+  "ERROR",
+]);
 
 export async function loadWordPressConnection(
   context: TenantContext,
@@ -75,7 +84,7 @@ export async function loadWordPressConnection(
 
   const usable =
     options.requireConnected === false
-      ? connection.status === "CONNECTED" || connection.status === "CONNECTING"
+      ? TESTABLE_STATUSES.has(connection.status)
       : connection.status === "CONNECTED";
   if (!usable) throw new CmsProviderError("connection_disabled");
   if (connection.authType === null) throw new CmsProviderError("auth_required");
@@ -407,4 +416,59 @@ export async function markConnectionTested(
           lastError: outcome.errorCode ?? null,
         },
   });
+}
+
+export type ConnectionTestResult =
+  | { ok: true; connectionId: string; outcome: ConnectionTestOutcome }
+  | { ok: false; connectionId: string | null; code: CmsProviderError["code"] };
+
+/**
+ * The whole of "Test connection", from the button's point of view (M6.4 §8).
+ *
+ * Finds the website's WordPress connection by the test path's rule — it may be
+ * CONNECTING, in ERROR, or already CONNECTED, because settling that is what a
+ * test is for — runs the read-only test against it, and records the result on
+ * the row: CONNECTED on success, ERROR with our own code on failure. The
+ * connection's id is looked up first so that a failure can be recorded against
+ * the right row; the production defect was that this lookup used the
+ * execution path's rule and refused a freshly saved connection with "not
+ * currently connected" before WordPress was ever asked.
+ *
+ * Testing is an administrative act like configuring, and is gated the same
+ * way: an owner or admin, never the scheduled-jobs actor. The action that
+ * wraps this checks the role again at the request boundary; the check here is
+ * what a test or another caller meets.
+ */
+export async function requestWordPressConnectionTest(
+  context: TenantContext,
+  options: ProviderOptions = {},
+): Promise<ConnectionTestResult> {
+  if (context.user.authUserId === SYSTEM_AUTH_USER_ID) {
+    return { ok: false, connectionId: null, code: "forbidden" };
+  }
+  if (!hasRole(context.membership.role, REQUIRED.APPROVE)) {
+    return { ok: false, connectionId: null, code: "forbidden" };
+  }
+
+  let connectionId: string;
+  try {
+    ({
+      connection: { id: connectionId },
+    } = await loadWordPressConnection(context, undefined, { requireConnected: false }));
+  } catch (error) {
+    if (error instanceof CmsProviderError) return { ok: false, connectionId: null, code: error.code };
+    throw error;
+  }
+
+  try {
+    const outcome = await testCmsConnection(context, { ...options, connectionId });
+    await markConnectionTested(context, connectionId, { ok: true });
+    return { ok: true, connectionId, outcome };
+  } catch (error) {
+    if (error instanceof CmsProviderError) {
+      await markConnectionTested(context, connectionId, { ok: false, errorCode: error.code });
+      return { ok: false, connectionId, code: error.code };
+    }
+    throw error;
+  }
 }
