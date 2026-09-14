@@ -304,12 +304,21 @@ describe("GA4 totals", () => {
       },
     });
 
+    // This website has GA4 rows and no Search Console rows, so there is no data
+    // date to anchor on and the windows fall back to today — the production
+    // path for a property that connected GA4 first. The rows are placed from
+    // that same anchor rather than on fixed dates, which drifted out of the
+    // previous window one midnight and failed. The last day of each window is
+    // used so that a midnight passing between seeding and reading still leaves
+    // both rows inside their windows.
+    const windows = resolveWindows(new Date().toISOString().slice(0, 10), "28d");
+
     await prisma.ga4LandingPageMetricDaily.createMany({
       data: [
         {
           websiteId: context.website.id,
           pageId: page.id,
-          date: new Date("2026-07-20"),
+          date: new Date(windows.previous.end),
           sessions: 50,
           keyEvents: 0,
           sourceConnectionId: connection.id,
@@ -317,7 +326,7 @@ describe("GA4 totals", () => {
         {
           websiteId: context.website.id,
           pageId: page.id,
-          date: new Date("2026-08-30"),
+          date: new Date(windows.current.end),
           sessions: 90,
           keyEvents: 7,
           sourceConnectionId: connection.id,
@@ -327,6 +336,9 @@ describe("GA4 totals", () => {
 
     const summary = await getWebsiteSummary(context, "28d");
 
+    // Both windows hold a row: the previous one measured zero key events.
+    expect(summary.ga4.previous.sessions).toBe(50);
+    expect(summary.ga4.current.sessions).toBe(90);
     // Previous key events were measured as zero, so this is genuinely New.
     expect(summary.ga4.previous.keyEvents).toBe(0);
     expect(summary.changes.keyEvents.state).toBe("new");
